@@ -10,6 +10,8 @@ import { debugLog } from '../core/debug.js';
 
 const CODEX_MODELS = [
   'gpt-6-astra',
+  'gpt-6-sol',
+  'gpt-6-luna',
   'gpt-5.6-sol',
   'gpt-5.6-terra',
   'gpt-5.6-luna',
@@ -27,6 +29,8 @@ const CODEX_MODELS = [
  * ★ 2026-09-05 依 codex-cli 0.151.0 的 `~/.codex/models_cache.json` 對照：
  *   gpt-6-astra / gpt-5.6-sol / gpt-5.6-terra 提供 low…ultra 六級，gpt-5.6-luna
  *   到 max，gpt-5.5 / gpt-5.4-mini / gpt-5.3-codex-spark 仍只到 xhigh。
+ *   2026-09-26 依 codex-cli 0.155.1 的同一份快取補：gpt-6-sol 到 ultra、gpt-6-luna
+ *   到 max（聯集不變，所以這個 Set 不用動）。
  *
  *   這裡收的是**聯集**，不按模型細分：這份清單是靜態後備值（見 types.ts 的
  *   ModelListSource），逐模型寫死只會多一份更容易過時的表；模型不支援的級別

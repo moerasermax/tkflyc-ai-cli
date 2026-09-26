@@ -8,6 +8,26 @@
 
 ## [Unreleased]
 
+### 新增（GPT-6 Sol 與 GPT-6 Luna）
+
+- **codex 清單補上 `gpt-6-sol` 與 `gpt-6-luna`**，依 vendor 的 priority 排在 `gpt-6-astra` 後面。
+  名稱與能力來自 codex-cli 0.155.1 的 `~/.codex/models_cache.json`（2026-09-26）：兩者都是 text + image
+  輸入、CLI 預設 effort medium；`gpt-6-sol`（"Workhorse model for coding and everyday work"）到 `ultra`，
+  `gpt-6-luna`（"Fast and affordable model for easier tasks"）到 `max`。（Claude，moerasermax 指示）
+  - 補之前它們就派得動：`gpt-` 前綴本來就路由到 codex，只是 `models` 不把它們當候選講出來——
+    和 issue #12 的 `fable` 同一種情況。實跑：`gpt-6-sol` + `ultra`、`gpt-6-luna` + `max` 都 exit 0 並照指示回答。
+  - 只在 codex-cli 0.155.1 驗過，更舊的 CLI 沒測；`run` 的 `model` 參數描述照實寫了這一點。
+- `verify-alias-config.mjs` 第 3c 節新增 6 條（兩個模型各「列在清單」「路由到 codex」，加上
+  sol + ultra、luna + max 真的送進指令）；`tools/mutations.json` 新增 2 個突變（把兩個名稱從清單拿掉）。（Claude）
+
+### 修正（`reasoning_effort` 描述對「不支援的組合」的說法）
+
+- `run` 的 `reasoning_effort` 描述原本寫「不支援的組合由 codex CLI 自己拒絕」，這句兩個方向都不成立：
+  `gpt-5.5` + `max` 是 API 回 HTTP 400（2026-09-09 已查明，不是 CLI 本地拒絕），而 2026-09-26 實跑
+  `gpt-6-luna` + `ultra`——vendor 目錄說它只到 `max`——**exit 0、正常回答**，沒有任何錯誤。
+  改寫成「不可靠地被拒絕；exit 0 不代表那個等級真的生效」，並把 gpt-6 兩個新成員放進能力說明。
+  程式行為沒改：codex 端仍收六級聯集、不按模型細分。（Claude）
+
 ### 新增（`models` 不再假裝自己是可派工模型的全集）— issue #12
 
 - **`claude` 清單補上 `fable`**（`claude-fable-5`，放在最前代表最新一代）。

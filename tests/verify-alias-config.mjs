@@ -487,6 +487,25 @@ async function main(baseConfig) {
     !!built.cmd && built.cmd.args.includes('model_reasoning_effort=max'),
     built.error ?? JSON.stringify(built.cmd.args)
   );
+  // 2026-09-26 補的兩個 GPT-6 家族成員（codex-cli 0.155.1 的 models_cache.json）：
+  // sol 到 ultra、luna 到 max。清單與路由是兩件事——`gpt-` 前綴本來就會路由到 codex，
+  // 清單管的是「models 有沒有把它當候選講出來」，所以兩件都要釘。
+  for (const model of ['gpt-6-sol', 'gpt-6-luna']) {
+    check(`${model} 列在已知模型清單`, catalog.listKnownModels().includes(model));
+    check(`${model} 路由到 codex`, catalog.resolveAgentIdForModel(model) === 'codex');
+  }
+  built = tryBuild('gpt-6-sol', 'ultra');
+  check(
+    'gpt-6-sol 明確指定 ultra 會送出 --model gpt-6-sol 與 model_reasoning_effort=ultra',
+    !!built.cmd && built.cmd.args.includes('gpt-6-sol') && built.cmd.args.includes('model_reasoning_effort=ultra'),
+    built.error ?? JSON.stringify(built.cmd.args)
+  );
+  built = tryBuild('gpt-6-luna', 'max');
+  check(
+    'gpt-6-luna 明確指定 max 會送出 --model gpt-6-luna 與 model_reasoning_effort=max',
+    !!built.cmd && built.cmd.args.includes('gpt-6-luna') && built.cmd.args.includes('model_reasoning_effort=max'),
+    built.error ?? JSON.stringify(built.cmd.args)
+  );
   let claudeErr = '';
   try {
     buildWith('sonnet', 'ultra');
