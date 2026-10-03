@@ -28,7 +28,12 @@ async function runAndWait(model, prompt, timeout) {
 }
 
 let failures = 0;
-for (const [model, to] of [['haiku', 90], ['gpt-5.4-mini', 120], ['agy', 150]]) {
+// codex 這一顆原本是 gpt-5.4-mini：2026-10-03 已不在 vendor 目錄，當日實測回
+// HTTP 400 not supported when using Codex with a ChatGPT account，而這支腳本燒的是
+// 真實額度，留著只會穩定失敗。換成 gpt-6-luna——vendor 自己的定位是
+// "Fast and affordable model for easier tasks"。（目錄沒有價格欄位，所以這裡
+// 只照抄 vendor 的定位，不宣稱它是最便宜的那一顆。）
+for (const [model, to] of [['haiku', 90], ['gpt-6-luna', 120], ['agy', 150]]) {
   log(`--- ${model} ---`);
   try {
     const r = await runAndWait(model, 'Reply with exactly one word: PONG', to);

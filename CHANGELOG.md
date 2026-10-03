@@ -8,6 +8,118 @@
 
 ## [Unreleased]
 
+### 新增（codex 清單對回 vendor 現況：補 GPT-6.1 Sol、移出五個已下架名稱）
+
+- **codex 清單補上 `gpt-6.1-sol`**，依 vendor 的 `priority` 排在最前（priority 1）。
+  來源是 codex-cli 0.160.0 所用的 `~/.codex/models_cache.json`：`"Latest workhorse model for
+  coding and everyday work"`、effort 到 `ultra`、**CLI 端預設 `low`**。實跑 `gpt-6.1-sol` + `low`
+  exit 0 正常回答。補之前它就派得動（`gpt-` 前綴本來就路由到 codex），只是 `models` 不把它
+  當候選講出來——和 `fable`（issue #12）、`gpt-6-sol`/`gpt-6-luna` 同一種情況。（Claude，moerasermax 指示）
+- **`codex-ultra` 刻意不改**，仍指向 `gpt-6-astra`。**vendor 的 `priority` 不是能力排名**：
+  `gpt-6.1-sol` 是 priority 1，但它的定位是 workhorse，而 vendor 自己的推薦文案寫
+  `"near-Astra performance at a lower cost"`——「接近 astra」不是「超過 astra」。
+  旗艦仍是 `gpt-6-astra`（`"Frontier intelligence for the most demanding work"`）。
+  測試裡釘了這一條，避免日後有人因為「有更新的名字」就把 alias 改指過去。（Claude）
+- `KNOWN_BAD_MODELS` 新增 `gpt-5.5`：vendor 的 `upgrade` 欄位標明 **2026-10-14T19:00Z 退役**、
+  建議改用 `gpt-6.1-sol`。退役前仍可派，effort 仍只到 `xhigh`。（Claude）
+- `verify-alias-config.mjs` 第 3c 節新增 22 條；`tools/mutations.json` 新增 5 個突變
+  （92 → 97），其中一個是反向突變：把「移出清單」誤做成「擋下路由」。（Claude）
+
+### 移除（五個已不在 vendor 目錄的 codex 候選名稱）
+
+- **`gpt-5.4` / `gpt-5.4-mini` / `gpt-5.3-codex` / `gpt-5.3-codex-spark` / `gpt-5.2`
+  從 `CODEX_MODELS` 移出**，停止把它們當候選廣告出去。（Claude）
+  - **移出清單不等於擋下來。** `matchesModel` 是 `startsWith('gpt-')`，明確指定這些名稱
+    仍然會被路由到 codex，也**仍然設得成 alias target**。測試對這五個各釘三條
+    （不在清單／仍路由到 codex／仍設得成 alias target），把兩件事分開。
+  - 依照既有結論**沒有**把它們放進 `REMOVED_MODELS`：`removedModelMessage()` 的文案固定
+    指向 Kiro／Forge，塞進去會回一個不相干的錯誤。要真的擋得另建 tombstone。
+  - 2026-10-03 五顆**各實測一個 trivial job**：全部 `exitCode 1`，CLI 先印
+    `Model metadata for <name> not found.`（退回 fallback metadata），接著 API 回 HTTP 400
+    `The '<name>' model is not supported when using Codex with a ChatGPT account.`
+    **與 2026-09-05 的錯誤原文一字不差**，所以「帳號層級擋下」這個歸因仍然成立，
+    「不在 vendor 目錄」只是同一件事的另一面（這份目錄是依帳號給的）。
+    2026-09-11 知識庫記下的「舊歸因存疑、不能斷言是哪一種失敗」到此結案。（Claude）
+- `gpt-reserve` 與 `codex-auto-review` **沒有**被加進清單：vendor 標 `visibility: "hide"`，
+  它自己就不對外列出。`hide` 只證明「不列出」，所以註解沒寫成「只供 CLI 內部使用」——
+  那兩顆的實際用途沒有實測。（Claude）
+
+### 變更
+
+- `run` 的 `reasoning_effort` 描述加入 `gpt-6.1-sol`，並補一句**各模型 CLI 端預設 effort 不同**
+  （`gpt-6.1-sol` 與 `gpt-5.6-sol` 預設 `low`，其餘 `medium`），所以「不傳這個欄位」在不同模型
+  之間不是同一件事。（Claude）
+- `run` 的 `model` 參數描述寫明 `gpt-6.1-sol` 不是旗艦、以及五個名稱為什麼被移出、
+  移出之後行為是什麼。（Claude）
+- `verify-e2e.mjs` 的 codex 那一顆從已下架的 `gpt-5.4-mini` 換成 `gpt-6-luna`。
+  這支腳本燒真實額度，留著只會穩定失敗。（Claude）
+- `tools/hooks/aicli-model-policy.py` 的派工指引更新：五個名稱的現況與實測錯誤原文、
+  「最新不等於最強」、`gpt-5.5` 退役日期；順帶把 DashScope 免費額度那行從未來式
+  （「2026-09-30 到期」）改成「該日已過，派之前先確認」。（Claude）
+- 原始碼註解不再引用 `models_cache.json` 的 `fetched_at` 到「分」：那個欄位每隔幾分鐘就被
+  重抓一次，寫死就會自我作廢。改為記「2026-10-03 當日讀三次（01:01Z／02:04Z／02:13Z，
+  中間一次是稽核者讀的）**10 筆內容完全相同**」——證明的是目錄內容穩定，不是某一次快照。（Claude）
+
+### 修正
+
+- **`modelListCaveat.notAnAllowlist` 對 `isKnownModelTarget()` 的描述是錯的。**
+  原本寫「`set_config` 設定 alias target 走的是 `isKnownModelTarget()`，那裡**是**白名單，
+  所以派得動的名稱不一定設得成 alias——兩個介面對『認不認得』的語意相反」。
+  讀程式碼：它**不是純白名單**——清單命中算，而「非 `claude` 的 agent 的 `matchesModel` 命中」
+  也算。所以任何 `gpt-*` 即使不在清單裡也設得成 alias（既有斷言 `isKnownModelTarget('gpt-9-future')`
+  就釘著這件事）。真正被擋的是「只靠 `claude` catch-all 才跑得起來」的名稱（例如
+  `claude-sonnet-4-6`）、**alias 名稱本身**（`run` 會展開 alias，這裡一律拒絕，所以連
+  `codex-ultra` 都不能當 target），以及已移除模型。這次移出五個 `gpt-*` 名稱會讓原本那句
+  更容易被誤讀成「這五個再也不能當 alias target」，所以一併改掉。（Claude）
+- **`src/agents/codex.ts` 的 reasoning 註解還留著 8d262b6 已經推翻的那句**
+  （「模型不支援的級別由 codex CLI 自己拒絕，錯誤訊息會原樣回到呼叫端」）。
+  那次只改了 `mcp.ts` 的工具描述，漏了這段註解——於是同一個 repo 裡兩處對同一件事的說法相反。
+  改成寫出實測：`gpt-5.5` + `max` 是**建完 thread 與 turn 之後**才收到 API HTTP 400（不是 CLI
+  本地拒絕），而 `gpt-6-luna` + `ultra`（vendor 說它只到 `max`）exit 0、正常回答、完全不報錯。（Claude）
+- **突變測試抓到一個自己造成的假綠燈。** 斷言「caveat 要講出 catch-all 這個機制」原本只檢查
+  `notAnAllowlist` 含不含 `catch-all` 或 `fallback` 這兩個關鍵字；而上面那筆 caveat 改寫在
+  **另一句**（講 `set_config` 的那段）寫進了「catch-all」三個字——於是既有突變
+  「把講機制的那一行換成『這份清單可能不完整。』」當場 **SURVIVED**：關鍵字被另一句餵飽，
+  斷言分不出機制還在不在。改成同時要求 `matchesModel`，才真的釘在「說出機制」而不是
+  「出現某個詞」。修完該突變回到 KILLED。（Claude）
+
+### 稽核紀錄（CONTRIBUTING §5.1）
+
+- **稽核者**：`gpt-6-astra` + `reasoning_effort: high`，經 `mcp__ai-cli__run` 的嚴格唯讀模式
+  （`capabilities: ["fs/read","analysis/produce"]` → `codex --sandbox read-only --ignore-user-config`）。
+  刻意不用 Claude：同一家的模型會犯同一種錯。給它的事實來源是從 `models_cache.json` 萃取的
+  欄位清單 + 268 行 unified diff，並要求逐條回原始碼驗證。
+- **第二位稽核者沒有交付**：`gemini-3.1-pro-high` 同時派出，跑了 7 分鐘只吐出一行
+  `warning: --mode plan has no effect...`、其餘 0 bytes，之後 ai-cli MCP 連線中斷，結果取不回來。
+  **所以這次只有一位稽核者。** 不把它算成「兩路都通過」。
+- **判定成立並已修（3 項，皆低嚴重度）**：
+  1. 註解引用的 `fetched_at` 與事實檔不符——稽核者讀到的是 `02:04Z`，我寫的是 `01:01Z`。
+     根因是這個欄位會被反覆重抓，不是任何一方讀錯。改成不引用到「分」（見「變更」最後一條）。
+  2. 「移出的五個裡**只有** `gpt-5.3-codex-spark` 曾是 xhigh 上限的依據」與同段上一行自相矛盾：
+     `gpt-5.4-mini` 也在那一行裡。已改成兩個都列，並補上「`gpt-5.5` 仍在清單裡也仍只到 xhigh」。
+  3. 「兩個介面的差別**只在** claude 那一段」說得過頭：`isKnownModelTarget()` 對內建 alias
+     一律回 `false`，而 `run` 會展開 alias，所以 `codex-ultra` 就是非 claude 的反例。已改。
+- **判定成立並已修（2 項，稽核者標為「待確認」）**：
+  4. 「不在 vendor 目錄」不足以證明「指名後必定失敗」——當時手上只有目錄缺席，沒有呼叫結果。
+     **沒有改成模糊措辭，而是補做實測**：五顆各派一個 trivial job，拿到上面那段 HTTP 400 原文。
+  5. `verify-e2e.mjs` 註解寫 `gpt-6-luna` 是「這三家裡最便宜的」——目錄沒有價格欄位，
+     這個最高級沒有證據。已改成只照抄 vendor 的定位。
+  - 同一項裡 `visibility: "hide"` 「不能單獨證明只供 CLI 內部使用」也成立，註解已改。
+- **稽核者查過並判定沒問題的範圍**（記下來才知道哪些被覆蓋到）：八個可見模型的 slug／排序／
+  effort 上限／預設 effort 與事實檔逐欄吻合；`gpt-5.5` 退役時間與升級目標正確；英文引用是原文
+  連續片段；維持 `codex-ultra → gpt-6-astra` 有依據；移出五個名稱後的路由與 alias target 行為
+  主張成立；22 條新斷言沒有恆真；5 個突變的 `from` 片段都存在、`expect` 都是對應斷言名稱的子字串；
+  清單縮短的影響面已 grep（catalog-v2 條目、MCP／CLI 候選、模型描述、設定錯誤提示會跟著變，
+  `doctor` 只讀 binary 設定，**沒有**程式依賴 codex 清單的固定長度或索引）。
+- **稽核者自己標明的限制**（不當成已驗證）：它對突變只做靜態核對，**沒有**宣稱實跑出 KILLED
+  （實跑由 harness 負責，見下）；`remains the strongest` 應理解為依 vendor 產品定位的推論，
+  不是全面效能實測；該 session 沒有 Knowledge／Planner 工具可用。
+- **我判定不成立／不採納的**：`README.zh-TW.md:583` 提到 `gpt-5.4-mini` 的啟動速度。
+  那是一筆**標明日期與受測者的 2026-09-05 歷史量測**，不是「現在可用」的宣稱，稽核者也獨立
+  得到同一結論，所以不改。（若要改，正確做法是補一句「該模型已下架、此量測無法重現」，
+  但那超出這次範圍，留給使用者決定。）
+
+
 ### 新增（GPT-6 Sol 與 GPT-6 Luna）
 
 - **codex 清單補上 `gpt-6-sol` 與 `gpt-6-luna`**，依 vendor 的 priority 排在 `gpt-6-astra` 後面。

@@ -706,5 +706,45 @@
     "to": "  'gpt-6-luna-mutated',",
     "expect": "gpt-6-luna 列在已知模型清單",
     "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "codex 清單漏掉 gpt-6.1-sol（models 不再把 vendor priority 1 當候選）",
+    "file": "src/agents/codex.ts",
+    "from": "  'gpt-6.1-sol',",
+    "to": "  'gpt-6.1-sol-mutated',",
+    "expect": "gpt-6.1-sol 列在已知模型清單",
+    "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "清單沒依 vendor priority 排（gpt-6-astra 排到 gpt-6.1-sol 之前）",
+    "file": "src/agents/codex.ts",
+    "from": "  'gpt-6.1-sol',\n  'gpt-6-astra',",
+    "to": "  'gpt-6-astra',\n  'gpt-6.1-sol',",
+    "expect": "codex 清單依 vendor priority 把 gpt-6.1-sol 排在 gpt-6-astra 之前",
+    "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "已下架的 gpt-5.4 被加回清單（又開始當候選廣告出去）",
+    "file": "src/agents/codex.ts",
+    "from": "  'gpt-5.5',",
+    "to": "  'gpt-5.5',\n  'gpt-5.4',",
+    "expect": "gpt-5.4 已不在已知模型清單",
+    "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "vendor 標 visibility:hide 的 gpt-reserve 被加進對外候選清單",
+    "file": "src/agents/codex.ts",
+    "from": "const CODEX_MODELS = [\n  'gpt-6.1-sol',",
+    "to": "const CODEX_MODELS = [\n  'gpt-reserve',\n  'gpt-6.1-sol',",
+    "expect": "gpt-reserve 不列在已知模型清單",
+    "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "把「移出清單」誤做成「擋下路由」：gpt- 前綴縮成 gpt-6",
+    "file": "src/agents/codex.ts",
+    "from": "  matchesModel: (model) => model === 'codex' || model.startsWith('gpt-'),",
+    "to": "  matchesModel: (model) => model === 'codex' || model.startsWith('gpt-6'),",
+    "expect": "gpt-5.4 移出清單後仍路由到 codex（移除不等於擋下）",
+    "script": "verify-alias-config.mjs"
   }
 ]

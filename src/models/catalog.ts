@@ -161,8 +161,21 @@ export const KNOWN_BAD_MODELS: ReadonlyArray<{ model: string; reason: string }> 
     reason: '工具迴圈要 91 秒。純文字（prompt 開頭加 [no-tools]）14 秒還可以。',
   },
   {
-    model: 'gpt-5.4 / gpt-5.3-codex / gpt-5.2',
-    reason: '這個 ChatGPT 帳號被擋（not supported when using Codex with a ChatGPT account）。靜態清單還留著而已。',
+    model: 'gpt-5.4 / gpt-5.4-mini / gpt-5.3-codex / gpt-5.3-codex-spark / gpt-5.2',
+    reason:
+      '2026-10-03 已不在 vendor 目錄（~/.codex/models_cache.json），同日也從 codex 候選清單移除。'
+      + '同日五顆各實測一個 trivial job：全部 exitCode 1，CLI 先印 Model metadata for <name> '
+      + 'not found（退回 fallback metadata），接著 API 回 HTTP 400 '
+      + "The '<name>' model is not supported when using Codex with a ChatGPT account"
+      + '——與 2026-09-05 的錯誤原文相同，所以「帳號層級擋下」這個歸因仍然成立，'
+      + '「不在目錄」只是同一件事的另一面（目錄是依帳號給的）。'
+      + "移出清單不等於擋下：matchesModel 是 startsWith('gpt-')，明確指定仍會送到 codex 然後收到上面那個 400。",
+  },
+  {
+    model: 'gpt-5.5',
+    reason:
+      'vendor 目錄的 upgrade 欄位標明 2026-10-14T19:00Z 退役，建議改用 gpt-6.1-sol；'
+      + '退役前仍可派，但 effort 只到 xhigh（傳 max 會收到 API HTTP 400——沿用 2026-09-09 的實測，本次未重測）。',
   },
 ];
 
@@ -185,8 +198,14 @@ export const MODEL_LIST_CAVEAT = {
     + '其他 agent 認領的，就原樣交給 claude CLI 的 --model——只要 vendor CLI 認得那個名字'
     + '就跑得起來，清單有沒有列它無關。查不到某個名稱時，先直接派派看，不要當成「不支援」'
     + '（已移除的 kiro / forge 例外，那幾個會明確報錯，不是靜默落到 claude）。'
-    + '⚠️ 這條只適用於 run：set_config 設定 alias target 走的是 isKnownModelTarget()，'
-    + '那裡**是**白名單，所以派得動的名稱不一定設得成 alias——兩個介面對「認不認得」的語意相反。',
+    + '⚠️ set_config 設定 alias target 走的是另一條路 isKnownModelTarget()，但它**不是純白名單**：'
+    + '清單命中算，而「非 claude 的 agent 的 pattern 命中」也算。所以任何 gpt-* 即使不在清單裡'
+    + '也設得成 alias；真正被擋的是「只靠 claude catch-all 才跑得起來」的名稱'
+    + '（例如 claude-sonnet-4-6）、alias 名稱本身，以及已移除模型。'
+    + '所以兩個介面的差別不是「整體語意相反」：未知名稱的差異集中在 claude catch-all 那一段，'
+    + '而 alias 名稱本身是另一個獨立差異——run 會展開 alias，isKnownModelTarget() 卻一律拒絕，'
+    + '所以連 codex-ultra 這種非 claude 的 alias 也不能當 alias target（避免只解析一層造成'
+    + '名稱被原樣送進 CLI）。',
   notAGuarantee:
     '反方向同樣不成立：列在清單裡不代表此刻能用。vendor 會下架模型，帳號層級也可能擋下。'
     + '已知的例子見 knownBadModels，但那份清單同樣是人工維護的，不會自動跟上。',
@@ -332,7 +351,7 @@ export function getModelParameterDescription(): string {
     .map((m) => `"${m}"`)
     .join(
       ', '
-    )}. "gpt-6-astra" (and therefore "codex-ultra") needs codex-cli 0.153 or newer; 0.151 is rejected by the API with "requires a newer version of Codex". "gpt-6-sol" and "gpt-6-luna" were verified on codex-cli 0.155.1; older CLIs are untested. direct-api accepts provider-prefixed models using "or-<model>" for OpenRouter, "ds-<model>" for DashScope, or "<provider>-<model>" for any provider key configured in ~/.local/share/ai-cli/providers.json — this is how you connect a third-party OpenAI-compatible API yourself. A name like "forge-<model>" is therefore read as provider "forge" plus a model, not as the removed Forge CLI. Antigravity (agy) accepts model selection: the name is normalized to an agy model id and passed as --model, while "agy" and "agy-default" pass nothing and fall back to the agy CLI's own default. agy carries the reasoning level in the model id itself (-high / -medium / -low), which is why reasoning_effort is not accepted for it. The Kiro and Forge agents were removed in 5.0.0 — their model names are now rejected with an explicit error rather than silently falling back to Claude.`;
+    )}. "gpt-6-astra" (and therefore "codex-ultra") needs codex-cli 0.153 or newer; 0.151 is rejected by the API with "requires a newer version of Codex". "gpt-6-sol" and "gpt-6-luna" were verified on codex-cli 0.155.1; older CLIs are untested. "gpt-6.1-sol" is the vendor catalog's current priority-1 entry ("Latest workhorse model for coding and everyday work") and was verified on codex-cli 0.160.0; it is NOT the flagship — the vendor's own copy calls it "near-Astra performance at a lower cost", so "gpt-6-astra" ("Frontier intelligence for the most demanding work") remains the strongest. "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark" and "gpt-5.2" were dropped from the candidate list on 2026-10-03 because they are no longer in the vendor catalog; a probe of all five on that date returned HTTP 400 "The '<name>' model is not supported when using Codex with a ChatGPT account", the same wording as in 2026-09-05. Dropping a name only stops advertising it and does NOT block it, since the "gpt-" prefix still routes an explicitly named model to codex — where it then hits that 400. direct-api accepts provider-prefixed models using "or-<model>" for OpenRouter, "ds-<model>" for DashScope, or "<provider>-<model>" for any provider key configured in ~/.local/share/ai-cli/providers.json — this is how you connect a third-party OpenAI-compatible API yourself. A name like "forge-<model>" is therefore read as provider "forge" plus a model, not as the removed Forge CLI. Antigravity (agy) accepts model selection: the name is normalized to an agy model id and passed as --model, while "agy" and "agy-default" pass nothing and fall back to the agy CLI's own default. agy carries the reasoning level in the model id itself (-high / -medium / -low), which is why reasoning_effort is not accepted for it. The Kiro and Forge agents were removed in 5.0.0 — their model names are now rejected with an explicit error rather than silently falling back to Claude.`;
 }
 
 /** 所有 agent 宣告的 model 名稱（不含 direct-api 的動態 provider-prefixed 名稱）。 */

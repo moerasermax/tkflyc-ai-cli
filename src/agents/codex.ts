@@ -8,19 +8,47 @@ import { join } from 'node:path';
 import type { AgentDefinition, BuildCommandInput, BuiltCommand } from './types.js';
 import { debugLog } from '../core/debug.js';
 
+/**
+ * codex 的候選 model 名稱，依 vendor 目錄的 `priority` 排序。
+ *
+ * ★ 2026-10-03 依 codex-cli 0.160.0 所用的 `~/.codex/models_cache.json` 對過。
+ *   不寫死 `fetched_at`：那個欄位每隔幾分鐘就被重抓一次，寫到「分」只會自我作廢。
+ *   同日讀了三次（01:01Z / 02:04Z / 02:13Z，中間一次是稽核者讀的），**10 筆內容
+ *   完全相同**（slug、priority、visibility、effort 清單、upgrade 都一樣），所以
+ *   下面講的是目錄內容而不是某一次快照。
+ *   （`client_version` 欄位寫 0.159.0，比 PATH 上的 0.160.0 舊一號——那是寫入快取
+ *   的版本，不能用來斷定本機 CLI 版本，兩者要分開看。）
+ *   - 補 `gpt-6.1-sol`（priority 1，"Latest workhorse model for coding and
+ *     everyday work"）。它不是旗艦——vendor 自己的推薦文案寫 "near-Astra
+ *     performance at a lower cost"，所以最強仍是 `gpt-6-astra`
+ *     （priority 2，"Frontier intelligence for the most demanding work"）。
+ *   - 移除 `gpt-5.4` / `gpt-5.4-mini` / `gpt-5.3-codex` / `gpt-5.3-codex-spark`
+ *     / `gpt-5.2`：這五個已經不在 vendor 目錄裡。**移除只是停止把它們當候選
+ *     廣告出去，不等於擋下來**——`matchesModel` 是 `startsWith('gpt-')`，
+ *     明確指定這些名稱仍然會被路由到 codex。2026-10-03 五顆各派一個 trivial
+ *     job 實測：全部 exitCode 1，CLI 先印 `Model metadata for <name> not found.
+ *     Defaulting to fallback metadata`，接著 API 回 HTTP 400
+ *     `The '<name>' model is not supported when using Codex with a ChatGPT
+ *     account.`——與 2026-09-05 的錯誤原文一字不差。也就是說「不在目錄」與
+ *     「帳號層級擋下」是同一件事的兩面（這份目錄是依帳號給的），2026-09-11
+ *     知識庫記的「舊歸因存疑」到此可以結案。
+ *     要真的擋，得另建帶原因與證據日期的 tombstone，不可塞進 REMOVED_MODELS
+ *     （`removedModelMessage()` 的文案固定指向 Kiro／Forge）。
+ *   - 不收 `gpt-reserve` 與 `codex-auto-review`：vendor 標 `visibility: "hide"`，
+ *     也就是**它自己就不對外列出**，所以我們的候選清單也不列。
+ *     （`hide` 只證明不列出；這兩顆實際用途沒有實測，不要寫成「只供 CLI 內部使用」。）
+ *   - `gpt-5.5` 留著，但 vendor 的 `upgrade` 欄位標明 2026-10-14T19:00Z 退役、
+ *     建議改用 `gpt-6.1-sol`（見 catalog.ts 的 KNOWN_BAD_MODELS）。
+ */
 const CODEX_MODELS = [
+  'gpt-6.1-sol',
   'gpt-6-astra',
   'gpt-6-sol',
   'gpt-6-luna',
   'gpt-5.6-sol',
   'gpt-5.6-terra',
   'gpt-5.6-luna',
-  'gpt-5.4',
   'gpt-5.5',
-  'gpt-5.4-mini',
-  'gpt-5.3-codex',
-  'gpt-5.3-codex-spark',
-  'gpt-5.2',
 ] as const;
 
 /**
@@ -31,10 +59,19 @@ const CODEX_MODELS = [
  *   到 max，gpt-5.5 / gpt-5.4-mini / gpt-5.3-codex-spark 仍只到 xhigh。
  *   2026-09-26 依 codex-cli 0.155.1 的同一份快取補：gpt-6-sol 到 ultra、gpt-6-luna
  *   到 max（聯集不變，所以這個 Set 不用動）。
+ *   2026-10-03 依 codex-cli 0.160.0 所用的同一份快取補：gpt-6.1-sol 到 ultra、
+ *   CLI 端預設 low（聯集仍不變）。同日移出清單的五個舊名稱裡，gpt-5.4-mini 與
+ *   gpt-5.3-codex-spark 都曾是上面那行 xhigh 上限的依據，但 Set 收的是聯集、
+ *   gpt-5.5 仍在清單裡也仍只到 xhigh，所以這個 Set 一樣不用動。
  *
  *   這裡收的是**聯集**，不按模型細分：這份清單是靜態後備值（見 types.ts 的
- *   ModelListSource），逐模型寫死只會多一份更容易過時的表；模型不支援的級別
- *   由 codex CLI 自己拒絕，錯誤訊息會原樣回到呼叫端。
+ *   ModelListSource），逐模型寫死只會多一份更容易過時的表。
+ *
+ *   ⚠️ 不要把「不支援的級別由 codex CLI 自己拒絕」寫回來——這句 2026-09-26 已被
+ *   實測推翻兩次，但當時只改了 mcp.ts 的工具描述，漏了這段註解：
+ *   gpt-5.5 + max 是**建完 thread 與 turn 之後**才收到 API HTTP 400（不是 CLI
+ *   本地拒絕），而 gpt-6-luna + ultra（vendor 目錄說它只到 max）**exit 0、正常
+ *   回答，完全不報錯**。所以 exit 0 不證明那個等級生效，要驗只能看行為。
  */
 const CODEX_REASONING = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 

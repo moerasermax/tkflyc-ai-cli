@@ -165,10 +165,20 @@ async function main(baseConfig) {
       JSON.stringify(p.modelListCaveat)
     );
     check(
-      '★ caveat 要講出 catch-all 這個機制，不能只說「可能不完整」',
+      '★ caveat 要講出 catch-all 這個機制（含 matchesModel 永遠回 true），不能只說「可能不完整」',
       // 這裡必須用 ?.：欄位消失正是上一條在守的回歸，直接取值會 TypeError 讓整支中斷，
       // 後面的斷言一條都不會跑，而 harness 只看 stdout 有沒有 FAIL 行，看不出這件事。
-      Boolean(p.modelListCaveat?.notAnAllowlist?.includes('catch-all') || p.modelListCaveat?.notAnAllowlist?.includes('fallback')),
+      //
+      // ★ 為什麼要同時要求 'matchesModel'：原本只檢查有沒有 'catch-all' 或 'fallback'
+      //   這兩個關鍵字，而 2026-10-03 改寫 notAnAllowlist 時在**另一句**（講 set_config
+      //   的那段）寫進了「catch-all」三個字——於是「把講機制那一行換成『這份清單可能
+      //   不完整』」的突變當場 SURVIVED：關鍵字被另一句餵飽，斷言分不出機制還在不在。
+      //   改成連 'matchesModel' 一起要求，才真的釘在「說出機制」而不是「出現某個詞」。
+      Boolean(
+        p.modelListCaveat?.notAnAllowlist?.includes('matchesModel') &&
+          (p.modelListCaveat?.notAnAllowlist?.includes('catch-all') ||
+            p.modelListCaveat?.notAnAllowlist?.includes('fallback'))
+      ),
       p.modelListCaveat?.notAnAllowlist
     );
     // fable 是實際踩到的那一筆：claude --help 列它是合法別名，實測派得動。
@@ -506,6 +516,50 @@ async function main(baseConfig) {
     !!built.cmd && built.cmd.args.includes('gpt-6-luna') && built.cmd.args.includes('model_reasoning_effort=max'),
     built.error ?? JSON.stringify(built.cmd.args)
   );
+  // 2026-10-03 依 codex-cli 0.160.0 所用的 models_cache.json：補 priority 1 的
+  // gpt-6.1-sol，並把五個已不在 vendor 目錄的舊名稱移出清單。
+  // （不引用 fetched_at：那個欄位每隔幾分鐘就被重抓。當日讀三次內容相同。）
+  check('gpt-6.1-sol 列在已知模型清單', catalog.listKnownModels().includes('gpt-6.1-sol'));
+  check('gpt-6.1-sol 路由到 codex', catalog.resolveAgentIdForModel('gpt-6.1-sol') === 'codex');
+  built = tryBuild('gpt-6.1-sol', 'ultra');
+  check(
+    'gpt-6.1-sol 明確指定 ultra 會送出 --model gpt-6.1-sol 與 model_reasoning_effort=ultra',
+    !!built.cmd && built.cmd.args.includes('gpt-6.1-sol') && built.cmd.args.includes('model_reasoning_effort=ultra'),
+    built.error ?? JSON.stringify(built.cmd.args)
+  );
+  // 清單依 vendor priority 排序：gpt-6.1-sol 是 priority 1，排在 gpt-6-astra 之前。
+  {
+    const codexNames = catalog.listKnownModels().filter((m) => m.startsWith('gpt-'));
+    check(
+      'codex 清單依 vendor priority 把 gpt-6.1-sol 排在 gpt-6-astra 之前',
+      codexNames.indexOf('gpt-6.1-sol') >= 0 &&
+        codexNames.indexOf('gpt-6.1-sol') < codexNames.indexOf('gpt-6-astra'),
+      JSON.stringify(codexNames)
+    );
+  }
+  // ★ 排序 ≠ 強度。gpt-6.1-sol 是 vendor 的 priority 1，但它是 workhorse
+  //   （"near-Astra performance at a lower cost"），旗艦仍是 gpt-6-astra。
+  //   所以 codex-ultra 不可以因為「有更新的名字」就改指過去。
+  check(
+    'codex-ultra 仍指向旗艦 gpt-6-astra，不因 gpt-6.1-sol 較新而改指',
+    catalog.resolveModelAlias('codex-ultra') === 'gpt-6-astra',
+    catalog.resolveModelAlias('codex-ultra')
+  );
+  // vendor 標 visibility: "hide" 的內部條目不該出現在對外候選清單。
+  for (const hidden of ['gpt-reserve', 'codex-auto-review']) {
+    check(
+      `${hidden} 不列在已知模型清單（vendor 標 visibility: hide）`,
+      !catalog.listKnownModels().includes(hidden)
+    );
+  }
+  // ★ 移出清單 ≠ 擋下來。這五個已不在 vendor 目錄，所以不再當候選廣告出去，
+  //   但 matchesModel 是 startsWith('gpt-')，明確指定仍然會路由到 codex，
+  //   也仍然設得成 alias target。兩件事分開釘，避免日後有人誤以為移除就等於封鎖。
+  for (const gone of ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.3-codex-spark', 'gpt-5.2']) {
+    check(`${gone} 已不在已知模型清單`, !catalog.listKnownModels().includes(gone));
+    check(`${gone} 移出清單後仍路由到 codex（移除不等於擋下）`, catalog.resolveAgentIdForModel(gone) === 'codex');
+    check(`${gone} 移出清單後仍設得成 alias target`, catalog.isKnownModelTarget(gone));
+  }
   let claudeErr = '';
   try {
     buildWith('sonnet', 'ultra');
