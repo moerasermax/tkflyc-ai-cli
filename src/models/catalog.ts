@@ -108,9 +108,17 @@ export const DISPATCH_GUIDANCE: ReadonlyArray<{
 }> = [
   {
     situation: '日常派工',
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6.1-sol',
     reasoningEffort: 'high',
-    note: '先用便宜的配高推理強度。astra 最貴，不要一開始就用。',
+    note:
+      '先用便宜的配高推理強度。astra 最貴，不要一開始就用。'
+      + '（「最貴」來自使用者的派工政策；vendor 目錄沒有價格欄位，這一點不是從目錄推出來的。）'
+      + '2026-10-03 從 gpt-5.6-sol 換過來：vendor 已把 gpt-5.6-sol 標成 '
+      + '"Older generation workhorse model"，現行的是 gpt-6.1-sol（priority 1、'
+      + '"Latest workhorse model for coding and everyday work"），而且 vendor 自己的文案說它 '
+      + '"near-Astra performance at a lower cost"。'
+      + '⚠️ gpt-6.1-sol 的 CLI 端預設 effort 是 low（不是 medium），所以 effort 一定要明確傳，'
+      + '省略不等於拿到這裡建議的強度。',
   },
   {
     situation: '同一個問題卡超過 5 次',
@@ -121,7 +129,12 @@ export const DISPATCH_GUIDANCE: ReadonlyArray<{
   {
     situation: '稽核／第二意見',
     model: 'claude-ultra 或 gemini-3.1-pro-high',
-    note: '要換一家的視角才有意義；同一家的模型會犯同一種錯。結果要逐條驗證，不要照單全收。',
+    note:
+      '要換一家的視角才有意義；同一家的模型會犯同一種錯。結果要逐條驗證，不要照單全收。'
+      + '⚠️ gemini-3.1-pro-high 的交付率不穩：2026-09-09 通讀長文件撞過 agy 的 5 分鐘 print timeout，'
+      + '2026-10-03 派同一份稽核，430 秒後 stdout 累計只有 177 bytes（就是那一行 agy warning），'
+      + '之後 ai-cli MCP 連線中斷、結果再也取不回來。'
+      + '要兩路稽核就別把它當其中唯一一路，或先用一個小 job 確認它會回話。',
   },
   {
     situation: '大量低價值工作（分類、摘要、格式轉換、批次改寫）',

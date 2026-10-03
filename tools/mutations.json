@@ -561,9 +561,9 @@
   {
     "name": "日常派工建議改成一開始就用最貴的 astra（違反模型政策）",
     "file": "src/models/catalog.ts",
-    "from": "    model: 'gpt-5.6-sol',",
+    "from": "    model: 'gpt-6.1-sol',",
     "to": "    model: 'gpt-6-astra',",
-    "expect": "日常派工要 sol + high，不是一開始就 astra",
+    "expect": "日常派工建議與模型政策一致",
     "script": "verify-alias-config.mjs"
   },
   {
@@ -579,7 +579,7 @@
     "file": "src/models/catalog.ts",
     "from": "    dispatchGuidance: DISPATCH_GUIDANCE,",
     "to": "    dispatchGuidance: [],",
-    "expect": "呼叫端是 AI，建議表要在工具回傳裡",
+    "expect": "models 帶 dispatchGuidance",
     "script": "verify-alias-config.mjs"
   },
   {
@@ -745,6 +745,14 @@
     "from": "  matchesModel: (model) => model === 'codex' || model.startsWith('gpt-'),",
     "to": "  matchesModel: (model) => model === 'codex' || model.startsWith('gpt-6'),",
     "expect": "gpt-5.4 移出清單後仍路由到 codex（移除不等於擋下）",
+    "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "日常派工那一列的 situation 被改名（設定還在但不再是「日常派工」）",
+    "file": "src/models/catalog.ts",
+    "from": "    situation: '日常派工',",
+    "to": "    situation: '日常派工（舊）',",
+    "expect": "日常派工建議與模型政策一致",
     "script": "verify-alias-config.mjs"
   }
 ]

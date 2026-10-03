@@ -8,6 +8,89 @@
 
 ## [Unreleased]
 
+### 變更（`dispatchGuidance` 的「日常派工」換代為 GPT-6.1 Sol）
+
+- **`models` 的 `dispatchGuidance`「日常派工」從 `gpt-5.6-sol` 改成 `gpt-6.1-sol`**
+  （`reasoningEffort` 維持 `high`）。理由：vendor 已把 `gpt-5.6-sol` 標成
+  `"Older generation workhorse model"`，現行的是 priority 1 的 `gpt-6.1-sol`
+  （`"Latest workhorse model for coding and everyday work"`），而且 vendor 自己的文案說它
+  `"near-Astra performance at a lower cost"`——比舊的新、又比 astra 便宜，正好是這一列要的。
+  （Claude，moerasermax 指示）
+  - note 補一條警告：**`gpt-6.1-sol` 的 CLI 端預設 effort 是 `low`**（不是 `medium`），
+    所以省略 `reasoning_effort` 不等於拿到這裡建議的強度，一定要明確傳。
+  - note 同時標明「astra 最貴」這句**出自使用者的派工政策，不是從 vendor 目錄推出來的**——
+    那份目錄沒有價格欄位。（稽核者標為待確認的項目，照實註明出處而不是刪掉。）
+  - 同步 `tools/hooks/aicli-model-policy.py` 的兩處型號。
+- 「稽核／第二意見」那一列**保留** `claude-ultra` 與 `gemini-3.1-pro-high` 兩個選項，
+  只在 note 補上後者的交付率事實：2026-09-09 通讀長文件撞過 agy 的 5 分鐘 print timeout；
+  2026-10-03 派同一份稽核，430 秒後 stdout 累計只有 177 bytes（就是那一行 agy warning），
+  之後 ai-cli MCP 連線中斷、結果再也取不回來。所以**不要把它當兩路稽核中唯一的那一路**，
+  或先用一個小 job 確認它會回話。（Claude）
+
+### 修正（突變測試自己的三個假綠燈）
+
+- **兩個突變的 `expect` 不是對應斷言名稱的子字串**，所以一直被判成「KILLED(其他斷言)」
+  而不是「KILLED」——測試確實失敗了，但 harness 無法確認**是不是那條該抓的斷言**抓到的，
+  保證比看起來的弱。（Claude）
+  - 「日常派工建議改成一開始就用最貴的 astra」：`日常派工要 sol + high，不是一開始就 astra`
+    → `日常派工建議與模型政策一致`
+  - 「dispatchGuidance 沒接進 models payload」：`呼叫端是 AI，建議表要在工具回傳裡`
+    → `models 帶 dispatchGuidance`
+  - 修完 `verify-alias-config.mjs` 的 38 個突變從「KILLED 38（其中 **2** 是被其他斷言抓到）」
+    變成「KILLED 38（其中 **0** 是被其他斷言抓到）」。
+- **「日常派工」斷言沒有綁定 `situation`**（既有覆蓋缺口，2026-10-03 稽核指出）：原本只比對
+  `g.model` 與 `g.reasoningEffort`，所以把這組設定搬到別的情境、而「日常派工」那列改錯，
+  斷言照樣會過。加上 `g.situation === '日常派工'`，並補一個突變（把那列的 `situation` 改名）
+  證明這個條件真的承重。突變 97 → 98。（Claude）
+- 斷言名稱刻意從「（sol + high…）」改成「（現行 workhorse + high…）」**不寫死型號**：
+  這一列的模型會隨 vendor 換代而改，而對應突變的 `expect` 必須是斷言名稱的子字串——
+  名稱綁型號的話，每次換代都要連 `expect` 一起改，少改一個就靜默退化成「KILLED(其他斷言)」。
+  這正是上面那兩筆的成因。（Claude）
+
+### 已知問題（本次發現但**不在**此次範圍，未修）
+
+- **`tools/mutations.json` 有 5 筆突變永遠無法套用**，跑到就是 `ERROR`。兩種成因：（Claude）
+  - 4 筆的 `from` 片段內含 **CRLF**（`tools/mutations.json` 第 468、508、548、556 行附近；
+    其中 508 那筆只有 `from` 含 CRLF、`to` 是單行）。`tools/mutation-test.mjs:121` 會把
+    **原始碼**正規化成 LF，但第 122 行拿 `mutation.from` 原樣比對、**沒有正規化片段**，
+    所以永遠對不上。對應「重試事件」「provider 簡寫」「reasoning replay」「非法 replay_reasoning」
+    四個突變，都歸 `verify-extra-body.mjs`。
+  - 1 筆（`tools/mutations.json:194`，「unrestricted 仍走嚴格組裝」）的片段
+    `return { authority: 'unrestricted', agent, built };` 在現行 `src/app/exec.ts` 已不存在——
+    那裡已改寫成條件運算式（`src/app/exec.ts:243` 起）。歸 `verify-exec-contract.mjs`。
+  - 這 5 筆剛好全在**本次沒有執行的那兩支腳本**底下，所以一直沒被發現。
+    用 `8d262b6`（本批之前）的 `mutations.json` 驗證過，確認是既有問題。
+  - 修法有兩條路：把片段統一成 LF，或在 harness 同時正規化 `from`／`to`。後者會讓那 4 筆
+    真的開始執行，可能再暴露別的東西，所以該另案處理、另跑一次稽核。
+- **日常派工 effort 的 `high`／`medium` 矛盾仍在，本批刻意沒動**：`src/models/catalog.ts`
+  與 repo 內的 `tools/hooks/aicli-model-policy.py` 都寫 `high`，而使用者的全域
+  `~/.claude/CLAUDE.md` 與實際載入的 `~/.claude/scripts/aicli_model_policy.py` 寫 `medium`。
+  這是政策層的決定，不該由這個 commit 代為選邊。本批只換型號，沒有新增不一致。（Claude）
+
+### 稽核紀錄（CONTRIBUTING §5.1）
+
+- **稽核者**：`gpt-6-astra` + `high`。因為 ai-cli 的 MCP 連線在本 session 中途斷掉
+  （ai-cli 與 tkflyc-planner 同時掉線），這一輪改走 **CLI 入口**
+  `node dist/bin/ai-cli.js run`——它沒有 `--capabilities` 旗標，所以**不是**嚴格唯讀模式，
+  唯讀是靠 prompt 要求的。稽核者自述只讀檔與搜尋，未改檔、未跑測試或建置。
+- **判定**：**本批新增實質問題 0。** 確認 4 類既有問題。
+- **已採納並修（2 項）**：
+  1. 日常派工斷言沒綁 `situation`（上面「修正」第二條）。
+  2. 「astra 最貴」無法由無價格欄位的 vendor 目錄佐證——照實標明出處，而不是刪掉這句政策。
+- **採納為「已知問題」但不在本批修（2 項）**：5 筆壞突變、`high`／`medium` 政策矛盾。
+- **稽核者對我的說法提出的修正**，已照它的版本寫入上面：第 508 行那筆只有 `from` 含 CRLF；
+  `src/app/exec.ts` 的 `unrestricted` 已改寫成條件運算式而不是單純消失。
+- **稽核者明確拒絕背書的一項**：它說我對 gemini 那次失敗的描述（「7 分鐘、一行 warning、
+  其餘 0 bytes」）在它手上的資料裡無法獨立驗證，不能因為我這樣講就當成已查證。
+  這個反駁是對的——那是我在本 session 的第一手觀察，沒放進它的證據包。
+  因此 note 改寫成可查證的量測值（430 秒 / 177 bytes），不再用「7 分鐘」這種轉述。
+- **稽核者查過並判定沒問題**：vendor 換代事實逐欄相符（description 原文、`priority: 1`、
+  `default_reasoning_level: "low"`、`near-Astra` 文案都是原文子字串，且沒有把 priority 1
+  誤寫成效能最強）；斷言非恆真；兩個新 `expect` 確實是斷言名稱的子字串；repo hook 與
+  `catalog.ts` 一致；`gpt-5.6-sol` 的 6 處殘留逐一判斷後都該保留（候選模型、effort 能力
+  紀錄、換代理由、README 的 alias 相容說明）。
+
+
 ### 新增（codex 清單對回 vendor 現況：補 GPT-6.1 Sol、移出五個已下架名稱）
 
 - **codex 清單補上 `gpt-6.1-sol`**，依 vendor 的 `priority` 排在最前（priority 1）。

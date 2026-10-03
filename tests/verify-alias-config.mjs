@@ -145,8 +145,14 @@ async function main(baseConfig) {
       p.knownBadModels.every((b) => b.model && b.reason && b.reason.length >= 10)
     );
     check(
-      '★ 日常派工建議與模型政策一致（sol + high，不是一開始就 astra）',
-      p.dispatchGuidance.some((g) => g.model === 'gpt-5.6-sol' && g.reasoningEffort === 'high'),
+      // 名稱刻意不寫死型號：這一列的模型會隨 vendor 換代而改（2026-10-03 已從
+      // gpt-5.6-sol 換成 gpt-6.1-sol），而對應突變的 expect 必須是這個名稱的子字串。
+      '★ 日常派工建議與模型政策一致（現行 workhorse + high，不是一開始就 astra）',
+      // 必須綁 situation：只比對 model + effort 的話，把這組設定搬到別的情境、
+      // 而「日常派工」那列改錯，斷言照樣會過（2026-10-03 稽核指出的既有覆蓋缺口）。
+      p.dispatchGuidance.some(
+        (g) => g.situation === '日常派工' && g.model === 'gpt-6.1-sol' && g.reasoningEffort === 'high'
+      ),
       JSON.stringify(p.dispatchGuidance[0])
     );
     check(
