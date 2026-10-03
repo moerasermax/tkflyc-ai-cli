@@ -27,13 +27,13 @@ Peter Steinberger 的 claude-code-mcp（MIT）。分歧點在架構：上游把�
 | --- | --- |
 | GitHub | `moerasermax/tkflyc-ai-cli` — **2026-09-09 改名**，舊名是 `ai-cli-mcp` |
 | npm | `@tkflyc/ai-cli-mcp` — **已公開發佈** |
-| 版本 | `6.1.1` |
+| 版本 | `6.3.0` — 2026-10-03 發佈。**npm 上沒有 `6.2.0`**：那版只 bump 了 `package.json` 與 CHANGELOG，沒打 tag、沒發佈，內容僅透過 git 自動更新進各機器 |
 | 授權 | **Apache-2.0** — 2026-09-09 從 MIT 改的，附 `NOTICE` |
 | 主分支 | `master`（push 到 master 等同部署，所有機器會自動拉） |
 | CI | Windows / Linux / macOS × Node 20.19、22 — **三個平台都是閘門** |
 | 本機路徑 | `C:\Users\Moera\ai-cli-mcp-source`（目錄名還是舊的，不影響任何東西） |
 
-規模：`src/` 33 個 `.ts`、9,640 行；驗證腳本都在 `tests/`，其中 13 支進 `npm test`
+規模：`src/` 33 個 `.ts`、9,984 行；驗證腳本都在 `tests/`（16 支），其中 14 支進 `npm test`
 （`verify-e2e.mjs` 會真的燒額度、`verify-strict-behaviour.mjs` 屬手動輔助，兩者刻意不進）。
 
 ---
@@ -88,6 +88,37 @@ tag 物件的 SHA，要 commit 得用 `v6.1.1^{}`。
 star、fork、下載量、貢獻者數字一律據實。沒有就寫沒有。
 
 ---
+
+### 7. 突變片段必須從當前原始碼取出，而且只命中一處
+
+`tools/mutation-test.mjs` 用 `String.replace`，只換第一個命中。2026-10-03 查出 **5 筆突變
+長期套用不上**（4 筆 `from` 內含 CRLF，而 harness 當時只正規化原始碼、不正規化片段；
+1 筆的片段早被重構掉），跑到就是 `ERROR`——**那幾筆從加進來那天起就沒測到任何東西**。
+另有 2 筆片段命中兩處，改到哪一處取決於檔案順序。
+
+它們之所以潛伏那麼久，不是 harness 不報，而是**那兩支腳本的突變平時沒人跑**：突變測試要開
+worktree、建 junction、每筆各跑一次 `tsc`，實務上只針對這次改到的檔案跑。
+現在 `tests/verify-mutation-manifest.mjs` 把「片段還在、而且唯一」納入 `npm test`，每次都跑。
+
+還有一個它抓不到的：`expect` 必須是對應斷言名稱的子字串，否則 harness 判
+「KILLED(其他斷言)」——測試確實失敗了，但無法確認是不是該抓的那條抓到的。
+同日修了 15 筆這種。**斷言名稱不要寫死型號**，否則換代時改了名稱卻忘了改 `expect`
+就會靜默退化。這一條只有實跑 harness 才驗得出來。
+
+### 8. 突變測試不可與 `npm test` 並行
+
+兩者都會開暫存 bare origin 與 A/B clone（`verify-update`、`verify-liveness`）。
+2026-10-03 同時跑，`npm test` 在 `spawnSync git` 上 `ETIMEDOUT`——看起來像回歸，
+其實是搶 git。序列跑就全綠。CONTRIBUTING 原本只寫「突變檢查一次只能跑一個」。
+
+### 9. `~/.codex/models_cache.json` 是多個 codex 執行檔共用的
+
+PATH 上 npm 裝的 CLI 與 Codex 桌面版自帶的核心寫**同一個檔**，最後跑的那個覆寫它。
+所以 `client_version` 與你要派工的那支 CLI 不符時，**你讀到的是另一支的視角**，
+不只是「版本舊一號」。2026-10-03 實測：`0.159.0`／`0.160.0` 的視角都是 10 筆且一致，
+而另一次讀到 `0.155.0` 的視角只有 9 筆、沒有 `gpt-6.1-sol`。
+查這個檔之前先 `codex --version`；不符就重派一個 trivial job 讓目標 CLI 自己重抓。
+另外 `fetched_at` 每隔幾分鐘就被重抓一次，**不要在文件或註解裡引用到「分」**。
 
 ## 更早的脈絡在哪
 
