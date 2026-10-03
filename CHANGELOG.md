@@ -8,6 +8,145 @@
 
 ## [Unreleased]
 
+### 新增（`codex-ultracode`：補上真正的最強組合）
+
+- **新增 alias `codex-ultracode` → `gpt-6-astra` + `reasoning_effort: "ultra"`。**
+  在此之前「旗艦配最高推理」**沒有任何 alias**：`codex-ultra` 送的是 `max`，要 `ultra`
+  得每次手動帶 `reasoning_effort`。（Claude，moerasermax 指示）
+  - **為什麼另立名稱而不是把 `codex-ultra` 改成 `ultra`**：`ultra` 是 codex 的 **effort
+    級別名**（`max` 之上還有一級），不是 model。把 effort 詞當 alias 名稱用，已經讓
+    `codex-ultra` 名實不符——它叫 ultra、送的卻是 max。改它的語意是破壞性變更，
+    所以這裡走純加法，`codex-ultra` 與 `claude-ultra` 一律不動。
+  - **claude 側刻意不加對應名稱**：claude 的 effort 只到 `max`（沒有 `ultra`），
+    `claude-ultracode` 會和 `claude-ultra` 完全同義——兩個名字做同一件事是新的混淆源。
+  - 兩份寫死的 alias effort 表（`catalog.ts` 的 `MODEL_ALIAS_DETAILS` 進 payload 顯示、
+    `user-config.ts` 的 `BUILTIN_ALIAS_REASONING` 是執行期真正送出的值）現在有一條斷言
+    在守它們一致。漏改一邊的後果是「畫面上寫 ultra、實際送 max」，而且兩邊都不會報錯。
+- 測試 +7 條（121 項）：解析到旗艦、路由到 codex、被認得是內建 alias、不能自己當 alias
+  target、`codex-ultra` 語意沒被動到、**不帶 effort 時實際送出 `ultra`**、兩份表一致。
+  突變 +4（拿掉 alias、執行期 effort 退成 max、只改顯示那一份、日常 effort 改回 high）。（Claude）
+
+### 變更（日常派工 effort 對齊為 `medium`）
+
+- **`dispatchGuidance`「日常派工」的 `reasoningEffort` 從 `high` 改為 `medium`**，
+  `tools/hooks/aicli-model-policy.py` 兩處同步。這是上一批列為「已知問題・未修」的
+  `high`／`medium` 矛盾——定錨取維護者自己的治理文件（`~/.claude/CLAUDE.md` 與實際載入的
+  SessionStart hook 都寫 `medium`），而不是由這個 commit 自己挑一個值。（Claude，moerasermax 指示）
+  - note 一併改寫：原本寫「先用便宜的配高推理強度」，前提隨 effort 改變就不成立了。
+    新措辭**刻意中性**——這段會隨 dist 發佈到公開 npm，不該把維護者私有治理文件的原文
+    寫進對外 payload。只說「這張表是維護者的派工政策：日常 medium；high 留給跨模組、
+    架構、高風險修改、逆向歧義，或一次 medium 明顯不足」。
+  - 「astra 最貴」這句保留但標明出處是政策、不是從 vendor 目錄推出來的（目錄沒有價格欄位）。
+  - hook 內部原本還有一句「先用 sol 配 high」，改 effort 之後自相矛盾，一併修掉；
+    升級路徑（astra + `high`）維持不變。
+
+### 修正（突變測試的 5 筆壞片段 — 上一批的「已知問題」已修）
+
+- **`tools/mutation-test.mjs` 現在也把比對片段正規化成 LF。** 根因是不對稱：它把**原始碼**
+  正規化成 LF，卻拿 `mutation.from` 原樣比對——任何從 CRLF 工作區複製出來的片段永遠對不上，
+  判 `ERROR`，而那筆突變等於什麼都沒測。實際有 4 筆長期如此（全在 `verify-extra-body.mjs`）。（Claude）
+  - **沒有**改走「把那 4 筆資料改成 LF」那條路：`src/` 工作區含 CRLF（`git ls-files --eol`
+    實測 `w/crlf`），而既有做法是「從當前原始碼取出實際片段」，所以只改資料保證復發。
+  - `to` 也要正規化，否則 `to` 內含 CRLF 時會把 CRLF 寫進已正規化成 LF 的檔案、造成混合 EOL。
+- **重新設計「unrestricted 仍走嚴格組裝」那筆突變**：它的片段
+  `return { authority: 'unrestricted', agent, built };` 在現行 `src/app/exec.ts` 已改寫成
+  條件運算式，所以永遠套不上。新片段打的是傳 `capabilities` 的那個三元式——讓 unrestricted
+  路徑也被塞 `capabilities`，於是 `authority` 照樣回報 `unrestricted`、組出來的卻是嚴格指令，
+  正是它原本要驗的「要求不設限卻靜默受限」。（Claude）
+- **另外修掉 2 筆片段不唯一的突變**（`user-config.ts` 與 `direct-api.ts` 各一，各命中 2 處）。
+  harness 用 `String.replace`，只換第一個命中——片段出現兩次時改到哪一處取決於檔案順序，
+  那筆突變驗的就不是你以為的那一段，而且同樣沒有訊號。兩筆都往前擴一行到唯一。（Claude）
+
+### 測試（`npm test` 13 支 → 14 支）
+
+- **新增 `tests/verify-mutation-manifest.mjs`**：檢查突變清單自身的健康——欄位齊全、名稱不重複、
+  `to !== from`、目標檔存在、**`from` 片段恰好命中一處**、`script` 指向存在的腳本。
+  純讀檔、不建置、不需 worktree，所以每次 `npm test` 都跑得起。（Claude）
+  - 這才是「下次會被自動抓到」的答案。那 5 筆之所以潛伏那麼久，不是 harness 不報
+    （`ERROR` 會逐筆印、也會讓整支非零收場），而是**那兩支腳本的突變平時沒人跑**——
+    突變測試要開 worktree、建 junction、每筆各跑一次 `tsc`，實務上只針對這次改到的檔案跑。
+  - 它**不驗**斷言殺不殺得掉突變（那只有實跑 harness 才知道），只驗「這筆還套得上、
+    而且套得到唯一那一處」。`expect` 是否對到該抓的那條斷言也不在它職責內：
+    有些斷言名稱是迴圈裡的模板字串，靜態比對會產生大量假警報。
+  - 寫這支時它自己先報了 4 項，其中 **2 項是這支測試寫錯**：`to: ""` 是「刪掉整行」的合法
+    突變（我原本要求非空），而 `expect` 以「★」開頭也沒問題（`check()` 印的是
+    `FAIL ${name}`，名稱本身就含星號）。兩個假檢查已移除。
+- `CONTRIBUTING.md` 的突變撰寫規則補上「片段必須從當前原始碼取出、而且只命中一處」。（Claude）
+
+### 修正（SessionStart hook 的分歧靜默）
+
+- **`tools/hooks/aicli-model-policy.py` 改為版控正典，內容對回實際生效的那一份，
+  並加上分歧自檢。** 實際被載入的是 `~/.claude/scripts/aicli_model_policy.py`
+  （路徑寫在使用者的 `settings.json`）；**`settings.json` 一個字都沒動**。（Claude，moerasermax 指示）
+  - **刻意沒有把 `settings.json` 指向 repo。** 那會讓「push 到公開 master」等於改寫所有開了
+    自動更新的機器在每個 SessionStart 自動執行的 Python——那是比「讓檔案跟著 git pull」
+    大得多的風險類別，不該夾在一次整理裡做。
+  - **「合併」的做法依實際發現調整**：安裝版自己帶著一條維護註記——「`ctx` 每個 session
+    都會注入，只放規則；**完整模型目錄不要寫進來**，需要時由 `mcp__ai-cli__models` 查詢」。
+    而 repo 版塞滿模型目錄細節，且那些細節 `models` payload 已經在回了
+    （`dispatchGuidance` / `knownBadModels` / `modelListCaveat` / `directApiProviders`）。
+    所以正確的收斂不是「把兩份塞成一份」，而是讓版控裡終於是**真正生效的那份精簡規則**，
+    並把 `models` 回傳裡沒有的四條操作細節（驗證實際送出的 effort、升級要寫明第幾次、
+    NVIDIA 15 RPM、DashScope 到期）移到**不注入**的 REFERENCE 註解。
+  - 注入的規則文字**位元相同**（1,290 字元），所以 session 脈絡沒有任何變化。
+  - 自檢三態都實測過：兩份一致→不警告；故意改動正典→注入內容開頭出現警告並指名正典路徑；
+    還原→不警告。找不到正典時安靜略過——hook 的職責是注入脈絡，不是因為找不到檔案就讓
+    整個 session 少掉規則。
+
+### 修正（`models_cache.json` 是多個 codex 執行檔共用的，不只是版本落後）
+
+- `src/agents/codex.ts` 的註解原本寫「`client_version` 比 PATH 上的版本舊一號——那是寫入快取的
+  版本，兩者要分開看」。**這句低估了**：PATH 上 npm 裝的 CLI 與 Codex 桌面版自帶的核心寫的是
+  **同一個檔**，最後跑的那個覆寫它。所以 `client_version` 與你要派工的 CLI 不符時，
+  **你讀到的是另一支的視角**，而不只是舊一號。（Claude）
+  - 2026-10-03 同日的多次讀取裡，0.159.0／0.160.0 寫入的視角都是 10 筆且內容一致，
+    而另一次讀到 0.155.0 寫入的視角只有 9 筆、**沒有 `gpt-6.1-sol`**。
+    （那一次是稽核流程中另一個 agent 讀到的，我沒親自複現；但 `client_version` 與
+    `fetched_at` 在同日反覆變動是我自己觀察到的，與「多個寫入者」一致。）
+  - 操作規則：查這個檔之前先 `codex --version`，不符就重派一個 trivial job 讓目標 CLI
+    自己重抓再讀。拿別支寫入的視角去改清單，等於照著一份不是你要用的目錄改。
+
+### 稽核紀錄（CONTRIBUTING §5.1）
+
+- **做法**：這一批用 Workflow 開了 **8 個唯讀子代理**——4 個調查員（每個項目一個，產出可直接
+  套用的 `old`／`new` 字串）＋ 4 個對抗性審查員（每份方案一個，指令明寫「你的工作不是附和它，
+  是找出它會壞在哪裡」）。全部不改檔、不跑測試；編輯與驗證由主流程序列執行（突變 harness
+  共用同一份原始碼備份，不能並行）。符合全域規則的唯讀上限 8、會改檔的子代理 0。
+- **結果：4 份方案全部被判 `needs-change`，共 31 項問題。所以沒有一份是照套的。**
+  高嚴重度的四項都成立：
+  1. effort 項的某一筆 `old` 在檔案裡**不存在**（`old` 與 `new` 是同一個字串），照套會失敗。
+  2. gpt-5.5 項的新突變**必然 SURVIVED**，因為同批另一筆編輯讓關鍵字在檔內出現兩次，
+     而 harness 只替換第一處。
+  3. gpt-5.5 項新寫的「規則」與同一註解區塊上方 20 行的既有結論直接矛盾。
+  4. hook 項把 `settings.json` 指向 repo 的風險被用「反正本來就有硬寫絕對路徑的 hook」帶過，
+     那是假等價——那些指的都是本機、不會被遠端自動改寫的腳本。
+- **採納並照辦**：日常派工斷言沒綁 `situation`（已補，並加突變證明它承重）、對外 note 不該
+  寫進維護者私有治理文件原文、`verify-e2e.mjs` 的「最便宜」缺證據、`visibility: "hide"`
+  不能推論成「只供 CLI 內部使用」、hook 項的風險框架（因此改走不碰 `settings.json` 的路線）。
+- **採納但改寫**：審查員建議在 harness 加「片段預檢並 `process.exit(1)` 中止整輪」——
+  不採納那個形狀（把「一筆片段過期」升級成「一個都不跑」，failure mode 更差；而且
+  `console.error` 後立刻 `process.exit` 正是本專案紅線 5 那個 stdout 截斷的形狀）。
+  改成獨立的 `verify-mutation-manifest.mjs` 進 `npm test`，用 `process.exitCode`。
+- **判定不成立／不採納**：調查員主張「光把 4 筆片段改成 LF 無法避免復發」——這點成立，
+  已照辦；但它另外建議「兩條路都做」，我只做 harness 那條，因為手改 4 段從沒執行過、
+  無法便宜驗證的字串，等於憑空增加一次轉錄錯誤的機會。
+- **審查員自己也有錯**：它說 repo 版 hook 的 `rejectedAlternatives` 裡「npm 套件也會少掉它」
+  是錯的（這個 hook 從未隨 npm 散布）——這一點它對，而我因此沒沿用那段理由。
+  但它同時假設我會把新突變插在清單最前面而推移 CHANGELOG 行號；我是附加在結尾，不成立。
+
+### 已知問題（仍未修）
+
+- **日常 effort 之外的第二個 repo↔治理文件矛盾**：repo 版 hook 的 REFERENCE 寫「反覆卡住才
+  升級」、`dispatchGuidance` 的情境列字面叫「同一個問題卡超過 5 次」，而使用者的全域
+  `~/.claude/CLAUDE.md` 與實際載入的 hook 寫的是「同一工具／假設**連續失敗 2 次**即停止回報」。
+  兩者語意不同（一個是「換更強的模型」、一個是「停下來回報」），不是同一個軸，
+  所以沒有照 effort 的方式一併對齊——要不要收斂成一條需要使用者拍板。（Claude）
+- **`gpt-5.5` 將於 2026-10-14T19:00Z 退役**，vendor 的 `upgrade` 欄位建議改用 `gpt-6.1-sol`。
+  退役後要動的地方：`CODEX_MODELS`、`KNOWN_BAD_MODELS` 那筆、`mcp.ts` 拿它當「只到 xhigh」
+  例子的那句、`tests/` 裡把它當 fixture 的四處、`tools/mutations.json` 裡含它的片段。
+  退役當天應該先派一個 job 收那個 HTTP 400，才寫得出有證據的理由。（Claude）
+
+
 ### 變更（`dispatchGuidance` 的「日常派工」換代為 GPT-6.1 Sol）
 
 - **`models` 的 `dispatchGuidance`「日常派工」從 `gpt-5.6-sol` 改成 `gpt-6.1-sol`**
@@ -47,7 +186,7 @@
   名稱綁型號的話，每次換代都要連 `expect` 一起改，少改一個就靜默退化成「KILLED(其他斷言)」。
   這正是上面那兩筆的成因。（Claude）
 
-### 已知問題（本次發現但**不在**此次範圍，未修）
+### 已知問題（當時未修 — ⚠️ 其中「5 筆壞突變」已於本頁最上方那一批修掉）
 
 - **`tools/mutations.json` 有 5 筆突變永遠無法套用**，跑到就是 `ERROR`。兩種成因：（Claude）
   - 4 筆的 `from` 片段內含 **CRLF**（`tools/mutations.json` 第 468、508、548、556 行附近；

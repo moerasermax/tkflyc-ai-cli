@@ -119,6 +119,39 @@ async function main(baseConfig) {
   writeConfig(baseConfig);
   check('無覆寫時走內建表', catalog.resolveModelAlias('codex-ultra') === 'gpt-6-astra');
   check('非 alias 原樣回傳', catalog.resolveModelAlias('opus') === 'opus');
+  // 2026-10-03 新增的 codex-ultracode：和 codex-ultra 同一顆旗艦，差別只在 effort 到 ultra。
+  // `ultra` 是 codex 的 effort 級別名、不是 model，所以不改 codex-ultra 的語意（破壞性），
+  // 而是純加法補上「gpt-6-astra + ultra」這個在此之前沒有任何 alias 的最強組合。
+  check(
+    'codex-ultracode 解析到旗艦 gpt-6-astra',
+    catalog.resolveModelAlias('codex-ultracode') === 'gpt-6-astra',
+    catalog.resolveModelAlias('codex-ultracode')
+  );
+  check('codex-ultracode 路由到 codex', catalog.resolveAgentIdForModel(catalog.resolveModelAlias('codex-ultracode')) === 'codex');
+  check('codex-ultracode 被認得是內建 alias（set_config 才設得動它）', catalog.isBuiltinAlias('codex-ultracode'));
+  check(
+    'codex-ultracode 不能自己當 alias target（alias 只解析一層）',
+    !catalog.isKnownModelTarget('codex-ultracode')
+  );
+  check(
+    'codex-ultra 的語意沒被動到（仍是 max，不是 ultra）',
+    catalog.MODEL_ALIAS_DETAILS.find((a) => a.name === 'codex-ultra')?.defaultReasoningEffort === 'max'
+  );
+  // ★ 兩份寫死的 alias effort 表必須一致：
+  //   user-config.ts 的 BUILTIN_ALIAS_REASONING 是**執行期真正送出的值**，
+  //   catalog.ts 的 MODEL_ALIAS_DETAILS.defaultReasoningEffort 只進 models payload 顯示。
+  //   漏改一邊的後果是「畫面上寫 ultra、實際送 max」——而且兩邊都不會報錯。
+  {
+    const uc = await load('dist/core/user-config.js');
+    const mismatched = catalog.MODEL_ALIAS_DETAILS.filter(
+      (a) => (a.defaultReasoningEffort ?? null) !== (uc.BUILTIN_ALIAS_REASONING[a.name] ?? null)
+    ).map((a) => `${a.name}: payload=${a.defaultReasoningEffort} runtime=${uc.BUILTIN_ALIAS_REASONING[a.name]}`);
+    check(
+      '★ MODEL_ALIAS_DETAILS 與 BUILTIN_ALIAS_REASONING 的預設 effort 完全一致',
+      mismatched.length === 0,
+      mismatched.join(' | ')
+    );
+  }
   const proto = catalog.resolveModelAlias('constructor');
   check('prototype key 不會回傳函式', typeof proto === 'string' && proto === 'constructor',
     `got ${typeof proto}`);
@@ -147,11 +180,11 @@ async function main(baseConfig) {
     check(
       // 名稱刻意不寫死型號：這一列的模型會隨 vendor 換代而改（2026-10-03 已從
       // gpt-5.6-sol 換成 gpt-6.1-sol），而對應突變的 expect 必須是這個名稱的子字串。
-      '★ 日常派工建議與模型政策一致（現行 workhorse + high，不是一開始就 astra）',
+      '★ 日常派工建議與模型政策一致（現行 workhorse + 日常 effort，不是一開始就 astra）',
       // 必須綁 situation：只比對 model + effort 的話，把這組設定搬到別的情境、
       // 而「日常派工」那列改錯，斷言照樣會過（2026-10-03 稽核指出的既有覆蓋缺口）。
       p.dispatchGuidance.some(
-        (g) => g.situation === '日常派工' && g.model === 'gpt-6.1-sol' && g.reasoningEffort === 'high'
+        (g) => g.situation === '日常派工' && g.model === 'gpt-6.1-sol' && g.reasoningEffort === 'medium'
       ),
       JSON.stringify(p.dispatchGuidance[0])
     );
@@ -491,6 +524,18 @@ async function main(baseConfig) {
     cmd.args.includes('model_reasoning_effort=max') && cmd.args.includes('gpt-6-astra'),
     JSON.stringify(cmd.args)
   );
+  // ★ codex-ultracode 的重點是「不必手動帶 effort 也會送出 ultra」——
+  //   這條才是它和 codex-ultra 的實際差別。payload 寫得再對，送出的值錯了就沒意義。
+  {
+    const uc = buildWith('codex-ultracode', undefined);
+    check(
+      '★ codex-ultracode 不帶 effort 時送出 --model gpt-6-astra 與 model_reasoning_effort=ultra',
+      uc.agent === 'codex' &&
+        uc.args.includes('gpt-6-astra') &&
+        uc.args.includes('model_reasoning_effort=ultra'),
+      JSON.stringify(uc.args)
+    );
+  }
   let built = tryBuild('gpt-6-astra', 'ultra');
   check(
     'codex 明確指定 ultra 會送出 model_reasoning_effort=ultra',

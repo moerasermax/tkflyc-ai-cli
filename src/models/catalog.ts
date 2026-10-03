@@ -41,6 +41,19 @@ export interface EffectiveModelAliasDetail extends ModelAliasDetail {
 export const MODEL_ALIASES: Record<string, string> = {
   'claude-ultra': 'opus',
   'codex-ultra': 'gpt-6-astra',
+  /*
+    codex-ultracode：和 codex-ultra 同一顆旗艦，差別只在 effort 到 `ultra`。
+
+    為什麼要另立一個名稱而不是把 codex-ultra 改成 ultra：`ultra` 是 codex 的
+    **effort 級別名**（low…max 之上還有一級 ultra），不是 model。把 effort 詞當成
+    alias 名稱用，已經讓 codex-ultra 這個名字名實不符——它叫 ultra、送的卻是 max。
+    改它的語意是破壞性變更，所以這裡用純加法補上真正的最強組合：
+    gpt-6-astra + ultra 在此之前**沒有任何 alias**，要用得每次手動帶 reasoning_effort。
+
+    claude 側刻意不加對應的名稱：claude 的 effort 只到 max（沒有 ultra），
+    claude-ultracode 會和 claude-ultra 完全同義——兩個名字做同一件事是新的混淆源。
+  */
+  'codex-ultracode': 'gpt-6-astra',
   'agy-ultra': 'Gemini 3.1 Pro (High)',
   'antigravity-ultra': 'Gemini 3.1 Pro (High)',
 };
@@ -109,10 +122,11 @@ export const DISPATCH_GUIDANCE: ReadonlyArray<{
   {
     situation: '日常派工',
     model: 'gpt-6.1-sol',
-    reasoningEffort: 'high',
+    reasoningEffort: 'medium',
     note:
-      '先用便宜的配高推理強度。astra 最貴，不要一開始就用。'
-      + '（「最貴」來自使用者的派工政策；vendor 目錄沒有價格欄位，這一點不是從目錄推出來的。）'
+      '這張表是維護者的派工政策，不是從 vendor 目錄推出來的。日常用 medium；'
+      + 'high 留給跨模組、架構、高風險修改、逆向歧義，或一次 medium 明顯不足的情況。'
+      + '不要一開始就用 astra——它是旗艦也最貴（「最貴」同樣來自政策，vendor 目錄沒有價格欄位）。'
       + '2026-10-03 從 gpt-5.6-sol 換過來：vendor 已把 gpt-5.6-sol 標成 '
       + '"Older generation workhorse model"，現行的是 gpt-6.1-sol（priority 1、'
       + '"Latest workhorse model for coding and everyday work"），而且 vendor 自己的文案說它 '
@@ -234,6 +248,10 @@ export const MODEL_LIST_CAVEAT = {
 export const MODEL_ALIAS_DETAILS: ModelAliasDetail[] = [
   { name: 'claude-ultra', resolvesTo: 'opus', agent: 'claude', defaultReasoningEffort: 'max' },
   { name: 'codex-ultra', resolvesTo: 'gpt-6-astra', agent: 'codex', defaultReasoningEffort: 'max' },
+  // ⚠️ 這裡的 defaultReasoningEffort 只進 models payload 顯示；真正決定送出值的是
+  //    user-config.ts 的 BUILTIN_ALIAS_REASONING。兩份必須一致，
+  //    verify-alias-config.mjs 有一條斷言在守這件事（兩份寫死的表最容易悄悄漂移）。
+  { name: 'codex-ultracode', resolvesTo: 'gpt-6-astra', agent: 'codex', defaultReasoningEffort: 'ultra' },
   { name: 'agy-ultra', resolvesTo: 'Gemini 3.1 Pro (High)', agent: 'antigravity' },
   { name: 'antigravity-ultra', resolvesTo: 'Gemini 3.1 Pro (High)', agent: 'antigravity' },
 ];
@@ -343,7 +361,7 @@ function modelsByAgent(): Record<AgentId, readonly string[]> {
 export function getSupportedModelsDescription(): string {
   const byAgent = modelsByAgent();
   return [
-    '"claude-ultra", "codex-ultra", "agy-ultra"',
+    '"claude-ultra", "codex-ultra", "codex-ultracode", "agy-ultra"',
     ...byAgent.claude.map((m) => `"${m}"`),
     ...byAgent.codex.map((m) => `"${m}"`),
     ...byAgent.antigravity.map((m) => `"${m}"`),
@@ -360,7 +378,7 @@ export function getModelParameterDescription(): string {
     ...byAgent.antigravity,
     ...byAgent['direct-api'],
   ];
-  return `The model to use. The list below is NOT an allowlist: claude is the routing catch-all, so a name absent from it may still run — check the models tool's "modelListCaveat" before concluding a model is unsupported. Aliases: "claude-ultra" (auto max effort), "codex-ultra" (auto max reasoning), "agy-ultra" (Antigravity CLI). Standard: ${all
+  return `The model to use. The list below is NOT an allowlist: claude is the routing catch-all, so a name absent from it may still run — check the models tool's "modelListCaveat" before concluding a model is unsupported. Aliases: "claude-ultra" (auto max effort), "codex-ultra" (auto max reasoning), "codex-ultracode" (same flagship as codex-ultra but auto "ultra" reasoning — the strongest combination; note "ultra" is an effort level, not a model, which is why this is a separate alias rather than a change to codex-ultra), "agy-ultra" (Antigravity CLI). Standard: ${all
     .map((m) => `"${m}"`)
     .join(
       ', '

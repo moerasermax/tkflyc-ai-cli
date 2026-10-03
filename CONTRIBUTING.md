@@ -21,12 +21,16 @@
 - 改完一定要能編譯：`npm run build`（或 `npm run typecheck`）必須零錯誤。
 - 驗證腳本都在 `tests/`（`tests/verify-*.mjs`）；新功能盡量補一支放這裡。每支用相對路徑往上一層讀 `dist/`、`src/`、`tools/`，新增時照抄既有那行 `const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))` 即可。
 - 有對應的驗證腳本時，跑過確認通過。
-- `npm test` 串起十三支驗證腳本（breaker / rate / direct-api / extra-body / alias-config / catalog-source / agy-parse / exec-contract / mcp-capabilities / mcp-system-prompt / mcp / liveness / update），都不會打真實 AI 供應商或真實 origin。
+- `npm test` 串起十四支驗證腳本（breaker / rate / direct-api / extra-body / alias-config / catalog-source / agy-parse / exec-contract / mcp-capabilities / mcp-system-prompt / mcp / liveness / update / mutation-manifest），都不會打真實 AI 供應商或真實 origin。
 - `verify-catalog-source.mjs` 涵蓋非同步查詢、單飛、10 分鐘 TTL、30 天磁碟快取及 agy 的逾時／stderr／kill；`verify-mcp.mjs` 對三個入口驗冷啟動 `tools/list < 1 秒` 與 `models` 等待規則。兩支自建暫存快取並使用 `tools/stubs/agy-models-*`，不連真實 vendor。
 - verify 腳本與突變 harness 載入 `tools/stubs/catalog-test-env.mjs`，隔離 config.json、providers、catalog-cache 與狀態，並設定 `AI_CLI_AUTO_UPDATE=off`、git 只允許 file 協定。alias-config 單跑也會自行載入，不碰使用者目錄。
 - `verify-update.mjs` 只在暫存 bare origin + A/B clone 內開啟更新；`AI_CLI_UPDATE_REPO_ROOT` 僅供測試，不要用來覆寫正式安裝。
 - `verify-liveness.mjs` 用 `tools/stubs/slow-agent` 驗證 MCP / file 跨行程 liveness、wait 逾時回傳、CLI exit 3 與 lost 對照組；暫存檔放 repo 的 `dist/`。
 - **修完 bug 請順手加一個突變**到 `tools/mutations.json`：把修補改壞、確認對應斷言真的會 FAIL。
+  **片段（`from`）必須從當前原始碼取出、而且在該檔案裡只命中一處**——`mutation-test.mjs` 用的是
+  `String.replace`，只換第一個命中，片段出現兩次時改到哪一處取決於檔案順序，那筆突變驗的就不是
+  你以為的那一段。手寫片段也不要：2026-10-03 查出 5 筆長期套用不上（4 筆含 CRLF、1 筆被重構掉），
+  而它們只在有人跑 harness 時才會露面。`verify-mutation-manifest.mjs` 現在把這兩件事納入 `npm test`。
   這個專案已經吃過三次假綠燈的虧（測試看起來在測、其實測不到）。用法見 `tools/mutation-test.mjs` 檔頭。
   新更新突變可用 `node tools/mutation-test.mjs <worktree> --script verify-update.mjs` 單獨執行，基準必須先全綠。
 - Windows 突變 worktree 收尾時，**先刪 `node_modules` junction 本身，再刪 worktree 目錄**；不可用 `git worktree remove --force` 穿過 junction，否則可能誤刪主 repo 的相依套件。

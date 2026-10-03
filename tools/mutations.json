@@ -16,8 +16,8 @@
   {
     "name": "根節點是陣列時不擋",
     "file": "src/core/user-config.ts",
-    "from": "  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {",
-    "to": "  if (!parsed || typeof parsed !== 'object') {",
+    "from": "  // 解成 { \"0\": \"a\", \"1\": \"b\" } 這種垃圾 alias，這裡與下面兩處都要擋掉。\n  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {",
+    "to": "  // 解成 { \"0\": \"a\", \"1\": \"b\" } 這種垃圾 alias，這裡與下面兩處都要擋掉。\n  if (!parsed || typeof parsed !== 'object') {",
     "expect": "根節點是陣列時 status 回報 parse 錯誤"
   },
   {
@@ -191,8 +191,8 @@
     "name": "unrestricted 仍走嚴格組裝（要求不設限卻靜默受限）",
     "file": "src/app/exec.ts",
     "script": "verify-exec-contract.mjs",
-    "from": "    return { authority: 'unrestricted', agent, built };",
-    "to": "    void built;",
+    "from": "    ...(requestedAuthority === 'unrestricted'\n      ? {}\n      : { capabilities: request.capabilities ?? [] }),",
+    "to": "    ...({ capabilities: request.capabilities ?? [] }),",
     "expect": "★ unrestricted（claude）→ 一般組裝（帶旁路旗標），authority 回報 unrestricted"
   },
   {
@@ -419,7 +419,7 @@
     "file": "src/agents/direct-api.ts",
     "from": "    if (RESERVED_EXTRA_BODY_KEYS.has(key)) {",
     "to": "    if (false && RESERVED_EXTRA_BODY_KEYS.has(key)) {",
-    "expect": "保留欄位必須在載入時丟錯，不是靜默放行",
+    "expect": "在 provider 層被擋下",
     "script": "verify-extra-body.mjs"
   },
   {
@@ -427,7 +427,7 @@
     "file": "src/agents/direct-api.ts",
     "from": "    ...(params.extraBody ?? {}),\n    model: params.modelName,",
     "to": "    model: params.modelName,\n    ...(params.extraBody ?? {}),",
-    "expect": "model/stream/tools 不可被 extra_body 蓋掉",
+    "expect": "框架欄位永遠贏",
     "script": "verify-extra-body.mjs"
   },
   {
@@ -443,7 +443,7 @@
     "file": "src/agents/direct-api.ts",
     "from": "  return { ...(base ?? {}), ...(perModel ?? {}) };",
     "to": "  return { ...(perModel ?? {}), ...(base ?? {}) };",
-    "expect": "model 專屬設定要覆蓋 provider 層，不是反過來",
+    "expect": "model 專屬覆蓋 provider 層的同名欄位",
     "script": "verify-extra-body.mjs"
   },
   {
@@ -451,7 +451,7 @@
     "file": "src/agents/direct-api.ts",
     "from": "  return status === 429 || (status >= 500 && status < 600);",
     "to": "  return true;",
-    "expect": "400/401 不可重試",
+    "expect": "★ 400 不重試",
     "script": "verify-extra-body.mjs"
   },
   {
@@ -459,7 +459,7 @@
     "file": "src/agents/direct-api.ts",
     "from": "  return status === 429 || (status >= 500 && status < 600);",
     "to": "  return status >= 500 && status < 600;",
-    "expect": "429 是「等一下再來」，要重試",
+    "expect": "429 也重試（速率限制是",
     "script": "verify-extra-body.mjs"
   },
   {
@@ -467,7 +467,7 @@
     "file": "src/agents/direct-api.ts",
     "from": "emitJsonLine(params.io.stdout, {\r\n    type: 'retry',",
     "to": "if (false) emitJsonLine(params.io.stdout, {\r\n    type: 'retry',",
-    "expect": "每次重試都要發事件",
+    "expect": "★ 重試要被看見，不能靜默",
     "script": "verify-extra-body.mjs"
   },
   {
@@ -475,7 +475,7 @@
     "file": "src/agents/direct-api.ts",
     "from": "    if (!Object.prototype.hasOwnProperty.call(record, key)) return fallback;",
     "to": "    if (!record[key]) return fallback;",
-    "expect": "max_retries: 0 要真的關掉重試",
+    "expect": "max_retries: 0 是合法的",
     "script": "verify-extra-body.mjs"
   },
   {
@@ -483,14 +483,14 @@
     "file": "src/agents/direct-api.ts",
     "from": "    if (!isRetryableStatus(response.status) || attempt >= maxRetries) {",
     "to": "    if (!isRetryableStatus(response.status) || attempt >= maxRetries + 2) {",
-    "expect": "重試次數必須等於設定值，不能自己多送",
+    "expect": "一直失敗時會放棄，不是無限重試",
     "script": "verify-extra-body.mjs"
   },
   {
     "name": "baseUrl 誤填成 api_key（金鑰隨工具回傳外流）",
     "file": "src/agents/direct-api.ts",
-    "from": "baseUrl: provider.base_url,",
-    "to": "baseUrl: provider.api_key,",
+    "from": "      prefixes,\n      baseUrl: provider.base_url,",
+    "to": "      prefixes,\n      baseUrl: provider.api_key,",
     "expect": "這個結構會原樣進工具回傳，不可含金鑰",
     "script": "verify-extra-body.mjs"
   },
@@ -499,7 +499,7 @@
     "file": "src/agents/direct-api.ts",
     "from": "    return { configured: {}, note: `讀不到 ${providersPath()}：${(error as Error).message}` };",
     "to": "    throw error;",
-    "expect": "讀不到要回 note，不能讓 models 掛掉",
+    "expect": "★ providers.json 壞掉時回 note，不丟錯",
     "script": "verify-extra-body.mjs"
   },
   {
@@ -507,7 +507,7 @@
     "file": "src/agents/direct-api.ts",
     "from": "    const prefixes = [\r\n      name,\r\n      ...Object.entries(PROVIDER_PREFIX_ALIASES)\r\n        .filter(([, target]) => target === name)\r\n        .map(([alias]) => alias),\r\n    ];",
     "to": "    const prefixes = [name];",
-    "expect": "openrouter 要同時列出 or",
+    "expect": "列出已設定的 provider 與可用前綴",
     "script": "verify-extra-body.mjs"
   },
   {
@@ -515,7 +515,7 @@
     "file": "src/core/updater.ts",
     "from": "  return POST_UPDATE_ACTIONS.filter(({ sha }) => commits.some((c) => c.sha.startsWith(sha))).map(",
     "to": "  return POST_UPDATE_ACTIONS.filter(() => true).map(",
-    "expect": "不相關的 commit 不該給提醒",
+    "expect": "不相關的 commit 不給提醒",
     "script": "verify-update.mjs"
   },
   {
@@ -531,7 +531,7 @@
     "file": "src/agents/direct-api.ts",
     "from": "buildAssistantMessage(turn, config.replayReasoning === true)",
     "to": "buildAssistantMessage(turn, true)",
-    "expect": "沒設定的 model 不可多送 reasoning_content",
+    "expect": "★ 沒開啟時不送",
     "script": "verify-extra-body.mjs"
   },
   {
@@ -539,7 +539,7 @@
     "file": "src/agents/direct-api.ts",
     "from": "  return Array.isArray(setting) && setting.includes(modelName);",
     "to": "  return Array.isArray(setting);",
-    "expect": "只有列出的 model 才送",
+    "expect": "陣列 → 只有列出的 model 送",
     "script": "verify-extra-body.mjs"
   },
   {
@@ -547,7 +547,7 @@
     "file": "src/agents/direct-api.ts",
     "from": "  if (replayReasoning && turn.reasoningText) {\r\n    message.reasoning_content = turn.reasoningText;",
     "to": "  if (replayReasoning) {\r\n    message.reasoning_content = turn.reasoningText;",
-    "expect": "沒有 reasoning 時要省略欄位，不可送空字串",
+    "expect": "端點沒回 reasoning 時省略欄位",
     "script": "verify-extra-body.mjs"
   },
   {
@@ -555,7 +555,7 @@
     "file": "src/agents/direct-api.ts",
     "from": "  throw new Error(\r\n    `Invalid providers.json at ${targetPath}: provider \"${providerName}\" replay_reasoning `",
     "to": "  return undefined;\r\n  throw new Error(\r\n    `Invalid providers.json at ${targetPath}: provider \"${providerName}\" replay_reasoning `",
-    "expect": "不合法的設定要丟錯，不靜默丟棄",
+    "expect": "replay_reasoning 是字串 → 丟錯",
     "script": "verify-extra-body.mjs"
   },
   {
@@ -752,6 +752,38 @@
     "file": "src/models/catalog.ts",
     "from": "    situation: '日常派工',",
     "to": "    situation: '日常派工（舊）',",
+    "expect": "日常派工建議與模型政策一致",
+    "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "codex-ultracode 從 alias 表拿掉（最強組合又回到要手動帶 effort）",
+    "file": "src/models/catalog.ts",
+    "from": "  'codex-ultracode': 'gpt-6-astra',",
+    "to": "  'codex-ultracode-mutated': 'gpt-6-astra',",
+    "expect": "codex-ultracode 解析到旗艦 gpt-6-astra",
+    "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "codex-ultracode 的執行期 effort 退成 max（畫面寫 ultra、實際送 max）",
+    "file": "src/core/user-config.ts",
+    "from": "  'codex-ultracode': 'ultra',",
+    "to": "  'codex-ultracode': 'max',",
+    "expect": "codex-ultracode 不帶 effort 時送出",
+    "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "codex-ultracode 的 payload effort 與執行期不一致（只改顯示那一份）",
+    "file": "src/models/catalog.ts",
+    "from": "  { name: 'codex-ultracode', resolvesTo: 'gpt-6-astra', agent: 'codex', defaultReasoningEffort: 'ultra' },",
+    "to": "  { name: 'codex-ultracode', resolvesTo: 'gpt-6-astra', agent: 'codex', defaultReasoningEffort: 'max' },",
+    "expect": "MODEL_ALIAS_DETAILS 與 BUILTIN_ALIAS_REASONING 的預設 effort 完全一致",
+    "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "日常派工 effort 改回 high（偏離維護者的派工政策）",
+    "file": "src/models/catalog.ts",
+    "from": "    reasoningEffort: 'medium',",
+    "to": "    reasoningEffort: 'high',",
     "expect": "日常派工建議與模型政策一致",
     "script": "verify-alias-config.mjs"
   }

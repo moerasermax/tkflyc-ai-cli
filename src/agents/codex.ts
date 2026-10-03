@@ -16,8 +16,15 @@ import { debugLog } from '../core/debug.js';
  *   同日讀了三次（01:01Z / 02:04Z / 02:13Z，中間一次是稽核者讀的），**10 筆內容
  *   完全相同**（slug、priority、visibility、effort 清單、upgrade 都一樣），所以
  *   下面講的是目錄內容而不是某一次快照。
- *   （`client_version` 欄位寫 0.159.0，比 PATH 上的 0.160.0 舊一號——那是寫入快取
- *   的版本，不能用來斷定本機 CLI 版本，兩者要分開看。）
+ *   ⚠️ **這份快取是機器上所有 codex 執行檔共用的，最後跑的那個覆寫它。**
+ *   PATH 上 npm 裝的 CLI 與 Codex 桌面版自帶的核心（各自版本不同）寫的是同一個檔，
+ *   所以 `client_version` 不等於你要派工的那支 CLI 時，**你讀到的是另一支的視角**，
+ *   而不只是「版本舊一號」。這不是理論：2026-10-03 同一天的多次讀取裡，
+ *   0.159.0／0.160.0 寫入的視角都是 10 筆且內容一致，而另一次讀到 0.155.0 寫入的
+ *   視角只有 9 筆、**沒有 gpt-6.1-sol**（那一次不是我自己讀到的，但 `client_version`
+ *   與 `fetched_at` 在同日反覆變動已證實多個寫入者存在）。
+ *   所以查這個檔之前先 `codex --version`，兩者不符就重派一個 trivial job 讓目標 CLI
+ *   自己重抓，再讀。拿別支寫入的視角去改清單，等於照著一份不是你要用的目錄改。
  *   - 補 `gpt-6.1-sol`（priority 1，"Latest workhorse model for coding and
  *     everyday work"）。它不是旗艦——vendor 自己的推薦文案寫 "near-Astra
  *     performance at a lower cost"，所以最強仍是 `gpt-6-astra`

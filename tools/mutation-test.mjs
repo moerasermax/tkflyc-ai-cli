@@ -111,21 +111,34 @@ const baselineStatus = exec('git', ['status', '--short']).out.trim();
   console.log('');
 }
 
+/**
+ * 把 CRLF 收成 LF。**原始碼與比對片段都要過這一關。**
+ *
+ * ★ 2026-10-03：原本只正規化原始碼、`mutation.from` 卻原樣比對，於是任何從 CRLF 工作區
+ *   複製出來的片段永遠對不上——判 ERROR，而那個突變等於什麼都沒測。實際有 4 筆長期如此
+ *   （全在 verify-extra-body.mjs 底下）。這個 repo 的 `src/` 工作區含 CRLF
+ *   （`git ls-files --eol` 實測 w/crlf），而既有做法又是「從當前原始碼取出實際片段」，
+ *   所以光把那 4 筆資料改成 LF 無法避免復發——根因是這個不對稱，要修在這裡。
+ *   `to` 也要正規化：否則 `to` 內含 CRLF 時會把 CRLF 寫進已經正規化成 LF 的檔案，變成混合 EOL。
+ */
+const toLf = (text) => text.replace(/\r\n/g, '\n');
+
 for (const [i, mutation] of MUTATIONS.entries()) {
   const path = join(ROOT, mutation.file);
-  // 原始 bytes 要原封保留，收尾才寫得回去。worktree 的檔案是 CRLF（git autocrlf），
-  // 但比對片段是用 LF 寫的 —— 所以只在「比對與替換」時正規化，**還原時寫回原始 bytes**。
+  // 原始 bytes 要原封保留，收尾才寫得回去：比對與替換在 LF 空間做，**還原時寫回原始 bytes**。
   // （寫回正規化後的內容會讓整個 worktree 因為 EOL 變更而變髒，
   // 而最後那句「worktree 應為空」原本又沒真的執行 git，兩個錯湊成一個假綠燈。）
   const originalBytes = readFileSync(path);
-  const normalized = originalBytes.toString('utf-8').replace(/\r\n/g, '\n');
-  if (!normalized.includes(mutation.from)) {
+  const normalized = toLf(originalBytes.toString('utf-8'));
+  const from = toLf(mutation.from);
+  const to = toLf(mutation.to);
+  if (!normalized.includes(from)) {
     results.push({ ...mutation, verdict: 'ERROR', detail: '找不到要替換的原始碼片段' });
     console.log(`[${i + 1}/${MUTATIONS.length}] ERROR   ${mutation.name} — 片段不存在`);
     continue;
   }
 
-  writeFileSync(path, normalized.replace(mutation.from, mutation.to));
+  writeFileSync(path, normalized.replace(from, to));
   const build = buildAll();
   const { code, out } =
     build.code !== 0 ? { code: -1, out: `BUILD FAILED\n${build.out}` } : run([join('tests', scriptOf(mutation))]);

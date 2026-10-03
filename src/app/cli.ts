@@ -42,7 +42,7 @@ Options:
   --cwd <path>                 Working directory
   --prompt <text>              Prompt text
   --prompt-file <path>         Path to a prompt file
-  --model <model>              Model name or alias (e.g. sonnet, claude-ultra, gpt-6-astra, codex-ultra, agy, or-qwen/qwen3.7-plus)
+  --model <model>              Model name or alias (e.g. sonnet, claude-ultra, gpt-6-astra, codex-ultra, codex-ultracode, agy, or-qwen/qwen3.7-plus)
   --session-id <id>            Resume a previous session where supported, including direct-api sessions
   --reasoning-effort <level>   Reasoning level for Claude/Codex only (low, medium, high, xhigh, max; codex also ultra); unsupported for Antigravity and direct-api
   --help, -h                   Show this help message

@@ -44,6 +44,10 @@ export const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
 export const BUILTIN_ALIAS_REASONING: Record<string, string> = {
   'claude-ultra': 'max',
   'codex-ultra': 'max',
+  // codex-ultracode：同一顆旗艦，effort 到 codex 的最高一級 ultra。
+  // 這份表是**執行期真正會送出的值**；catalog.ts 的 MODEL_ALIAS_DETAILS 只進 payload 顯示。
+  // 兩份必須一致，verify-alias-config.mjs 有斷言在守。
+  'codex-ultracode': 'ultra',
 };
 
 /**
@@ -379,7 +383,7 @@ export function loadUserConfigSnapshot(): ConfigSnapshot {
  *   1. 環境變數 AI_CLI_DEFAULT_REASONING_EFFORT
  *   2. config.json 的 aliasReasoningEffort[rawModel]
  *   3. config.json 的 defaultReasoningEffort
- *   4. 內建 ultra alias 預設（claude-ultra=max / codex-ultra=max）
+ *   4. 內建 ultra alias 預設（claude-ultra=max / codex-ultra=max / codex-ultracode=ultra）
  *
  * 注意：這裡只回傳「想要的值」，是否真的套用由 caller 依 agent 能力決定。
  */
