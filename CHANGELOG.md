@@ -8,6 +8,16 @@
 
 ## [Unreleased]
 
+## [6.3.0] - 2026-10-03
+
+> **npm 上沒有 6.2.0。** `package.json` 曾被 bump 到 `6.2.0`、下面也有該版本的區段，
+> 但那個版本**從未打 git tag、也從未發佈到 npm**——它的內容只透過 git 自動更新進了各機器。
+> 所以 npm 的版本序是 `6.1.1` → `6.3.0`；`[6.2.0]` 區段記的是「已部署到機器、未發佈到 npm」
+> 的那一批。本版把 `6.2.0` 之後累積的六批工作一次發出去，沒有破壞性變更（SemVer MINOR）。
+> 發版順序照 CLAUDE.md 紅線 4：先 `npm version` 打 annotated tag、再 build、再 publish；
+> 要取 commit SHA 得用 `v6.3.0^{}`。
+
+
 ### 新增（`codex-ultracode`：補上真正的最強組合）
 
 - **新增 alias `codex-ultracode` → `gpt-6-astra` + `reasoning_effort: "ultra"`。**
