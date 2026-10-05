@@ -158,6 +158,13 @@ export function parseCodexUsage(text: string) {
         raw,
       };
     }
+    // 沒有任何額度數字、畫面上卻有錯誤（例：管理員權限下 daemon 拒絕啟動）：量不到就是 unknown，
+    // 不能折成 ok。帶出錯誤原文，UsageService 據此回 status error；raw 照樣保留。
+    const errAt = s.search(/\berror:/i);
+    if (errAt !== -1) {
+      const error = s.slice(errAt).split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 2).join('\n');
+      return { type: 'error', account: email, plan, model, error, raw };
+    }
     try { return { type: 'raw', ...(_parseLooseUsage(raw)) }; }
     catch { return { type: 'raw', raw }; }
   }
@@ -201,28 +208,46 @@ export function parseAgyUsage(text: string) {
 
 interface PtyRunResult { output: string; exitCode: number | null; signal: string | null; timedOut: boolean }
 
-class CodexUsageProvider {
+// codex 0.160 起互動模式會啟動共用背景 daemon，而以系統管理員權限執行時 daemon 拒絕啟動，
+// TUI 只印錯誤、不出 /status 面板。查額度只要一次性的 TUI，用不到 daemon。
+const CODEX_USAGE_ARGS = ['--no-daemon'];
+
+// 舊版 codex 不認得 --no-daemon，clap 印「unexpected argument '--no-daemon'」後直接退出。
+// 不能只比對 "--no-daemon"：管理員權限的 daemon 錯誤本身就寫著「rerun ... with --no-daemon」。
+export function isCodexNoDaemonUnsupported(output: string): boolean {
+  return /unexpected argument\s+'--no-daemon'/i.test(_cleanUsageText(output));
+}
+
+export class CodexUsageProvider {
   provider = 'codex';
   transport = 'pty';
   constructor(private cliPath: string) {}
 
   async query() {
-    const result = await this._run();
+    // 先帶參數、不認得才拿掉重跑一次：新版不多付一次啟動成本，也不必另外 spawn `codex --help`
+    // （cliPath 在 Windows 常是 .cmd shim，PTY 吃得下、child_process 直接 spawn 吃不下）。
+    let result = await this._run(CODEX_USAGE_ARGS);
+    if (isCodexNoDaemonUnsupported(result.output)) result = await this._run([]);
     const text = _cleanUsageText(result.output);
     if (!text) throw new Error('codex usage: no output');
-    return parseCodexUsage(text);
+    const usage = parseCodexUsage(text);
+    // 沒抓到額度面板也沒錯誤字樣（例：被 hook 信任等互動畫面擋住、/status 送不進去）：同樣是 unknown。
+    if (usage.type === 'raw') {
+      return { ...usage, type: 'error', error: `no quota panel in output${result.timedOut ? ' (timed out after 60s)' : ''}` };
+    }
+    return usage;
   }
 
   // Codex 啟動時會 booting MCP servers，model 框會先閃現真實模型再退回 "loading"，
   // 數秒後才穩定；若太早送 /status 會被吃掉。因此等輸出靜止(quiescence)再送，
   // 並在面板未出現時重試。
-  private _run(): Promise<PtyRunResult> {
+  private _run(args: string[]): Promise<PtyRunResult> {
     return new Promise((resolve, reject) => {
       let ptyProc: any;
       try {
         const pty = _loadPtyModule();
         // 在 homedir 啟動，盡量避免專案層級 MCP server 拖慢開機
-        ptyProc = pty.spawn(this.cliPath, [], { name: 'xterm-color', cols: 200, rows: 50, cwd: homedir(), env: process.env });
+        ptyProc = pty.spawn(this.cliPath, args, { name: 'xterm-color', cols: 200, rows: 50, cwd: homedir(), env: process.env });
       } catch (e) { reject(e); return; }
       if (!ptyProc?.pid) { try { ptyProc?.kill?.(); } catch {} reject(new Error('codex pty.spawn returned no pid')); return; }
 
@@ -495,6 +520,11 @@ export class UsageService {
     if (!provider) return _makeResult(agent, 'unavailable', null, `${agent} CLI not configured`, NEG_TTL);
     try {
       const usage = await provider.query();
+      // 解析器判定「量不到、畫面是錯誤」（type: 'error'）時回 error，但 usage（含 raw 原文）照樣帶回去。
+      const parsed = usage as { type?: unknown; error?: unknown } | null;
+      if (parsed?.type === 'error') {
+        return _makeResult(agent, 'error', usage, `${agent} usage: ${String(parsed.error ?? 'unknown error')}`, NEG_TTL);
+      }
       return _makeResult(agent, 'ok', usage, null, DEFAULT_TTL);
     } catch (e) {
       return _makeResult(agent, 'error', null, _errMsg(e), NEG_TTL);

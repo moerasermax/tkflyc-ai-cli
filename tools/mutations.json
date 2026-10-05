@@ -786,5 +786,53 @@
     "to": "    reasoningEffort: 'high',",
     "expect": "日常派工建議與模型政策一致",
     "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "查額度的 TUI 不帶 --no-daemon（管理員權限下 daemon 拒絕啟動，額度讀不到）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "const CODEX_USAGE_ARGS = ['--no-daemon'];",
+    "to": "const CODEX_USAGE_ARGS: string[] = [];",
+    "expect": "第一次啟動帶 --no-daemon",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "舊版 codex 不認得 --no-daemon 時沒有退路（直接拿 clap 錯誤當結果）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "    if (isCodexNoDaemonUnsupported(result.output)) result = await this._run([]);",
+    "to": "",
+    "expect": "舊版 codex 不認得 --no-daemon 時拿掉參數重跑一次",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "「不認得參數」的偵測放寬成只比對 --no-daemon（管理員錯誤本身就含這串，會白跑一次）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "/unexpected argument\\s+'--no-daemon'/i",
+    "to": "/--no-daemon/i",
+    "expect": "管理員權限的 daemon 錯誤不觸發重跑",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "解析器不認錯誤畫面（量不到額度、畫面是 Error 仍回 raw）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "    if (errAt !== -1) {",
+    "to": "    if (errAt !== -1 && false) {",
+    "expect": "管理員權限錯誤原文餵給解析器，結果不是 ok",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "UsageService 不看 type error（解析器判錯、status 仍回 ok）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "      if (parsed?.type === 'error') {",
+    "to": "      if (parsed?.type === 'error-never-matches') {",
+    "expect": "量不到額度時 status 不是 ok",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "沒抓到額度面板仍回 ok（卡在互動畫面、逾時的假綠燈）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "    if (usage.type === 'raw') {",
+    "to": "    if (usage.type === 'raw' && false) {",
+    "expect": "沒抓到額度面板（卡在互動畫面、逾時）時 status 不是 ok",
+    "script": "verify-usage-parse.mjs"
   }
 ]

@@ -8,6 +8,33 @@
 
 ## [Unreleased]
 
+### 修正（`query_usage` 讀不到 Codex 額度卻回 `status: "ok"`）
+
+- **查 Codex 額度的 TUI 改帶 `--no-daemon`。** 2026-10-06 實測（codex-cli 0.160.0、Windows 11）：
+  呼叫端以系統管理員權限執行時，ai-cli 與它啟動的 codex 都繼承這個權限，而 0.160 的互動模式要啟動
+  共用背景 daemon，daemon 在管理員權限下拒絕啟動。TUI 只印
+  `Error: start the Windows daemon from a non-elevated terminal …`，`/status` 面板永遠不會出現。
+  查額度只要一次性的 TUI，用不到 daemon。`run` 的 `codex exec` 派工路徑不經 daemon（同時段實測
+  exit 0），一個字都沒動。（Claude，moerasermax 指示）
+  - **舊版退路選「出現 unexpected argument 才拿掉參數重跑一次」，不選「先看 `codex --help`」**：
+    新版不多付一次啟動成本；而且 cliPath 在 Windows 常是 `.cmd` shim，PTY 吃得下，
+    `child_process` 直接 spawn 吃不下，先探 `--help` 等於要再造一套 spawn。
+    比對字串取自 clap 的實際輸出（`Error: unexpected argument '<arg>' found`），而且**不能只比對
+    `--no-daemon`**：管理員權限的錯誤本身就寫著「rerun … with --no-daemon」，會白跑一次。
+- **量不到額度就回 `status: "error"`，不再折成 `ok`。** 過去不管 raw 裡有沒有額度數字，
+  provider 只要沒丟例外就是 `ok`。現在兩種情況改回 `error`，而且 `usage.raw` 照樣帶回去，
+  呼叫端仍讀得到原文：
+  - 沒有額度數字、畫面上有 `Error:`：`error` 欄位帶錯誤原文（最多兩行）。
+  - 沒有額度數字、也沒有錯誤字樣：例如卡在 codex 的 hook 信任畫面（「2 hooks are new or changed」）、
+    `/status` 送不進去。`error` 寫 `no quota panel in output`，逾時會另外標 `(timed out after 60s)`。
+    這是修完 `--no-daemon` 後實跑才露面的第二個入口：同一個假綠燈，原本的條件抓不到。
+  - 有額度數字時，畫面別處的 `Error:` 字樣不影響 `ok`。
+  - hook 信任畫面本身**不由程式處理**：信不信任 hook 是使用者的決定，查額度不替他做，
+    也不用 `--dangerously-bypass-hook-trust`。
+- 新增 `tests/verify-usage-parse.mjs` 進 `npm test`（14→15 支），15 條斷言，以假 PTY 取代真實 codex。
+  在此之前 usage-service **沒有任何測試**。突變 +6（不帶 `--no-daemon`、拿掉舊版退路、偵測放寬成只比對
+  `--no-daemon`、解析器不認錯誤畫面、status 不看 `type: error`、沒有面板仍回 `ok`）。（Claude）
+
 ## [6.3.0] - 2026-10-03
 
 > **npm 上沒有 6.2.0。** `package.json` 曾被 bump 到 `6.2.0`、下面也有該版本的區段，

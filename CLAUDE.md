@@ -33,7 +33,7 @@ Peter Steinberger 的 claude-code-mcp（MIT）。分歧點在架構：上游把�
 | CI | Windows / Linux / macOS × Node 20.19、22 — **三個平台都是閘門** |
 | 本機路徑 | `C:\Users\Moera\ai-cli-mcp-source`（目錄名還是舊的，不影響任何東西） |
 
-規模：`src/` 33 個 `.ts`、9,984 行；驗證腳本都在 `tests/`（16 支），其中 14 支進 `npm test`
+規模：`src/` 33 個 `.ts`、10,014 行；驗證腳本都在 `tests/`（17 支），其中 15 支進 `npm test`
 （`verify-e2e.mjs` 會真的燒額度、`verify-strict-behaviour.mjs` 屬手動輔助，兩者刻意不進）。
 
 ---

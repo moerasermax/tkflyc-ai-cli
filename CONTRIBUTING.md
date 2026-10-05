@@ -21,7 +21,7 @@
 - 改完一定要能編譯：`npm run build`（或 `npm run typecheck`）必須零錯誤。
 - 驗證腳本都在 `tests/`（`tests/verify-*.mjs`）；新功能盡量補一支放這裡。每支用相對路徑往上一層讀 `dist/`、`src/`、`tools/`，新增時照抄既有那行 `const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))` 即可。
 - 有對應的驗證腳本時，跑過確認通過。
-- `npm test` 串起十四支驗證腳本（breaker / rate / direct-api / extra-body / alias-config / catalog-source / agy-parse / exec-contract / mcp-capabilities / mcp-system-prompt / mcp / liveness / update / mutation-manifest），都不會打真實 AI 供應商或真實 origin。
+- `npm test` 串起十五支驗證腳本（breaker / rate / direct-api / extra-body / alias-config / catalog-source / agy-parse / usage-parse / exec-contract / mcp-capabilities / mcp-system-prompt / mcp / liveness / update / mutation-manifest），都不會打真實 AI 供應商或真實 origin。
 - `verify-catalog-source.mjs` 涵蓋非同步查詢、單飛、10 分鐘 TTL、30 天磁碟快取及 agy 的逾時／stderr／kill；`verify-mcp.mjs` 對三個入口驗冷啟動 `tools/list < 1 秒` 與 `models` 等待規則。兩支自建暫存快取並使用 `tools/stubs/agy-models-*`，不連真實 vendor。
 - verify 腳本與突變 harness 載入 `tools/stubs/catalog-test-env.mjs`，隔離 config.json、providers、catalog-cache 與狀態，並設定 `AI_CLI_AUTO_UPDATE=off`、git 只允許 file 協定。alias-config 單跑也會自行載入，不碰使用者目錄。
 - `verify-update.mjs` 只在暫存 bare origin + A/B clone 內開啟更新；`AI_CLI_UPDATE_REPO_ROOT` 僅供測試，不要用來覆寫正式安裝。
