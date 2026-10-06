@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+## [6.5.0] - 2026-10-06
+
+> 額度查詢與成本可見性的一批：三家額度改為模擬終端機畫面解析（claude 假綠燈、agy 剩餘量讀反、codex 欄位缺漏）、
+> codex 優先讀 session 檔、agy／direct-api 的 job 也回報用量、`wait` / `get_result` 不再整份帶原始輸出、
+> 發版檢查掛上 `prepublishOnly`。新增欄位與修正為主（SemVer MINOR）；**看得到的形狀變化有三處**，見各段的相容性說明：
+> agy 標籤列的 `percentUsed` 方向修正、claude 量不到時改回 `error`、執行中的 job 精簡結果不再帶 `stdout`。
+
 ### 修正（三家額度查詢：數字讀錯、讀不到卻回 `ok`）
 
 - **TUI 輸出改成「模擬終端機畫面」再解析，不再只是刪掉跳脫碼。** 2026-10-06 抓原始位元組查到：codex-cli 0.160
@@ -1921,7 +1928,8 @@ Antigravity 可用；**Kiro 沒額度**（CLI 回 `Not logged in`）、**Forge �
 - Windows 上優先解析 `.cmd`/`.exe` 而非 extensionless shim。
 - 移除已壞掉的 gemini 殘留；usage 外掛路徑改由 `AI_CLI_USAGE_PLUGIN_BIN` 環境變數設定。
 
-[Unreleased]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.4.1...HEAD
+[Unreleased]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.5.0...HEAD
+[6.5.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.4.1...v6.5.0
 [6.4.1]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.4.0...v6.4.1
 [6.4.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.3.0...v6.4.0
 [6.3.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.1.1...v6.3.0
