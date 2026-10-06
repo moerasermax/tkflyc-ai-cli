@@ -317,6 +317,20 @@ function unwrapAgyBody(text: string): string {
  *   ② text 解析保留成 fallback：舊版 agy、或哪天 json 格式又變，
  *      至少本文還拿得到，不要為了新欄位把既有能力弄丟。
  */
+/** agy 未回報快取；缺欄位保持 unknown，不補造 0。 */
+function normalizeJobUsage(raw: any) {
+  const valid = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  if (!raw || !valid(raw.input_tokens) || !valid(raw.output_tokens)) return undefined;
+  return {
+    input_tokens: raw.input_tokens,
+    output_tokens: raw.output_tokens,
+    ...(valid(raw.thinking_tokens) ? { reasoning_output_tokens: raw.thinking_tokens } : {}),
+    ...(raw.thinking_tokens !== undefined && !valid(raw.thinking_tokens) ? { incomplete: true } : {}),
+    source: 'agy json',
+  };
+}
+
 function parseOutput(stdout: string): unknown {
   if (!stdout) return null;
   const trimmed = stdout.trim();
@@ -345,8 +359,10 @@ function parseOutput(stdout: string): unknown {
       continue;
     }
     if (typeof parsed.response !== 'string') continue;
+    const usage = normalizeJobUsage(parsed.usage);
     return {
       message: unwrapAgyBody(parsed.response),
+      ...(usage ? { usage } : {}),
       ...(typeof parsed.conversation_id === 'string' && parsed.conversation_id !== ''
         ? { session_id: parsed.conversation_id }
         : {}),

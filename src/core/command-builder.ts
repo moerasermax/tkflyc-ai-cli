@@ -17,7 +17,7 @@ import { resolveModelAlias, isRemovedModel, removedModelMessage } from '../model
 import { acceptsConfiguredEffort, resolveReasoningEffort } from './reasoning.js';
 import {
   loadUserConfigSnapshot,
-  resolveConfiguredReasoningEffort,
+  resolveConfiguredReasoningEffortWithSource,
   type UserConfig,
 } from './user-config.js';
 import { debugLog } from './debug.js';
@@ -119,17 +119,18 @@ function resolveDefaultReasoningEffort(
   agent: AgentDefinition,
   rawModel: string,
   config: UserConfig
-): string {
-  const configured = resolveConfiguredReasoningEffort(rawModel, config);
-  if (!configured) return '';
+): ReturnType<typeof resolveConfiguredReasoningEffortWithSource> {
+  const resolved = resolveConfiguredReasoningEffortWithSource(rawModel, config);
+  const configured = resolved.effort;
+  if (!configured) return resolved;
   // 規則本體在 reasoning.ts 的 acceptsConfiguredEffort：models payload 回報時用的是同一份。
   if (!acceptsConfiguredEffort(agent.reasoning, configured)) {
     debugLog(
       `[Config] Skipping default reasoning "${configured}": ${agent.id} does not support it or it is outside its allowed set; using its CLI default`
     );
-    return '';
+    return { ...resolved, effort: undefined };
   }
-  return configured;
+  return resolved;
 }
 
 export function buildCliCommand(options: BuildCliCommandOptions): BuiltCommand & { warnings?: string[] } {
@@ -191,13 +192,10 @@ export function buildCliCommand(options: BuildCliCommandOptions): BuiltCommand &
     reasoningEffort = resolveReasoningEffort(agent.reasoning, explicitEffort);
     effortSource = 'explicit';
   } else {
-    reasoningEffort = resolveDefaultReasoningEffort(agent, rawModel, userConfig);
-    // 空設定會保留內建 alias 預設；環境變數及持久化覆寫都歸 config。
-    effortSource = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(
-      process.env.AI_CLI_DEFAULT_REASONING_EFFORT?.trim().toLowerCase() ?? ''
-    ) ||
-      Object.prototype.hasOwnProperty.call(userConfig.aliasReasoningEffort ?? {}, rawModel) ||
-      userConfig.defaultReasoningEffort ? 'config' : 'alias';
+    const resolved = resolveDefaultReasoningEffort(agent, rawModel, userConfig);
+    reasoningEffort = resolved.effort ?? '';
+    // 對外維持 explicit/alias/config；詳細來源由選值函式直接回傳。
+    effortSource = resolved.source === 'builtin-alias' ? 'alias' : 'config';
   }
   const warningFields = ['xhigh', 'max', 'ultra'].includes(reasoningEffort)
     ? { warnings: [`High-cost effort "${reasoningEffort}" (source: ${effortSource}). Use medium for everyday dispatch; xhigh/max/ultra should be used only when explicitly requested by the user.`] }

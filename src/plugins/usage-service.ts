@@ -6,7 +6,9 @@
 
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { stripAnsi } from '../core/ansi.js';
 
 const _patchRequire = createRequire(import.meta.url);
@@ -25,19 +27,89 @@ function _cleanUsageText(text: string): string {
     .trim();
 }
 
-// codex 0.160 的 TUI 用游標移動排版：`ESC[nC`（右移 n 格）代替空格、`ESC[列;欄H` 代替換行。
-// stripAnsi 會把它們整段刪掉，於是 `Pro 100` 變 `Pro100`、下一列的 `Model:` 黏到上一行行尾。
-// 清 ANSI 之前先還原：右移 → n 個空格；換到「別的列」→ 換行；同一列內的跳躍 → 一個空格
-// （不能換行，否則會把 `Weekly limit:` 跟它的數字拆到兩行）。只給 codex 用，claude / agy 不受影響。
-function _expandCursorMoves(text: string): string {
-  let row: number | null = null;
-  return (text ?? '').replace(/\x1b\[(\d*)C|\x1b\[(\d+)(?:;\d+)?H|\n/g, (match, cols, targetRow) => {
-    if (match === '\n') { if (row !== null) row++; return match; }
-    if (targetRow === undefined) return ' '.repeat(Math.min(Math.max(1, Number(cols) || 1), 200));
-    const sameRow = row === Number(targetRow);
-    row = Number(targetRow);
-    return sameRow ? ' ' : '\n';
-  });
+function _cellWidth(ch: string): number {
+  const cp = ch.codePointAt(0) ?? 0;
+  return (cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3)
+    || (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe30 && cp <= 0xfe4f) || (cp >= 0xff00 && cp <= 0xff60)
+    || (cp >= 0xffe0 && cp <= 0xffe6) ? 2 : 1;
+}
+
+/**
+ * 把 TUI 的輸出「播放」到一個簡易畫面緩衝區，回傳畫面上實際看得到的文字（捲出畫面的歷史也保留）。
+ *
+ * 為什麼不是清掉跳脫碼就好：codex 0.160 與 claude 的 TUI 只重畫變動的格子。`ESC[列;欄H` 換列、
+ * `ESC[nC` 是「跳過 n 格、保留原內容」、`ESC[nX` 清格、`ESC[K` 清到行尾。只刪跳脫碼時，codex 的
+ * `Pro␛[1C100` 變 `Pro100`、下一列的 `Model:` 黏到上一行；claude 的 `Current sess␛[1Con`（那個 i
+ * 沒變所以跳過）若把跳過當成空格，又會變成 `Current sess on`。照終端機的規則播放一次才對得上畫面。
+ */
+export function renderTerminal(input: string, cols = 200, rows = 50): string {
+  const lines: string[][] = [[]];
+  let top = 0, row = 0, col = 0;
+  const line = (r: number) => { const i = top + r; while (lines.length <= i) lines.push([]); return lines[i]; };
+  const clampRow = (r: number) => Math.min(Math.max(r, 0), rows - 1);
+  const clampCol = (c: number) => Math.min(Math.max(c, 0), cols - 1);
+  // 換行回到行首：ConPTY 送 \r\n；純文字（測試、舊版輸出）只有 \n，也要回到行首。
+  const newline = () => { if (row < rows - 1) row++; else top++; line(row); col = 0; };
+  const s = input ?? '';
+  for (let i = 0; i < s.length;) {
+    const c = s[i];
+    if (c === '\x1b') {
+      if (s[i + 1] === '[') {
+        const m = /^\x1b\[([0-9;?]*)[ -/]*([@-~])/.exec(s.slice(i, i + 40));
+        if (!m) { i++; continue; }
+        i += m[0].length;
+        const p = m[1].replace(/\?/g, '').split(';').map((v) => (v === '' ? NaN : Number(v)));
+        const n = Number.isFinite(p[0]) && p[0] > 0 ? p[0] : 1;
+        const cur = line(row);
+        switch (m[2]) {
+          case 'H': case 'f': row = clampRow((p[0] || 1) - 1); col = clampCol((p[1] || 1) - 1); line(row); break;
+          case 'A': row = clampRow(row - n); break;
+          case 'B': row = clampRow(row + n); line(row); break;
+          case 'C': col = clampCol(col + n); break;
+          case 'D': col = clampCol(col - n); break;
+          case 'G': col = clampCol((p[0] || 1) - 1); break;
+          case 'd': row = clampRow((p[0] || 1) - 1); line(row); break;
+          case 'X': for (let k = col; k < col + n && k < cur.length; k++) cur[k] = ' '; break;
+          case 'K': {
+            const mode = p[0] || 0;
+            if (mode === 0) cur.length = Math.min(cur.length, col);
+            else if (mode === 1) for (let k = 0; k <= col && k < cur.length; k++) cur[k] = ' ';
+            else cur.length = 0;
+            break;
+          }
+          case 'J': {
+            const mode = p[0] || 0;
+            if (mode === 0) { cur.length = Math.min(cur.length, col); for (let r = row + 1; r < rows; r++) line(r).length = 0; }
+            else if (mode === 2 || mode === 3) for (let r = 0; r < rows; r++) line(r).length = 0;
+            break;
+          }
+          default: break; // m（顏色）、h / l（模式）等不影響文字位置
+        }
+        continue;
+      }
+      if (s[i + 1] === ']') { // OSC（例：超連結），到 BEL 或 ST 為止
+        const rest = s.slice(i);
+        const end = rest.search(/\x07|\x1b\\/);
+        i += end < 0 ? rest.length : end + (rest[end] === '\x07' ? 1 : 2);
+        continue;
+      }
+      i += 2; continue;
+    }
+    if (c === '\r') { col = 0; i++; continue; }
+    if (c === '\n') { newline(); i++; continue; }
+    if (c === '\b') { col = Math.max(0, col - 1); i++; continue; }
+    if (c < ' ') { i++; continue; }
+    const ch = String.fromCodePoint(s.codePointAt(i) ?? 32);
+    i += ch.length;
+    const w = _cellWidth(ch);
+    if (col + w > cols) newline();
+    const cur = line(row);
+    while (cur.length < col) cur.push(' ');
+    cur[col] = ch;
+    if (w === 2) cur[col + 1] = '';
+    col += w;
+  }
+  return lines.map((l) => l.join('').replace(/\s+$/, '')).join('\n');
 }
 
 function _toNumber(value: unknown): number | null {
@@ -80,7 +152,7 @@ function _parseLooseUsage(text: string): Record<string, unknown> {
 
 
 export function parseClaudeUsage(text: string) {
-  const raw = _cleanUsageText(text);
+  const raw = _cleanUsageText(renderTerminal(text));
   // 移除進度條方塊字元，讓 regex 易於匹配
   const s = raw.replace(/[█▌▎▍▋▊▉▏▐▀▄■□▪▫]+/g, ' ');
 
@@ -96,8 +168,27 @@ export function parseClaudeUsage(text: string) {
   const cacheRead      = _extractFirstNumber(s, /(\d+)\s+cache\s+read/i);
   const cacheWrite     = _extractFirstNumber(s, /(\d+)\s+cache\s+write/i);
 
+  // 量不到就是 unknown：一個額度百分比都沒有、也沒有 API key 帳號的成本，回 type 'error'
+  // （2026-10-06 實測：Claude Code 的游標重繪讓 `Current session` 變 `Currentsession`，
+  // 所有欄位都是 null，status 卻是 ok）。
+  if (sessionPct === null && weekAllPct === null && weekSonnetPct === null && costUsd === null) {
+    return { type: 'error', error: 'no usage panel in output', raw };
+  }
+
+  // 模型專屬的週額度（例：`Current week (Fable)`）。all models / Sonnet only 已有固定欄位，不重複列。
+  const additionalLimits: { label: string; percentUsed: number; percentRemaining: number; basis: 'used'; resetAt: string | null }[] = [];
+  for (const m of s.matchAll(/Current\s+week\s*\(([^)\n]+)\)\s+(\d+(?:\.\d+)?)\s*%\s*used\s*(?:Resets?\s+([^\n]+))?/gi)) {
+    if (/^(all\s+models|Sonnet\s+only)$/i.test(m[1].trim())) continue;
+    const used = _toNumber(m[2]);
+    if (used === null) continue;
+    additionalLimits.push({ label: m[1].trim(), percentUsed: used, percentRemaining: 100 - used, basis: 'used', resetAt: m[3]?.trim() ?? null });
+  }
+
   return {
     raw,
+    // 以下 *Percent 欄位都是「已用」百分比（畫面寫 N% used），跟 codex 的 percentRemaining 方向相反。
+    percentBasis:          'used' as const,
+    ...(additionalLimits.length > 0 ? { additionalLimits } : {}),
     sessionPercent:        sessionPct,
     sessionResetAt:        sessionReset,
     weekAllModelsPercent:  weekAllPct,
@@ -113,7 +204,7 @@ export function parseClaudeUsage(text: string) {
 }
 
 export function parseCodexUsage(text: string) {
-  const raw = _cleanUsageText(_expandCursorMoves(text));
+  const raw = _cleanUsageText(renderTerminal(text));
   // 去掉進度條方塊與框線字元，只留文字，方便比對
   const s = raw.replace(/[█░▓▒■□▪▫]+/g, ' ').replace(/[│╭╮╰╯┌┐└┘┃━]+/g, ' ');
 
@@ -187,6 +278,16 @@ export function parseCodexUsage(text: string) {
     catch { return { type: 'raw', raw }; }
   }
 
+  // 主額度以外的額度行（例：0.160 的 `Luna Reserve Weekly limit:`，特定模型的保留額度）。
+  // 原本只取第一個 weekly，其餘的默默丟掉。
+  const additionalLimits: { label: string; percentRemaining: number | null; percentUsed: number | null; basis: 'left' | 'used'; resetAt: string | null }[] = [];
+  for (const lm of s.matchAll(/^[ \t]*([A-Za-z][\w .+-]*?)\s+limit\s*:/gim)) {
+    const label = lm[1].trim();
+    if (/^(5h|weekly)$/i.test(label)) continue;
+    const info = limitInfo(new RegExp(lm[0].trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
+    if (info) additionalLimits.push({ label, ...info });
+  }
+
   return {
     type: 'rate_limits',
     account: email,
@@ -194,16 +295,22 @@ export function parseCodexUsage(text: string) {
     model,
     fiveHour: fiveHour ?? null,
     weekly: weekly ?? null,
+    ...(additionalLimits.length > 0 ? { additionalLimits } : {}),
     raw,
   };
 }
 
 export function parseAgyUsage(text: string) {
-  const raw = _cleanUsageText(text);
+  const raw = _cleanUsageText(renderTerminal(text, 220));
   const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
-  const models: { model: string; percentUsed: number | null; status: string | null }[] = [];
+  const models: Record<string, unknown>[] = [];
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  let group: string | null = null;
 
   for (let i = 0; i < lines.length - 1; i++) {
+    // agy 1.2 的面板按群組列（`GEMINI MODELS`、`CLAUDE AND GPT MODELS`），每組有自己的週／5 小時額度。
+    const header = lines[i].match(/([A-Z][A-Z0-9 &/,.+-]*\bMODELS)$/);
+    if (header && !/%/.test(lines[i])) { group = header[1].trim(); continue; }
     const next = lines[i + 1] ?? '';
     const percentMatch = next.match(/(\d+(?:\.\d+)?)\s*%\s*$/);
     if (!percentMatch) continue;
@@ -213,7 +320,25 @@ export function parseAgyUsage(text: string) {
     if (/^\(\d+/.test(nameLine)) continue;
     const statusLine = lines[i + 2] ?? '';
     const isNav = /↑|↓|pgup|pgdown|ctrl|esc/i.test(statusLine);
-    models.push({ model: nameLine, percentUsed: _toNumber(percentMatch[1]), status: (!isNav && statusLine) ? statusLine : null });
+    const status = (!isNav && statusLine) ? statusLine : null;
+    const pct = _toNumber(percentMatch[1]);
+    // 標籤寫明「Remaining／Used」時照標籤換算。2026-10-06 實測畫面是「Weekly Limit Remaining 99.86%」，
+    // 原本把它原樣放進 percentUsed，讀的人會以為已經用掉 99.86%。
+    const label = nameLine.match(/limit\s+(remaining|used)\b/i);
+    if (label) {
+      const remaining = /remaining/i.test(label[1]);
+      models.push({
+        model: group ?? nameLine,
+        limit: nameLine,
+        percentRemaining: pct === null ? null : (remaining ? pct : round2(100 - pct)),
+        percentUsed: pct === null ? null : (remaining ? round2(100 - pct) : pct),
+        basis: remaining ? 'remaining' : 'used',
+        status,
+      });
+    } else {
+      // 舊版畫面（每行一個模型名）：百分比是剩餘還是已用沒有驗證過，照舊放 percentUsed、不改語意。
+      models.push({ model: nameLine, percentUsed: pct, status });
+    }
     i += 2;
   }
 
@@ -258,22 +383,99 @@ export function codexStatusWrites(screenTail: string): string[] {
   return /›\s*\/status\s*$/.test(screenTail.trimEnd()) ? ['\r'] : ['/status', '\r'];
 }
 
+export const CODEX_SESSION_RATE_LIMITS_MAX_AGE_MS = 10 * 60_000;
+
+function _readTail(file: string, bytes: number): string {
+  const fd = openSync(file, 'r');
+  try {
+    const size = fstatSync(fd).size;
+    const len = Math.min(size, bytes);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, size - len);
+    return buf.toString('utf8');
+  } finally { closeSync(fd); }
+}
+
+function _codexHome(): string {
+  return process.env.CODEX_HOME || join(homedir(), '.codex');
+}
+
+/**
+ * 讀 codex 最近的 session 檔裡最後一筆 `rate_limits`（codex 每個 turn 結束都會寫一筆 token_count 事件）。
+ * 不用開 TUI：瞬間拿到，管理員權限、daemon、hook 信任畫面都不影響（2026-10-06 實測 session 檔有
+ * `primary.used_percent`、`window_minutes`、`resets_at`、`plan_type`）。代價是只反映「最後一次有人用
+ * codex」那一刻，所以事件超過 maxAgeMs 就回 null，由呼叫端退回 TUI；結果附 asOf，讓呼叫端知道數字是何時的。
+ */
+export function readCodexSessionRateLimits(codexHome: string, nowMs = Date.now(), maxAgeMs = CODEX_SESSION_RATE_LIMITS_MAX_AGE_MS) {
+  const root = join(codexHome, 'sessions');
+  if (!existsSync(root)) return null;
+  const dayDir = (offsetDays: number) => {
+    const t = new Date(nowMs - offsetDays * 86_400_000);
+    return join(root, String(t.getFullYear()), String(t.getMonth() + 1).padStart(2, '0'), String(t.getDate()).padStart(2, '0'));
+  };
+  const files = [dayDir(0), dayDir(1)].filter((d) => existsSync(d))
+    .flatMap((d) => readdirSync(d).filter((n) => n.endsWith('.jsonl')).map((n) => join(d, n)))
+    .map((f) => ({ f, mtime: statSync(f).mtimeMs }))
+    .sort((a, b) => b.mtime - a.mtime);
+  for (const { f, mtime } of files.slice(0, 5)) {
+    if (nowMs - mtime > maxAgeMs) break; // 更舊的檔案不可能有更新的事件
+    const lines = _readTail(f, 256 * 1024).split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes('"rate_limits"')) continue;
+      let event: any;
+      try { event = JSON.parse(lines[i]); } catch { continue; }
+      const rl = event?.payload?.rate_limits;
+      const ts = Date.parse(event?.timestamp ?? '');
+      if (!rl || !Number.isFinite(ts)) continue;
+      if (nowMs - ts > maxAgeMs) return null;
+      const win = (w: any) => (w && typeof w.used_percent === 'number' ? {
+        percentRemaining: Math.round((100 - w.used_percent) * 100) / 100,
+        percentUsed: w.used_percent,
+        basis: 'used' as const,
+        resetAt: typeof w.resets_at === 'number' ? new Date(w.resets_at * 1000).toISOString() : null,
+        windowMinutes: typeof w.window_minutes === 'number' ? w.window_minutes : null,
+      } : null);
+      const windows = [win(rl.primary), win(rl.secondary)].filter((w): w is NonNullable<ReturnType<typeof win>> => !!w);
+      // 依視窗長度分：≤ 6 小時是 5h 額度，≥ 6 天是週額度。
+      const fiveHour = windows.find((w) => w.windowMinutes !== null && w.windowMinutes <= 360) ?? null;
+      const weekly = windows.find((w) => w.windowMinutes !== null && w.windowMinutes >= 8640) ?? null;
+      if (!fiveHour && !weekly) return null;
+      return {
+        type: 'rate_limits', source: 'session-file', asOf: new Date(ts).toISOString(),
+        account: null, plan: typeof rl.plan_type === 'string' ? rl.plan_type : null, model: null,
+        fiveHour, weekly, raw: lines[i].trim(),
+      };
+    }
+  }
+  return null;
+}
+
 export class CodexUsageProvider {
   provider = 'codex';
   transport = 'pty';
   constructor(private cliPath: string) {}
 
-  async query() {
+  async query({ fresh = false }: { fresh?: boolean } = {}) {
+    // 有夠新的 session 檔就不開 TUI（瞬間、不受權限與信任畫面影響）。refresh=true 一律走 TUI。
+    if (!fresh) {
+      const fromFile = readCodexSessionRateLimits(_codexHome());
+      if (fromFile) return fromFile;
+    }
     // 先帶參數、不認得才拿掉重跑一次：新版不多付一次啟動成本，也不必另外 spawn `codex --help`
     // （cliPath 在 Windows 常是 .cmd shim，PTY 吃得下、child_process 直接 spawn 吃不下）。
     let result = await this._run(CODEX_USAGE_ARGS);
     if (isCodexNoDaemonUnsupported(result.output)) result = await this._run([]);
-    const text = _cleanUsageText(_expandCursorMoves(result.output));
+    const text = _cleanUsageText(renderTerminal(result.output));
     if (!text) throw new Error('codex usage: no output');
     const usage = parseCodexUsage(text);
     // 沒抓到額度面板也沒錯誤字樣（例：被 hook 信任等互動畫面擋住、/status 送不進去）：同樣是 unknown。
     if (usage.type === 'raw') {
       return { ...usage, type: 'error', error: `no quota panel in output${result.timedOut ? ' (timed out after 60s)' : ''}` };
+    }
+    // 0.160 的 /status 面板沒有方案欄位；方案不常變，從最近的 session 檔補（不設時間限制）。
+    if (usage.type === 'rate_limits' && !usage.plan) {
+      const plan = readCodexSessionRateLimits(_codexHome(), Date.now(), Number.POSITIVE_INFINITY)?.plan;
+      if (plan) return { ...usage, plan };
     }
     return usage;
   }
@@ -359,7 +561,7 @@ class AgyUsageProvider {
 
   async query() {
     const result = await this._run();
-    const text = _cleanUsageText(result.output);
+    const text = _cleanUsageText(renderTerminal(result.output, 220));
     if (!text) throw new Error('agy usage: no output');
     return parseAgyUsage(text);
   }
@@ -416,7 +618,7 @@ class ClaudeUsageProvider {
 
   async query() {
     const result = await this._run();
-    const text = _cleanUsageText(result.output);
+    const text = _cleanUsageText(renderTerminal(result.output));
     if (!text) throw new Error('claude usage: no output');
     return parseClaudeUsage(text);
   }
@@ -510,10 +712,10 @@ function _errMsg(e: unknown): string {
 export class UsageService {
   private cache = new Map<string, { result: ReturnType<typeof _makeResult>; capturedAt: number; ttlMs: number }>();
   private inflight = new Map<string, Promise<ReturnType<typeof _makeResult>>>();
-  private providers: Map<string, { query(): Promise<unknown> }>;
+  private providers: Map<string, { query(opts?: { fresh?: boolean }): Promise<unknown> }>;
 
   constructor(cliPaths: UsageCliPaths = {}) {
-    const entries: [string, { query(): Promise<unknown> }][] = [
+    const entries: [string, { query(opts?: { fresh?: boolean }): Promise<unknown> }][] = [
       ['claude', new ClaudeUsageProvider(cliPaths.claude ?? '')],
       ['codex',  new CodexUsageProvider(cliPaths.codex ?? '')],
       ['agy',    new AgyUsageProvider(cliPaths.antigravity ?? '')],
@@ -542,7 +744,7 @@ export class UsageService {
     const inFlight = this.inflight.get(key);
     if (inFlight) return inFlight;
 
-    const p = this._queryUncached(key).then((result) => {
+    const p = this._queryUncached(key, refresh).then((result) => {
       const ttl = result.status === 'ok' ? DEFAULT_TTL : NEG_TTL;
       const r = { ...result, cache: _cacheInfo(false, 0, ttl) };
       this.cache.set(key, { result: r, capturedAt: Date.now(), ttlMs: ttl });
@@ -553,11 +755,11 @@ export class UsageService {
     return p;
   }
 
-  private async _queryUncached(agent: string): Promise<ReturnType<typeof _makeResult>> {
+  private async _queryUncached(agent: string, fresh = false): Promise<ReturnType<typeof _makeResult>> {
     const provider = this.providers.get(agent);
     if (!provider) return _makeResult(agent, 'unavailable', null, `${agent} CLI not configured`, NEG_TTL);
     try {
-      const usage = await provider.query();
+      const usage = await provider.query({ fresh });
       // 解析器判定「量不到、畫面是錯誤」（type: 'error'）時回 error，但 usage（含 raw 原文）照樣帶回去。
       const parsed = usage as { type?: unknown; error?: unknown } | null;
       if (parsed?.type === 'error') {

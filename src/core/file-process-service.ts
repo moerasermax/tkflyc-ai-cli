@@ -159,7 +159,8 @@ export class FileProcessService {
     } as BuildCliCommandOptions);
     // 熔斷器：偵測同一行程內框架迴圈造成的爆量/重複啟動。
     this.breaker.check(cmd.agent, cmd.prompt);
-    return this.startDetachedTracked(cmd, options.model);
+    const result = await this.startDetachedTracked(cmd, options.model);
+    return { ...result, ...(cmd.warnings ? { warnings: cmd.warnings } : {}) };
   }
 
   private async startDetachedTracked(cmd: ReturnType<typeof buildCliCommand>, model?: string) {

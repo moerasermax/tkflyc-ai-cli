@@ -391,17 +391,25 @@ export function resolveConfiguredReasoningEffort(
   rawModel: string,
   config: UserConfig = loadUserConfig()
 ): string | undefined {
+  return resolveConfiguredReasoningEffortWithSource(rawModel, config).effort;
+}
+
+/** 在選值當下記錄來源，避免 caller 用設定是否有 key 重新猜測。 */
+export function resolveConfiguredReasoningEffortWithSource(
+  rawModel: string,
+  config: UserConfig = loadUserConfig()
+): { effort: string | undefined; source: 'env' | 'alias-override' | 'config-default' | 'builtin-alias' } {
   const fromEnv = normalizeEffort(
     process.env.AI_CLI_DEFAULT_REASONING_EFFORT,
     'AI_CLI_DEFAULT_REASONING_EFFORT'
   );
-  if (fromEnv) return fromEnv;
+  if (fromEnv) return { effort: fromEnv, source: 'env' };
 
   const aliasOverride = ownValue(config.aliasReasoningEffort, rawModel);
-  if (aliasOverride) return aliasOverride;
-  if (config.defaultReasoningEffort) return config.defaultReasoningEffort;
+  if (aliasOverride) return { effort: aliasOverride, source: 'alias-override' };
+  if (config.defaultReasoningEffort) return { effort: config.defaultReasoningEffort, source: 'config-default' };
 
-  return ownValue(BUILTIN_ALIAS_REASONING, rawModel);
+  return { effort: ownValue(BUILTIN_ALIAS_REASONING, rawModel), source: 'builtin-alias' };
 }
 
 /**

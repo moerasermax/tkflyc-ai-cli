@@ -17,13 +17,18 @@ let spawnCount = 0;
 cp.spawn = () => {
   spawnCount++;
   return Object.assign(new EventEmitter(), {
-    pid: nextPid++, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(),
+    pid: nextPid++, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), unref() {},
   });
 };
 syncBuiltinESMExports();
 delete process.env.AI_CLI_DEFAULT_REASONING_EFFORT;
 const { codexAgent } = await load('dist/agents/codex.js');
 const { claudeAgent } = await load('dist/agents/claude.js');
+const { antigravityAgent } = await load('dist/agents/antigravity.js');
+const { directApiAgent } = await load('dist/agents/direct-api.js');
+const { FileProcessService } = await load('dist/core/file-process-service.js');
+const { runCli } = await load('dist/app/cli.js');
+const { resolveConfiguredReasoningEffort, resolveConfiguredReasoningEffortWithSource } = await load('dist/core/user-config.js');
 const { buildCliCommand } = await load('dist/core/command-builder.js');
 const { ProcessService } = await load('dist/core/process-service.js');
 const { buildProcessResult } = await load('dist/core/process-result.js');
@@ -32,6 +37,10 @@ let passed = 0;
 let failed = 0;
 function check(name, fn) {
   try { fn(); passed++; console.log(`  PASS ${name}`); }
+  catch (error) { failed++; console.error(`  FAIL ${name}: ${error.message}`); }
+}
+async function checkAsync(name, fn) {
+  try { await fn(); passed++; console.log(`  PASS ${name}`); }
   catch (error) { failed++; console.error(`  FAIL ${name}: ${error.message}`); }
 }
 const line = (value) => JSON.stringify(value);
@@ -66,6 +75,65 @@ const warning = (cmd, effort, source) => {
 };
 try {
   config({});
+  check('Agy job usage shape and raw tokens preserved', () => {
+    const raw = { input_tokens: 31227, output_tokens: 545, thinking_tokens: 523, total_tokens: 31772 };
+    const parsed = antigravityAgent.parseOutput(line({ response: 'done', usage: raw }), '');
+    assert.deepEqual(parsed.tokens, raw);
+    assert.deepEqual(parsed.usage, { input_tokens: 31227, output_tokens: 545, reasoning_output_tokens: 523, source: 'agy json' });
+    assert.equal(Object.hasOwn(parsed.usage, 'cached_input_tokens'), false);
+    assert.equal(Object.hasOwn(parsed.usage, 'cache_write_input_tokens'), false);
+  });
+  check('Agy unavailable usage omitted and invalid thinking incomplete', () => {
+    for (const raw of [undefined, {}, { input_tokens: -1, output_tokens: 2 }, { input_tokens: 1, output_tokens: '2' }])
+      assert.equal(Object.hasOwn(antigravityAgent.parseOutput(line({ response: 'done', usage: raw }), ''), 'usage'), false);
+    assert.equal(Object.hasOwn(antigravityAgent.parseOutput('text answer', ''), 'usage'), false);
+    const usage = antigravityAgent.parseOutput(line({ response: 'done', usage: { input_tokens: 1, output_tokens: 2, thinking_tokens: -1 } }), '').usage;
+    assert.equal(usage.incomplete, true);
+    assert.equal(Object.hasOwn(usage, 'reasoning_output_tokens'), false);
+  });
+  await checkAsync('Direct-api stream and JSON usage shape preserves tokens and cost', async () => {
+    const originalFetch = globalThis.fetch;
+    // session/state 均使用測試隔離目錄，不會在 repo 產生檔案。
+    const cwd = process.env.AI_CLI_STATE_DIR;
+    mkdirSync(cwd, { recursive: true });
+    const cmd = { agent: 'direct-api', cwd, prompt: '[no-tools]usage', cliPath: '', args: [],
+      directApi: { providerName: 'mock', modelName: 'mock', baseUrl: 'https://mock.test/v1', apiKey: 'test-key' } };
+    const raw = { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120,
+      prompt_tokens_details: { cached_tokens: 30 }, completion_tokens_details: { reasoning_tokens: 7 }, cost: 0.12 };
+    const expected = { input_tokens: 100, output_tokens: 20, cached_input_tokens: 30, reasoning_output_tokens: 7, source: 'direct-api usage' };
+    async function run(events, streaming) {
+      globalThis.fetch = async () => streaming
+        ? new Response(events.map((event) => `data: ${line(event)}\n\n`).join('') + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })
+        : new Response(line(events[0]), { headers: { 'content-type': 'application/json' } });
+      let stdout = '';
+      await directApiAgent.runDirect(cmd, { stdout: (chunk) => { stdout += chunk; }, stderr() {} });
+      return directApiAgent.parseOutput(stdout, '');
+    }
+    try {
+      const finish = { choices: [{ delta: { content: 'done' }, finish_reason: 'stop' }], usage: null };
+      for (const streaming of [true, false]) {
+        const events = streaming ? [finish, { usage: raw }] : [{ choices: [{ message: { content: 'done' }, finish_reason: 'stop' }], usage: raw }];
+        const parsed = await run(events, streaming);
+        assert.deepEqual(parsed.usage, expected);
+        assert.deepEqual(parsed.tokens, { input: 100, output: 20, reasoning: 7, cached: 30, total: 120 });
+        assert.equal(parsed.cost, 0.12);
+        const compact = buildProcessResult({ pid: 1, agent: 'direct-api', status: 'completed', startTime: '', workFolder: cwd, prompt: 'test', stdout: '', stderr: '' }, parsed);
+        assert.deepEqual(compact.agentOutput.usage, expected);
+      }
+      const sum = await run([finish, { usage: raw }, { usage: raw }], true);
+      assert.deepEqual(sum.usage, { ...expected, input_tokens: 200, output_tokens: 40, cached_input_tokens: 60, reasoning_output_tokens: 14 });
+      for (const usage of [undefined, null, {}, { prompt_tokens: -1, completion_tokens: 2 }, { prompt_tokens: 1, completion_tokens: '2' }]) {
+        const parsed = await run([finish, { usage }], true);
+        assert.equal(Object.hasOwn(parsed, 'usage'), false);
+      }
+      const partial = await run([finish, { usage: raw }, { usage: { prompt_tokens: -1, completion_tokens: 2 } }], true);
+      assert.deepEqual(partial.usage, { ...expected, incomplete: true });
+      const minimal = await run([finish, { usage: { prompt_tokens: 5, completion_tokens: 2 } }], true);
+      assert.deepEqual(minimal.usage, { input_tokens: 5, output_tokens: 2, source: 'direct-api usage' });
+      const invalidOptional = await run([finish, { usage: { prompt_tokens: 5, completion_tokens: 2, prompt_tokens_details: { cached_tokens: -1 } } }], true);
+      assert.deepEqual(invalidOptional.usage, { input_tokens: 5, output_tokens: 2, incomplete: true, source: 'direct-api usage' });
+    } finally { globalThis.fetch = originalFetch; }
+  });
   check('Codex single turn usage', () => assert.deepEqual(codexAgent.parseOutput(line(turn), '').usage, expectedCodex));
   check('Codex multiple turns sum usage', () => assert.deepEqual(
     codexAgent.parseOutput(`${line(turn)}\n${line(turn)}`, '').usage,
@@ -223,11 +291,49 @@ try {
       delete process.env.AI_CLI_DEFAULT_REASONING_EFFORT;
     }
   });
+  check('Empty alias override resolves builtin source and legacy value', () => {
+    const value = { aliasReasoningEffort: { 'codex-ultracode': '' } };
+    assert.deepEqual(resolveConfiguredReasoningEffortWithSource('codex-ultracode', value), { effort: 'ultra', source: 'builtin-alias' });
+    assert.equal(resolveConfiguredReasoningEffort('codex-ultracode', value), 'ultra');
+    config(value);
+    warning(buildCliCommand({ ...options, model: 'codex-ultracode' }), 'ultra', 'alias');
+    process.env.AI_CLI_DEFAULT_REASONING_EFFORT = 'invalid';
+    try {
+      assert.deepEqual(resolveConfiguredReasoningEffortWithSource('codex-ultracode', value), { effort: 'ultra', source: 'builtin-alias' });
+      warning(buildCliCommand({ ...options, model: 'codex-ultracode' }), 'ultra', 'alias');
+    } finally { delete process.env.AI_CLI_DEFAULT_REASONING_EFFORT; config({}); }
+  });
+  check('Configured effort source follows actual precedence', () => {
+    const value = { defaultReasoningEffort: 'max', aliasReasoningEffort: { 'codex-ultracode': 'xhigh' } };
+    assert.deepEqual(resolveConfiguredReasoningEffortWithSource('codex-ultracode', value), { effort: 'xhigh', source: 'alias-override' });
+    assert.deepEqual(resolveConfiguredReasoningEffortWithSource('codex', value), { effort: 'max', source: 'config-default' });
+    assert.deepEqual(resolveConfiguredReasoningEffortWithSource('codex', {}), { effort: undefined, source: 'builtin-alias' });
+    process.env.AI_CLI_DEFAULT_REASONING_EFFORT = ' ULTRA ';
+    try {
+      assert.deepEqual(resolveConfiguredReasoningEffortWithSource('codex-ultracode', value), { effort: 'ultra', source: 'env' });
+    } finally { delete process.env.AI_CLI_DEFAULT_REASONING_EFFORT; }
+  });
   check('MCP start response forwards warning without real spawn', () => {
     const service = new ProcessService({ cliPaths: options.cliPaths, breaker: { check() {} } });
     warning(service.startProcess({ ...options, reasoning_effort: 'ultra' }), 'ultra', 'explicit');
     assert.equal(Object.hasOwn(service.startProcess({ ...options, reasoning_effort: 'medium' }), 'warnings'), false);
     assert.equal(spawnCount, 2);
+  });
+  await checkAsync('CLI run forwards ultra warnings without vendor spawn', async () => {
+    const service = new FileProcessService({ stateDir: process.env.AI_CLI_STATE_DIR, cliPaths: options.cliPaths, breaker: { check() {} } });
+    const before = spawnCount;
+    for (const effort of ['ultra', 'medium']) {
+      let stdout = '';
+      const code = await runCli(['run', '--cwd', ROOT, '--prompt', 'CLI usage test', '--model', 'codex', '--reasoning-effort', effort], {
+        stdout: (text) => { stdout += text; }, stderr: (text) => { throw new Error(text); },
+        runProcess: (request) => service.startProcess(request),
+      });
+      assert.equal(code, 0);
+      const output = JSON.parse(stdout);
+      if (effort === 'ultra') warning(output, 'ultra', 'explicit');
+      else assert.equal(Object.hasOwn(output, 'warnings'), false);
+    }
+    assert.equal(spawnCount - before, 2);
   });
   const guidance = getModelsPayload().dispatchGuidance;
   for (const [situation, terms] of [

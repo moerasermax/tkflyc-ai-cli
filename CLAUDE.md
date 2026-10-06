@@ -33,7 +33,7 @@ Peter Steinberger 的 claude-code-mcp（MIT）。分歧點在架構：上游把�
 | CI | Windows / Linux / macOS × Node 20.19、22 — **三個平台都是閘門** |
 | 本機路徑 | `C:\Users\Moera\ai-cli-mcp-source`（目錄名還是舊的，不影響任何東西） |
 
-規模：`src/` 33 個 `.ts`、10,138 行；驗證腳本都在 `tests/`（18 支），其中 16 支進 `npm test`
+規模：`src/` 33 個 `.ts`、10,404 行；驗證腳本都在 `tests/`（18 支），其中 16 支進 `npm test`
 （`verify-e2e.mjs` 會真的燒額度、`verify-strict-behaviour.mjs` 屬手動輔助，兩者刻意不進）。
 
 ---
@@ -72,6 +72,11 @@ provenance 對不上。那個版本已 `deprecate`，**不要拿它當任何基�
 
 另外 `npm version` 打的是 **annotated tag**：`git rev-parse v6.1.1` 給你的是
 tag 物件的 SHA，要 commit 得用 `v6.1.1^{}`。
+
+`npm publish` 會先跑 `prepublishOnly` → `tools/verify-release.mjs`：工作樹乾淨、HEAD 等於 tag、
+打包清單逐檔核對（dist 只能是 `src/*.ts` 編譯出來的 `.js`／`.map`）、NOTICE 在套件裡。**它紅了就不要繞過。**
+2026-10-06 發 6.4.0 時，派出去的 agent 把備份寫進 `dist/`，tarball 多了 19 個檔，只因 npm 沒登入才沒發出去——
+`files` 收整個 `dist`、`dist` 又被 .gitignore，`git status` 看不到。**派 agent 時要求備份放 repo 外。**
 
 ### 5. `process.exit()` 之前要排空 stdout
 

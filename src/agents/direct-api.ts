@@ -275,6 +275,8 @@ interface StreamState {
   assistantText: string;
   reasoningText: string;
   usage?: CompletionUsage;
+  jobUsage?: ReturnType<typeof normalizeJobUsage>;
+  incompleteUsage?: boolean;
   cost?: unknown;
   finishReason?: string;
 }
@@ -719,6 +721,7 @@ function parseOutput(stdout: string): unknown {
   let sessionId: string | null = null;
   let message = '';
   let tokens: unknown;
+  let usage: ReturnType<typeof normalizeJobUsage>;
   let cost: unknown;
   let sessionPath: string | undefined;
   let finishReason: string | undefined;
@@ -763,6 +766,7 @@ function parseOutput(stdout: string): unknown {
         message = parsed.result;
       }
       tokens = parsed.tokens;
+      usage = parsed.usage ?? usage;
       cost = parsed.cost;
       sessionPath = typeof parsed.session_path === 'string' ? parsed.session_path : undefined;
       finishReason = typeof parsed.finish_reason === 'string' ? parsed.finish_reason : undefined;
@@ -770,12 +774,13 @@ function parseOutput(stdout: string): unknown {
   }
 
   const tools = Array.from(toolsMap.values());
-  if (!message && !sessionId && !tokens && cost === undefined && tools.length === 0) {
+  if (!message && !sessionId && !tokens && !usage && cost === undefined && tools.length === 0) {
     return null;
   }
   return {
     message,
     tokens,
+    ...(usage ? { usage } : {}),
     cost,
     session_id: sessionId,
     sessionPath,
@@ -1073,6 +1078,26 @@ function extractReasoning(delta: Record<string, unknown>): string {
   return '';
 }
 
+/** 與既有 tokens/cost 分開累計，壞 chunk 不得污染有效 job 用量。 */
+function normalizeJobUsage(raw: CompletionUsage) {
+  const valid = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  const input = raw.prompt_tokens ?? raw.input_tokens;
+  const output = raw.completion_tokens ?? raw.output_tokens;
+  if (!valid(input) || !valid(output)) return undefined;
+  const cached = raw.prompt_tokens_details?.cached_tokens;
+  const reasoning = raw.completion_tokens_details?.reasoning_tokens ?? raw.reasoning_tokens;
+  return {
+    // OpenAI prompt_tokens 已含快取，不能再加 cached。
+    input_tokens: input,
+    output_tokens: output,
+    ...(valid(cached) ? { cached_input_tokens: cached } : {}),
+    ...(valid(reasoning) ? { reasoning_output_tokens: reasoning } : {}),
+    ...([cached, reasoning].some((value) => value !== undefined && !valid(value)) ? { incomplete: true } : {}),
+    source: 'direct-api usage',
+  };
+}
+
 function normalizeTokens(usage: CompletionUsage | undefined): Record<string, number> | undefined {
   if (!usage) return undefined;
   const tokens: Record<string, number> = {};
@@ -1155,6 +1180,21 @@ function mergeCost(current: unknown, next: unknown): unknown {
 }
 
 function captureUsageAndCost(parsed: any, state: StreamState): void {
+  // OpenAI 的一般串流 chunk 會帶 usage:null；只有實際回報才參與累計。
+  if (parsed?.usage !== undefined && parsed?.usage !== null) {
+    const next = parsed.usage && normalizeJobUsage(parsed.usage);
+    if (!next) state.incompleteUsage = true;
+    else if (!state.jobUsage) state.jobUsage = next;
+    else {
+      const current = state.jobUsage;
+      current.input_tokens += next.input_tokens;
+      current.output_tokens += next.output_tokens;
+      for (const key of ['cached_input_tokens', 'reasoning_output_tokens'] as const) {
+        if (next[key] !== undefined) current[key] = (current[key] ?? 0) + next[key]!;
+      }
+      if (next.incomplete) current.incomplete = true;
+    }
+  }
   if (parsed?.usage) {
     state.usage = mergeCompletionUsage(state.usage, parsed.usage as CompletionUsage);
     state.cost = mergeCost(state.cost, normalizeCost(parsed.usage));
@@ -1667,6 +1707,7 @@ async function runDirect(cmd: BuiltCommand, io: DirectRunIO): Promise<void> {
     provider: config.providerName,
     model: config.modelName,
     result: state.assistantText,
+    ...(state.jobUsage ? { usage: { ...state.jobUsage, ...(state.incompleteUsage ? { incomplete: true } : {}) } } : {}),
     tokens,
     cost: state.cost,
     finish_reason: state.finishReason,

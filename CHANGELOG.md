@@ -8,20 +8,67 @@
 
 ## [Unreleased]
 
-### 修正（codex 額度面板的 `model` / `account` 解成 `null`）
+### 修正（三家額度查詢：數字讀錯、讀不到卻回 `ok`）
 
-- **6.4.1 起 `query_usage(codex)` 讀得到額度，但 `model`、`account` 永遠是 `null`。** 2026-10-06 抓原始位元組查到：
-  codex-cli 0.160 的 TUI 用游標移動排版，`ESC[1C`（右移一格）代替空格、`ESC[列;欄H` 代替換行。清 ANSI 時這些
-  跳脫碼整段被刪掉，於是 `Pro 100` 變 `Pro100`、`Workspace (Ask for approval)` 變 `Workspace(Askforapproval)`、
-  下一列的 `Model:` 黏到上一行行尾——解析器要求 `Model:` 在行首，就抓不到。（Claude）
-  - 清 ANSI 之前先還原游標移動：右移 n 格 → n 個空格；換到別的列 → 換行；**同一列內的跳躍只補一個空格**，
-    不能換行，否則會把 `Weekly limit:` 跟它的數字拆到兩行。只套用在 codex，claude / agy 的解析不受影響。
-    `usage.raw` 也因此變得可讀（`80% left`、`Ask for approval`）。
-  - `account`：0.160 不再顯示 email，`Account:` 後面只有 `Pro 100`。有 email 時照舊取 email、括號內容進 `plan`；
-    沒有 email 時照畫面原樣回傳那個值，不去猜它是帳號還是方案。`plan` 在 0.160 上如實是 `null`（畫面沒有括號）。
-  - 實機驗收（管理員權限、codex 0.160.0）：`model: "GPT-6.1-Sol"`、`account: "Pro 100"`、weekly `80% left`。
-- `tests/verify-usage-parse.mjs` +7 條（29 條），素材是同日抓到的原始位元組（含跳脫碼）；另外釘住舊版
-  `email (方案)` 格式照舊、同一列跳躍不拆行、經過 `query()` 完整路徑也解得出來。突變 +6。
+- **TUI 輸出改成「模擬終端機畫面」再解析，不再只是刪掉跳脫碼。** 2026-10-06 抓原始位元組查到：codex-cli 0.160
+  與 Claude Code 的 TUI 只重畫變動的格子——`ESC[列;欄H` 換列、`ESC[nC` 是「跳過 n 格、保留原內容」、
+  `ESC[nX` 清格、`ESC[K` 清到行尾。只刪跳脫碼時，codex 的 `Pro␛[1C100` 變 `Pro100`、下一列的 `Model:` 黏到上一行；
+  claude 的 `Current sess␛[1Con`（那個 i 沒變所以跳過）若把跳過當成空格，又會變成 `Current sess on`。新增
+  `renderTerminal()`：照終端機規則播放一次（游標定位與移動、清除、換行與捲動、中日韓字佔兩格），讀出畫面上
+  實際看得到的文字；捲出畫面的內容保留，錯誤訊息不會被丟掉。codex、claude、agy 都改走它。（Claude）
+- **claude：所有欄位都是 `null`，`status` 卻是 `ok`。** 原因同上，`Current session` 被黏成 `Currentsession`，
+  解析的正規式一個都對不上。改走 `renderTerminal()` 後解得出來；**一個額度百分比都沒有時改回 `type: "error"`**，
+  跟 codex 同一個原則（量不到就是 unknown）。另外標上 `percentBasis: "used"`——claude 的 `*Percent` 欄位都是
+  「已用」，跟 codex 的 `percentRemaining` 方向相反。
+- **agy：剩餘量被放進 `percentUsed`（讀反）。** agy 1.2 的面板寫「Weekly Limit **Remaining** 99.86%」，原本原樣放進
+  `percentUsed: 99.86`，讀的人會以為額度快用完。標籤寫明 Remaining／Used 時照標籤換算，同時給 `percentRemaining`、
+  `percentUsed` 與 `basis`；`model` 改為群組名稱（`GEMINI MODELS`、`CLAUDE AND GPT MODELS`），原本的標籤放 `limit`。
+  舊版畫面（每行一個模型名）的百分比方向沒有驗證過，照舊不動。
+- **codex：`model`、`account` 永遠是 `null`。** `renderTerminal()` 讓 `Model:` 回到自己那一行；`account` 方面，
+  0.160 不再顯示 email（`Account:` 後面只有 `Pro 100`），有 email 時照舊、沒有就照畫面原樣回傳，不去猜它是帳號還是方案。
+- **主額度以外的額度被默默丟掉。** codex 的 `Luna Reserve Weekly limit`、claude 的 `Current week (Fable)` 這類
+  模型專屬額度，現在列在 `additionalLimits`（`label`、`percentRemaining`、`percentUsed`、`basis`、`resetAt`）。
+- 實機驗收（2026-10-06，管理員權限）：claude session 已用 7%、本週全模型已用 44%、Fable 0%；codex weekly 剩 79%、
+  Luna Reserve 剩 96%、`model: "GPT-6.1-Sol"`、`account: "Pro 100"`；agy Gemini 群組週額度剩 99.86%（已用 0.14%）。
+
+### 新增（codex 額度優先讀 session 檔，不開 TUI）
+
+- **`query_usage(codex)` 有 10 分鐘內的 session 檔時，直接讀裡面最後一筆 `rate_limits`。** codex 每個 turn 結束都會
+  在 `~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl` 寫一筆 token_count 事件，含 `used_percent`、`window_minutes`、
+  `resets_at`、`plan_type`。實測 0.1 秒拿到（開 TUI 要 8 秒以上），也不受管理員權限、daemon、hook 信任畫面影響。
+  結果帶 `source: "session-file"` 與 `asOf`（資料時間）；session 檔裡沒有 `model` / `account`，如實回 `null`。
+  超過 10 分鐘的資料不用，退回開 TUI；**`refresh=true` 一律走 TUI**。（Claude）
+- 走 TUI 時，0.160 的面板沒有方案欄位，`plan` 改從最近的 session 檔補（例：`prolite`）。尊重 `CODEX_HOME`。
+
+### 新增（job 用量補齊、CLI 警告、effort 來源重整）
+
+- **agy 與 direct-api 的 job 結果也帶正規化 `agentOutput.usage`**，跟 codex / claude 同一個形狀。agy 沒有回報快取，
+  就不放快取欄位（不捏造成 0）；direct-api 的 `input_tokens` 取 `prompt_tokens`（OpenAI 的已含快取），既有的
+  `tokens` / `cost` 保留不動。拿不到用量時不放 `usage`。（ai-cli：codex gpt-6.1-sol / medium 實作，Claude 驗收）
+- **CLI 的 `ai-cli run` 也帶高成本 effort 的 `warnings`**，跟 MCP 一致；沿用既有 JSON 輸出與 stdout 排空流程。
+- **effort 來源改由實際的判斷函式直接回傳**（`resolveConfiguredReasoningEffortWithSource`），不再在 command-builder
+  另寫一套推測；舊推測在 `aliasReasoningEffort` 有 key 但值是空字串時會把來源標錯。影響 core：`user-config.ts`、
+  `command-builder.ts`、`file-process-service.ts`，既有行為不變。
+- 已知限制：direct-api 串流的 usage 沿用既有做法逐筆加總；若某個供應商在每個 chunk 都送累計值，會重複計算。
+
+### 變更（發版流程）
+
+- **`package.json` 的 `files` 從整個 `dist` 收窄為 `dist/**/*.js` 與 `dist/**/*.js.map`。** 6.4.0 發版時，派出去的
+  agent 把備份與 log 寫進 `dist/`（被 .gitignore、git status 看不到），第一次 publish 的 tarball 多了 19 個檔，
+  只因 npm 沒登入而失敗才沒發出去。
+- **新增 `tools/verify-release.mjs`，掛在 `prepublishOnly`**（也可手動 `npm run release:check`）：工作樹乾淨、
+  HEAD 就是 `v<版本>` tag、打包清單逐檔核對（dist 每個檔都要對得到 `src/*.ts`，連殘留的舊 `.js` 也抓得到）、
+  NOTICE 在套件裡；任一項不過就擋下 `npm publish`。開發中可用 `--no-tag` 只核對打包內容。
+- CHANGELOG `[6.2.0]` 的比較連結原本指向不存在的 tag `v6.2.0`，改指當時收版的 commit `3e291fa`。
+
+### 測試
+
+- `tests/verify-usage-parse.mjs` 29 → 47 條：模擬終端機（跳過格子保留原字、局部改寫、清到行尾、寬字元）、claude
+  實測畫面與量不到時回 error、agy 群組與方向、兩家的 `additionalLimits`、session 檔的讀取／過期／`refresh` 強制走 TUI
+  ／`plan` 補值；素材都取自 2026-10-06 抓到的原始位元組。測試會把 `CODEX_HOME` 指向暫存目錄，不讀這台機器真正的
+  `~/.codex`。
+- `tests/verify-job-usage.mjs` 32 → 38 條（agy、direct-api JSON／SSE、CLI 假 spawn、空 alias override 的來源）。
+- 突變 143 → 163。
 
 ## [6.4.1] - 2026-10-06
 
@@ -1846,7 +1893,7 @@ Antigravity 可用；**Kiro 沒額度**（CLI 回 `Not logged in`）、**Forge �
 [6.4.1]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.4.0...v6.4.1
 [6.4.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.3.0...v6.4.0
 [6.3.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.1.1...v6.3.0
-[6.2.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.1.1...v6.2.0
+[6.2.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.1.1...3e291fa
 [6.1.1]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.1.0...v6.1.1
 [6.1.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.0.0...v6.1.0
 [6.0.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v5.0.0...v6.0.0

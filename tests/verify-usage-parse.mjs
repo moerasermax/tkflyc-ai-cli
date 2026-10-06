@@ -29,7 +29,13 @@ function check(ok, name, detail = '') {
   console.log(`  ${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
-const { parseCodexUsage, CodexUsageProvider, UsageService, isCodexTuiReady, codexStatusWrites } = await import(
+// codex 的 query 會先讀 session 檔；不隔離的話會讀到這台機器真正的 ~/.codex，
+// 測試結果就取決於最近有沒有人用過 codex。指向空的暫存目錄。
+import { mkdtempSync, mkdirSync, writeFileSync as writeFile, utimesSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+process.env.CODEX_HOME = mkdtempSync(join(tmpdir(), 'ai-cli-codex-home-'));
+
+const { parseCodexUsage, parseClaudeUsage, parseAgyUsage, renderTerminal, readCodexSessionRateLimits, CodexUsageProvider, UsageService, isCodexTuiReady, codexStatusWrites } = await import(
   pathToFileURL(join(ROOT, 'dist', 'plugins', 'usage-service.js')).href
 );
 
@@ -233,6 +239,121 @@ check(
   '舊版「email (方案)」格式照舊：account 是 email、plan 是括號內容',
   `得到 account=${JSON.stringify(oldAccount?.account)} plan=${JSON.stringify(oldAccount?.plan)}`
 );
+
+// ── 8. 模擬終端機：跳過的格子保留原字、局部改寫 ───────────────────
+// claude 實測（2026-10-06）：`Current sess␛[1Con` 是「i 沒變所以跳過」，不是空格；
+// `␛[29;12H29` 回頭只改寫 `Resets 1:30pm` 的分鐘數。
+const CLAUDE_USAGE_RAW =
+  `${E}[27;3HCurrent session${E}[28;3H███${E}[47X${E}[47C 6% used${E}[29;3HResets 1:30pm (Asia/Taipei)` +
+  `${E}[27;3HCurrent sess${E}[1Con${E}[22m${E}[K${E}[29;12H29` +
+  `${E}[31;3HCurrent week (all models)${E}[32;3H█████████████████████▌${E}[28X${E}[29C43%${E}[1Cused` +
+  `${E}[33;3HResets Oct 11, 1pm (Asia/Taipei)` +
+  `${E}[35;3HCurrent week (Fable)${E}[36;3H${E}[50X${E}[50C 0% used${E}[37;3HResets Oct 11, 1pm (Asia/Taipei)`;
+const screen = renderTerminal(CLAUDE_USAGE_RAW);
+check(screen.includes('Current session') && !screen.includes('sess on'), '★ ESC[nC 是跳過格子、保留原字（不能當成空格）', JSON.stringify(screen.split('\n').find((l) => l.includes('Current sess'))));
+check(screen.includes('Resets 1:29pm'), '回頭局部改寫的字蓋在原位（1:30 → 1:29）');
+check(renderTerminal('寬字元ABC') === '寬字元ABC' && renderTerminal(`abcdef${E}[3D${E}[K`) === 'abc', '中日韓字佔兩格、ESC[K 清到行尾');
+
+const claude = parseClaudeUsage(CLAUDE_USAGE_RAW);
+check(
+  claude?.sessionPercent === 6 && claude?.weekAllModelsPercent === 43 && claude?.sessionResetAt === '1:29pm (Asia/Taipei)',
+  '★ claude 實測畫面解得出 session 與本週百分比（原本全部是 null 卻回 ok）',
+  `得到 session=${claude?.sessionPercent} week=${claude?.weekAllModelsPercent} reset=${JSON.stringify(claude?.sessionResetAt)}`
+);
+check(
+  claude?.additionalLimits?.length === 1 && claude.additionalLimits[0].label === 'Fable' && claude.additionalLimits[0].percentUsed === 0,
+  'claude 模型專屬的週額度列進 additionalLimits',
+  `得到 ${JSON.stringify(claude?.additionalLimits)}`
+);
+
+const claudeEmpty = parseClaudeUsage('❯ /usage\n\nLoading usage data…');
+check(claudeEmpty?.type === 'error', '★ claude 一個額度數字都沒有時回 type error（量不到不是 ok）', `得到 ${JSON.stringify(claudeEmpty?.type)}`);
+const claudeSvc = new UsageService({});
+claudeSvc.providers.set('claude', { query: async () => parseClaudeUsage('❯ /usage\n\nLoading usage data…') });
+const claudeResult = await claudeSvc.queryProvider('claude', { refresh: true });
+check(claudeResult.status === 'error' && String(claudeResult.usage?.raw).includes('Loading'), 'claude 量不到時 status 是 error、raw 保留', `得到 status=${claudeResult.status}`);
+
+const panelLuna = parseCodexUsage(PANEL_0160);
+check(
+  panelLuna?.additionalLimits?.length === 1 && panelLuna.additionalLimits[0].label === 'Luna Reserve Weekly' && panelLuna.additionalLimits[0].percentRemaining === 96,
+  'codex 主額度以外的額度行列進 additionalLimits（Luna Reserve Weekly 96%）',
+  `得到 ${JSON.stringify(panelLuna?.additionalLimits)}`
+);
+
+// agy 1.2.17 實測面板（按群組列，標籤寫明 Remaining）。
+const AGY_PANEL = [
+  'GEMINI MODELS',
+  'Models within this group: Gemini Flash, Gemini Pro',
+  'Weekly Limit Remaining',
+  '[██████████████████████████████████████████████████] 99.86%',
+  'Refreshes in 164h 50m',
+  'Five Hour Limit Remaining',
+  '[██████████████████████████████████████████████████] 99.16%',
+  'Refreshes in 1h 50m',
+  'CLAUDE AND GPT MODELS',
+  'Models within this group: Claude Opus, Claude Sonnet, GPT-OSS',
+  'Weekly Limit Remaining',
+  '[██████████████████████████████████████████████████] 100.00%',
+  'Quota available',
+].join('\n');
+const agy = parseAgyUsage(AGY_PANEL);
+const g0 = agy?.models?.[0];
+check(
+  g0?.model === 'GEMINI MODELS' && g0?.percentRemaining === 99.86 && g0?.percentUsed === 0.14 && g0?.basis === 'remaining',
+  '★ agy「Limit Remaining 99.86%」是剩餘量，不能放進 percentUsed（原本讀反）',
+  `得到 ${JSON.stringify(g0)}`
+);
+check(
+  agy?.models?.[2]?.model === 'CLAUDE AND GPT MODELS' && agy?.models?.[2]?.limit === 'Weekly Limit Remaining',
+  'agy 的 model 是群組名稱、limit 是原本的標籤'
+);
+
+// ── 9. codex 讀 session 檔的 rate_limits（不開 TUI）──────────────────
+// 實測格式（2026-10-06，~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl 的 token_count 事件）。
+const now = Date.now();
+const day = new Date(now);
+const sessHome = mkdtempSync(join(tmpdir(), 'ai-cli-codex-sess-'));
+const dayDir = join(sessHome, 'sessions', String(day.getFullYear()), String(day.getMonth() + 1).padStart(2, '0'), String(day.getDate()).padStart(2, '0'));
+mkdirSync(dayDir, { recursive: true });
+const rlEvent = (ts) => JSON.stringify({
+  timestamp: new Date(ts).toISOString(), type: 'event_msg',
+  payload: { type: 'token_count', info: {}, rate_limits: {
+    limit_id: 'codex', primary: { used_percent: 21.0, window_minutes: 10080, resets_at: 1791822646 },
+    secondary: null, plan_type: 'prolite',
+  } },
+});
+const sessFile = join(dayDir, 'rollout-test.jsonl');
+writeFile(sessFile, `{"type":"session_meta","payload":{}}\n${rlEvent(now - 60_000)}\n`);
+const fromFile = readCodexSessionRateLimits(sessHome, now);
+check(
+  fromFile?.source === 'session-file' && fromFile?.weekly?.percentUsed === 21 && fromFile?.weekly?.percentRemaining === 79 && fromFile?.plan === 'prolite',
+  '★ 從 session 檔讀到週額度與 plan（不用開 TUI）',
+  `得到 ${JSON.stringify({ source: fromFile?.source, weekly: fromFile?.weekly, plan: fromFile?.plan })}`
+);
+check(fromFile?.weekly?.resetAt === new Date(1791822646 * 1000).toISOString() && typeof fromFile?.asOf === 'string', 'session 檔結果附重置時間與資料時間（asOf）');
+
+writeFile(sessFile, `${rlEvent(now - 20 * 60_000)}\n`);
+utimesSync(sessFile, new Date(now - 20 * 60_000), new Date(now - 20 * 60_000));
+check(readCodexSessionRateLimits(sessHome, now) === null, '★ session 檔的資料超過 10 分鐘就不用（不能把舊數字當現況）');
+check(readCodexSessionRateLimits(sessHome, now, Number.POSITIVE_INFINITY)?.plan === 'prolite', '不限時間時仍讀得到 plan（給 TUI 結果補方案用）');
+
+// provider：有新鮮的 session 檔就不開 TUI；refresh（fresh: true）一律走 TUI；TUI 結果沒有 plan 時從 session 檔補。
+writeFile(sessFile, `${rlEvent(now - 30_000)}\n`);
+utimesSync(sessFile, new Date(now), new Date(now));
+process.env.CODEX_HOME = sessHome;
+const quick = new FakeCodex([RATE_PANEL]);
+const quickResult = await quick.query();
+check(quick.calls.length === 0 && quickResult?.source === 'session-file', '★ 有新鮮的 session 檔時不開 TUI', `啟動 ${quick.calls.length} 次、source=${quickResult?.source}`);
+const forced = new FakeCodex([RATE_PANEL]);
+const forcedResult = await forced.query({ fresh: true });
+check(forced.calls.length === 1 && forcedResult?.type === 'rate_limits' && forcedResult?.source === undefined, 'refresh=true 一律走 TUI', `啟動 ${forced.calls.length} 次`);
+check(forcedResult?.plan === 'prolite', 'TUI 面板沒有方案時，從 session 檔補 plan', `得到 ${JSON.stringify(forcedResult?.plan)}`);
+const svcFresh = new UsageService({});
+const svcFake = new FakeCodex([RATE_PANEL]);
+svcFresh.providers.set('codex', svcFake);
+await svcFresh.queryProvider('codex', { refresh: true });
+check(svcFake.calls.length === 1, 'UsageService 的 refresh=true 會傳到 provider（強制走 TUI）', `啟動 ${svcFake.calls.length} 次`);
+process.env.CODEX_HOME = mkdtempSync(join(tmpdir(), 'ai-cli-codex-home-'));
 
 const failed = results.filter(([ok]) => !ok).length;
 if (failed > 0) {

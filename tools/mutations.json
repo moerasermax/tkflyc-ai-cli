@@ -910,18 +910,18 @@
   {
     "name": "Alias effort 來源誤標 config",
     "file": "src/core/command-builder.ts",
-    "script": "verify-job-usage.mjs",
-    "from": "userConfig.defaultReasoningEffort ? 'config' : 'alias';",
-    "to": "userConfig.defaultReasoningEffort ? 'config' : 'config';",
-    "expect": "Flagship aliases warn"
+    "from": "effortSource = resolved.source === 'builtin-alias' ? 'alias' : 'config';",
+    "to": "effortSource = resolved.source === 'builtin-alias' ? 'config' : 'config';",
+    "expect": "Flagship aliases warn",
+    "script": "verify-job-usage.mjs"
   },
   {
     "name": "Config effort 來源誤標 alias",
     "file": "src/core/command-builder.ts",
-    "script": "verify-job-usage.mjs",
-    "from": "userConfig.defaultReasoningEffort ? 'config' : 'alias';",
-    "to": "userConfig.defaultReasoningEffort ? 'alias' : 'alias';",
-    "expect": "Config default and alias override warn"
+    "from": "effortSource = resolved.source === 'builtin-alias' ? 'alias' : 'config';",
+    "to": "effortSource = resolved.source === 'builtin-alias' ? 'alias' : 'alias';",
+    "expect": "Config default and alias override warn",
+    "script": "verify-job-usage.mjs"
   },
   {
     "name": "Strict builder 丟掉成本警告",
@@ -1068,51 +1068,211 @@
     "script": "verify-usage-parse.mjs"
   },
   {
-    "name": "游標右移不還原成空格（Pro 100 變 Pro100）",
-    "file": "src/plugins/usage-service.ts",
-    "from": "    if (targetRow === undefined) return ' '.repeat(Math.min(Math.max(1, Number(cols) || 1), 200));",
-    "to": "    if (targetRow === undefined) return '';",
-    "expect": "游標右移還原成空格後",
-    "script": "verify-usage-parse.mjs"
-  },
-  {
-    "name": "換列的游標定位不還原成換行（Model: 黏到上一行）",
-    "file": "src/plugins/usage-service.ts",
-    "from": "    return sameRow ? ' ' : '\\n';",
-    "to": "    return sameRow ? ' ' : '';",
-    "expect": "游標定位還原成換行後",
-    "script": "verify-usage-parse.mjs"
-  },
-  {
-    "name": "同一列內的游標跳躍也換行（Weekly limit 跟數字被拆開）",
-    "file": "src/plugins/usage-service.ts",
-    "from": "    return sameRow ? ' ' : '\\n';",
-    "to": "    return '\\n';",
-    "expect": "同一列內的游標跳躍只補空格",
-    "script": "verify-usage-parse.mjs"
-  },
-  {
-    "name": "parseCodexUsage 清 ANSI 前不還原游標移動",
-    "file": "src/plugins/usage-service.ts",
-    "from": "  const raw = _cleanUsageText(_expandCursorMoves(text));",
-    "to": "  const raw = _cleanUsageText(text);",
-    "expect": "游標定位還原成換行後",
-    "script": "verify-usage-parse.mjs"
-  },
-  {
-    "name": "query 清 ANSI 前不還原游標移動（解析器拿到的已經黏在一起）",
-    "file": "src/plugins/usage-service.ts",
-    "from": "    const text = _cleanUsageText(_expandCursorMoves(result.output));",
-    "to": "    const text = _cleanUsageText(result.output);",
-    "expect": "經過 query 的完整路徑",
-    "script": "verify-usage-parse.mjs"
-  },
-  {
     "name": "沒有 email 時 account 退回 null（0.160 的 Account: Pro 100 被丟掉）",
     "file": "src/plugins/usage-service.ts",
     "from": "    ?? (accountLine.replace(/^Account:\\s*/i, '').replace(/\\s*\\([^)]*\\)\\s*$/, '').trim() || null);",
     "to": "    ?? null;",
     "expect": "account 照畫面原樣",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "Agy thinking 用量誤映射輸出",
+    "file": "src/agents/antigravity.ts",
+    "from": "{ reasoning_output_tokens: raw.thinking_tokens }",
+    "to": "{ reasoning_output_tokens: raw.output_tokens }",
+    "expect": "Agy job usage shape",
+    "script": "verify-job-usage.mjs"
+  },
+  {
+    "name": "Agy 捏造快取計數",
+    "file": "src/agents/antigravity.ts",
+    "from": "source: 'agy json',",
+    "to": "cached_input_tokens: 0, cache_write_input_tokens: 0, source: 'agy json',",
+    "expect": "Agy job usage shape",
+    "script": "verify-job-usage.mjs"
+  },
+  {
+    "name": "Agy 未量到用量仍回報零",
+    "file": "src/agents/antigravity.ts",
+    "from": "...(usage ? { usage } : {}),",
+    "to": "...(usage ? { usage } : { usage: { input_tokens: 0, output_tokens: 0 } }),",
+    "expect": "Agy unavailable usage omitted",
+    "script": "verify-job-usage.mjs"
+  },
+  {
+    "name": "Direct-api 總輸入重複加快取",
+    "file": "src/agents/direct-api.ts",
+    "from": "input_tokens: input,",
+    "to": "input_tokens: input + (cached ?? 0),",
+    "expect": "Direct-api stream and JSON usage shape",
+    "script": "verify-job-usage.mjs"
+  },
+  {
+    "name": "Direct-api parser 丟掉 job usage",
+    "file": "src/agents/direct-api.ts",
+    "from": "...(usage ? { usage } : {}),",
+    "to": "...{},",
+    "expect": "Direct-api stream and JSON usage shape",
+    "script": "verify-job-usage.mjs"
+  },
+  {
+    "name": "Direct-api null chunk 誤標 incomplete",
+    "file": "src/agents/direct-api.ts",
+    "from": "if (parsed?.usage !== undefined && parsed?.usage !== null) {",
+    "to": "if (parsed?.usage !== undefined) {",
+    "expect": "Direct-api stream and JSON usage shape",
+    "script": "verify-job-usage.mjs"
+  },
+  {
+    "name": "CLI run 丟掉高成本警告",
+    "file": "src/core/file-process-service.ts",
+    "from": "return { ...result, ...(cmd.warnings ? { warnings: cmd.warnings } : {}) };",
+    "to": "return { ...result };",
+    "expect": "CLI run forwards ultra warnings",
+    "script": "verify-job-usage.mjs"
+  },
+  {
+    "name": "空 alias override 誤標 config",
+    "file": "src/core/user-config.ts",
+    "from": "if (aliasOverride) return { effort: aliasOverride, source: 'alias-override' };",
+    "to": "if (aliasOverride !== undefined) return { effort: aliasOverride, source: 'alias-override' };",
+    "expect": "Empty alias override resolves builtin source",
+    "script": "verify-job-usage.mjs"
+  },
+  {
+    "name": "模擬終端機不處理 ESC[nC（跳過的格子被後面的字蓋掉）",
+    "from": "          case 'C': col = clampCol(col + n); break;",
+    "to": "          case 'C': break;",
+    "expect": "ESC[nC 是跳過格子、保留原字",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "模擬終端機把 ESC[nC 當成寫空格（Current session 變 Current sess on）",
+    "from": "          case 'C': col = clampCol(col + n); break;",
+    "to": "          case 'C': { const l = line(row); for (let k = 0; k < n; k++) l[col + k] = ' '; col = clampCol(col + n); break; }",
+    "expect": "ESC[nC 是跳過格子、保留原字",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "模擬終端機忽略游標定位的列（Model: 黏到上一行）",
+    "from": "          case 'H': case 'f': row = clampRow((p[0] || 1) - 1); col = clampCol((p[1] || 1) - 1); line(row); break;",
+    "to": "          case 'H': case 'f': col = clampCol((p[1] || 1) - 1); break;",
+    "expect": "游標定位還原成換行後",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "模擬終端機的 ESC[K 不清到行尾",
+    "from": "            if (mode === 0) cur.length = Math.min(cur.length, col);",
+    "to": "            if (mode === 0) {}",
+    "expect": "ESC[K 清到行尾",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "parseCodexUsage 不先播放畫面就清 ANSI",
+    "from": "export function parseCodexUsage(text: string) {\n  const raw = _cleanUsageText(renderTerminal(text));",
+    "to": "export function parseCodexUsage(text: string) {\n  const raw = _cleanUsageText(text);",
+    "expect": "游標定位還原成換行後",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "codex query 不先播放畫面就清 ANSI（解析器拿到的已經黏在一起）",
+    "from": "    const text = _cleanUsageText(renderTerminal(result.output));\n    if (!text) throw new Error('codex usage: no output');",
+    "to": "    const text = _cleanUsageText(result.output);\n    if (!text) throw new Error('codex usage: no output');",
+    "expect": "經過 query 的完整路徑",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "parseClaudeUsage 不先播放畫面就清 ANSI（Current session 黏成 Currentsession）",
+    "from": "export function parseClaudeUsage(text: string) {\n  const raw = _cleanUsageText(renderTerminal(text));",
+    "to": "export function parseClaudeUsage(text: string) {\n  const raw = _cleanUsageText(text);",
+    "expect": "claude 實測畫面解得出 session 與本週百分比",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "claude 量不到額度仍回 ok（所有欄位 null 的假綠燈）",
+    "from": "  if (sessionPct === null && weekAllPct === null && weekSonnetPct === null && costUsd === null) {",
+    "to": "  if (sessionPct === null && weekAllPct === null && weekSonnetPct === null && costUsd === null && false) {",
+    "expect": "claude 一個額度數字都沒有時回 type error",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "claude 模型專屬週額度被丟掉",
+    "from": "    additionalLimits.push({ label: m[1].trim(), percentUsed: used, percentRemaining: 100 - used, basis: 'used', resetAt: m[3]?.trim() ?? null });",
+    "to": "",
+    "expect": "claude 模型專屬的週額度列進 additionalLimits",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "codex 主額度以外的額度行被丟掉（Luna Reserve）",
+    "from": "    if (info) additionalLimits.push({ label, ...info });",
+    "to": "",
+    "expect": "codex 主額度以外的額度行列進 additionalLimits",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "agy 把剩餘量當成已用量（讀反）",
+    "from": "        percentRemaining: pct === null ? null : (remaining ? pct : round2(100 - pct)),",
+    "to": "        percentRemaining: pct === null ? null : (remaining ? round2(100 - pct) : pct),",
+    "expect": "agy「Limit Remaining 99.86%」是剩餘量",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "agy 不記群組名稱（model 變成 Weekly Limit Remaining）",
+    "from": "    if (header && !/%/.test(lines[i])) { group = header[1].trim(); continue; }",
+    "to": "    if (header && !/%/.test(lines[i])) { continue; }",
+    "expect": "agy 的 model 是群組名稱",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "session 檔的舊資料也拿來用（把十幾分鐘前的數字當現況）",
+    "from": "      if (nowMs - ts > maxAgeMs) return null;",
+    "to": "",
+    "expect": "超過 10 分鐘就不用",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "session 檔的週額度分類錯（weekly 變 null）",
+    "from": "      const weekly = windows.find((w) => w.windowMinutes !== null && w.windowMinutes >= 8640) ?? null;",
+    "to": "      const weekly = windows.find((w) => w.windowMinutes !== null && w.windowMinutes <= 360) ?? null;",
+    "expect": "從 session 檔讀到週額度與 plan",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "有新鮮的 session 檔仍開 TUI（白等十幾秒）",
+    "from": "      if (fromFile) return fromFile;",
+    "to": "",
+    "expect": "有新鮮的 session 檔時不開 TUI",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "refresh 沒有傳到 provider（refresh=true 仍可能拿到檔案裡的舊數字）",
+    "from": "      const usage = await provider.query({ fresh });",
+    "to": "      const usage = await provider.query();",
+    "expect": "UsageService 的 refresh=true 會傳到 provider",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "TUI 結果不從 session 檔補 plan",
+    "from": "      if (plan) return { ...usage, plan };",
+    "to": "",
+    "expect": "從 session 檔補 plan",
+    "file": "src/plugins/usage-service.ts",
     "script": "verify-usage-parse.mjs"
   }
 ]
