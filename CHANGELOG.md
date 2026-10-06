@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+## [6.4.0] - 2026-10-06
+
+> 本版兩批工作：`query_usage` 讀不到 Codex 額度卻回 `ok` 的假綠燈修正，以及每個 job 結束時
+> 回傳 token 用量、高成本 effort 帶 `warnings`。都是向下相容的新增與修正，沒有破壞性變更（SemVer MINOR）。
+> 唯一可見的形狀變化：Claude 單一 JSON 路徑的 vendor 原始 `usage` 改放在 `raw_usage`，`usage` 換成正規化版本。
+
 ### 新增（job 用量與成本派工提醒）
 
 - **Codex / Claude job 結束時回傳正規化 `agentOutput.usage`。** 過去只看得到結果，看不到每個 job 的 token 開銷，strict Codex 又帶 `--ephemeral`，事後無 session 可追。Codex 累加每筆 `turn.completed`，保留舊 `token_count`；Claude 的 NDJSON 與單一 JSON result 都映射 cache／thinking，用 `num_turns` 與 `cost_usd_nominal` 明示名目成本而非訂閱帳單。沒有量到就不放 usage；compact result 會保留它；稽核後另修正只有用量時的原始輸出退路。（Codex，@moerasermax）
@@ -1797,7 +1803,9 @@ Antigravity 可用；**Kiro 沒額度**（CLI 回 `Not logged in`）、**Forge �
 - Windows 上優先解析 `.cmd`/`.exe` 而非 extensionless shim。
 - 移除已壞掉的 gemini 殘留；usage 外掛路徑改由 `AI_CLI_USAGE_PLUGIN_BIN` 環境變數設定。
 
-[Unreleased]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.2.0...HEAD
+[Unreleased]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.4.0...HEAD
+[6.4.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.3.0...v6.4.0
+[6.3.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.1.1...v6.3.0
 [6.2.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.1.1...v6.2.0
 [6.1.1]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.1.0...v6.1.1
 [6.1.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.0.0...v6.1.0
