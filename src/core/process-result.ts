@@ -64,10 +64,6 @@ function _rawTail(field: 'stdout' | 'stderr', text: string | undefined): Record<
   };
 }
 
-function shouldPreserveRawFailureOutput(context: ProcessResultContext): boolean {
-  return context.status === 'failed' && false;
-}
-
 export function buildProcessResult(
   context: ProcessResultContext,
   agentOutput: any,
@@ -92,15 +88,15 @@ export function buildProcessResult(
     response.session_id = agentOutput.session_id;
   }
   const shapedAgentOutput = shapeAgentOutput(context.agent, agentOutput, verbose);
-  const preserveRawFailureOutput = shouldPreserveRawFailureOutput(context);
-  if (hasMeaningfulParsedOutput(shapedAgentOutput) && (verbose || !preserveRawFailureOutput)) {
+  // （原本有個 shouldPreserveRawFailureOutput()，寫死回傳 false，相關分支永遠不執行；6.5.0 稽核指出後移除，行為不變。）
+  if (hasMeaningfulParsedOutput(shapedAgentOutput)) {
     response.agentOutput = shapedAgentOutput;
   }
-  if (!response.agentOutput || preserveRawFailureOutput) {
+  if (!response.agentOutput) {
     // 精簡結果不再整份帶原始輸出。2026-10-06 實測：執行中的 claude job 只解析得出 session_id，
     // wait 每輪詢一次就把約 90 KB 的 stream-json 灌進呼叫端的 context。
     // 執行中：不帶（進度看 liveness，即時內容用 peek）；已結束：只帶結尾一段（錯誤原文通常在最後）。
-    // verbose 照舊給完整內容。
+    // 沒有可解析回覆時，verbose 給完整原始輸出。
     if (verbose) {
       response.stdout = context.stdout;
       response.stderr = context.stderr;
@@ -111,9 +107,6 @@ export function buildProcessResult(
     if (!response.agentOutput && shapedAgentOutput?.usage) {
       response.agentOutput = { usage: shapedAgentOutput.usage };
     }
-  }
-  if (verbose && preserveRawFailureOutput && hasMeaningfulParsedOutput(shapedAgentOutput)) {
-    response.agentOutput = shapedAgentOutput;
   }
   return response;
 }

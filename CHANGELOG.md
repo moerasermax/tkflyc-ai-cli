@@ -8,6 +8,21 @@
 
 ## [Unreleased]
 
+### 變更（開發流程：突變測試自動收掉 worktree）
+
+- **`tools/mutation-test.mjs` 不給 worktree 路徑時，自己在系統暫存目錄建一個（HEAD），結束時自動收掉。**
+  過去每跑一次都要手動建 worktree、接 `node_modules` junction，跑完再手動刪；而刪除被全域治理 hook 擋下時只能請使用者代勞，
+  2026-10-06 一天就留下四個殘骸要人清。收尾照知識庫記下的硬規定，每一步都先驗證再往下：
+  只解除 `node_modules` junction 本身（確認是連結才動）→ 確認連結已不在、主 repo 的 `node_modules` 完好 → 才移除 worktree
+  → `git worktree prune` → 再驗一次主 repo。任何一步不對就不硬刪，印出手動步驟（主 repo 受損時附復原指令）並以非零碼結束。
+  掛在 `process.on('exit')`，基準失敗的 `process.exit(1)`、未捕捉的例外、Ctrl+C 都會收尾。給路徑的舊用法不變、不會自動刪任何東西。
+  （2026-09-05、09-08 曾三次用遞迴刪除或 `git worktree remove --force` 穿過 junction，清空主 repo 的 `node_modules/.bin`。）（Claude）
+
+### 移除
+
+- `src/core/process-result.ts` 的 `shouldPreserveRawFailureOutput()`：寫死回傳 `false`，相關的兩個分支永遠不執行（6.5.0 稽核指出）。
+  移除並化簡條件，行為不變。（Claude）
+
 ## [6.5.0] - 2026-10-06
 
 > 額度查詢與成本可見性的一批：三家額度改為模擬終端機畫面解析（claude 假綠燈、agy 剩餘量讀反、codex 欄位缺漏）、

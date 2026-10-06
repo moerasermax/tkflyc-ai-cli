@@ -32,7 +32,9 @@
   你以為的那一段。手寫片段也不要：2026-10-03 查出 5 筆長期套用不上（4 筆含 CRLF、1 筆被重構掉），
   而它們只在有人跑 harness 時才會露面。`verify-mutation-manifest.mjs` 現在把這兩件事納入 `npm test`。
   這個專案已經吃過三次假綠燈的虧（測試看起來在測、其實測不到）。用法見 `tools/mutation-test.mjs` 檔頭。
-  新更新突變可用 `node tools/mutation-test.mjs <worktree> --script verify-update.mjs` 單獨執行，基準必須先全綠。
+  新更新突變可用 `node tools/mutation-test.mjs --script verify-update.mjs` 單獨執行，基準必須先全綠。
+  不給 worktree 路徑時，harness 會自己在系統暫存目錄建一個（測的是 **HEAD**，未 commit 的改動不在裡面），
+  結束時自動照下面的順序收掉並驗證主 repo 的 `node_modules`；收不掉時會印出手動步驟並以非零碼結束。
 - Windows 突變 worktree 收尾時，**先刪 `node_modules` junction 本身，再刪 worktree 目錄**；不可用 `git worktree remove --force` 穿過 junction，否則可能誤刪主 repo 的相依套件。
   唯一可靠的刪法是 PowerShell 的 `(Get-Item <junction> -Force).Delete()`——它只解除連結。
   **`Remove-Item -Recurse -Force` 與 `git worktree remove --force` 都會穿透**，

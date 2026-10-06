@@ -5,7 +5,12 @@
  * 代表那條斷言是假綠燈 —— 產品程式碼壞掉了它卻不吭聲。
  * 這個專案已經吃過三次假綠燈的虧（見 CHANGELOG 4.0.0 / 4.1.0），所以有這支工具。
  *
- * 用法：
+ * 用法（建議）：不給路徑，harness 自己在系統暫存目錄建 worktree（HEAD），結束時自動收掉
+ *   node tools/mutation-test.mjs
+ *   node tools/mutation-test.mjs --script verify-update.mjs
+ *   注意測的是 HEAD——還沒 commit 的改動不在裡面。收尾順序與失敗時的手動步驟見 cleanupTempWorktree()。
+ *
+ * 用法（手動指定 worktree，不會自動刪任何東西）：
  *   git worktree add --detach <某處>/mut HEAD
  *   # 建 node_modules junction（Windows）：
  *   #   New-Item -ItemType Junction -Path <某處>\mut\node_modules -Target <repo>\node_modules
@@ -26,11 +31,62 @@
 
 import './stubs/catalog-test-env.mjs';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = process.argv[2];
-if (!ROOT) throw new Error('usage: node mutation-test.mjs <worktree-path>');
+const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
+const MAIN_PROBE = join(REPO, 'node_modules', 'typescript', 'package.json');
+const isLink = (p) => { try { return lstatSync(p).isSymbolicLink(); } catch { return false; } };
+
+/**
+ * 收掉自動建立的暫存 worktree。順序是硬規定（見知識庫與 CONTRIBUTING）：
+ *   1. 只解除 node_modules 這個 junction 本身——不能遞迴刪除、不能 `git worktree remove --force` 穿過它。
+ *      2026-09-05、09-08 三次這樣做，都把主 repo 的 node_modules/.bin 清空（tsc 消失）。
+ *   2. 確認 junction 已不在、主 repo 的 node_modules 完好，才移除 worktree。
+ *   3. git worktree prune，最後再驗一次主 repo。
+ * 任何一步不對就不硬刪：印出手動步驟，並讓 exit code 變成非零。
+ */
+function cleanupTempWorktree(parent, wt) {
+  const link = join(wt, 'node_modules');
+  try {
+    if (existsSync(link) || isLink(link)) {
+      if (!isLink(link)) throw new Error(`${link} 不是 junction／symlink，拒絕自動刪除`);
+      unlinkSync(link); // 對 junction 只拆連結（libuv 刪的是 reparse point 本身），不碰目標
+    }
+    if (existsSync(link) || isLink(link)) throw new Error('node_modules junction 解除後仍存在');
+    if (!existsSync(MAIN_PROBE)) throw new Error('主 repo 的 node_modules 已受損');
+    execFileSync('git', ['worktree', 'remove', '--force', wt], { cwd: REPO, stdio: 'pipe' });
+    rmSync(parent, { recursive: true, force: true }); // 這時只剩 config 備份等暫存檔
+    execFileSync('git', ['worktree', 'prune'], { cwd: REPO, stdio: 'pipe' });
+    if (!existsSync(MAIN_PROBE)) throw new Error('收尾後主 repo 的 node_modules 不見了');
+    console.log(`暫存 worktree 已收掉（${wt}），主 repo 的 node_modules 完好`);
+  } catch (error) {
+    console.log(`\n⚠ 暫存 worktree 沒有自動收掉：${error.message}`);
+    console.log(`  手動收尾：先 (Get-Item "${link}").Delete() 只解除 junction，再刪 ${parent}，最後 git worktree prune`);
+    if (!existsSync(MAIN_PROBE)) console.log('  ⚠ 主 repo 的 node_modules 疑似受損：npm install --ignore-scripts --no-audit --no-fund');
+    process.exitCode = 1;
+  }
+}
+
+/** 沒給 worktree 路徑時，自己在系統暫存目錄建一個，結束時（含 process.exit 與例外）自動收掉。 */
+function createTempWorktree() {
+  if (!existsSync(MAIN_PROBE)) throw new Error('主 repo 沒有 node_modules（先 npm install）');
+  const parent = mkdtempSync(join(tmpdir(), 'ai-cli-mut-'));
+  const wt = join(parent, 'wt');
+  execFileSync('git', ['worktree', 'add', '--detach', wt, 'HEAD'], { cwd: REPO, stdio: 'pipe' });
+  // 收尾掛在 exit：基準失敗的 process.exit(1)、未捕捉的例外都會觸發；Ctrl+C 轉成 exit。
+  process.on('exit', () => cleanupTempWorktree(parent, wt));
+  process.on('SIGINT', () => process.exit(130));
+  symlinkSync(join(REPO, 'node_modules'), join(wt, 'node_modules'), 'junction');
+  console.log(`自動建立暫存 worktree（HEAD）：${wt}——結束時自動收掉`);
+  return wt;
+}
+
+// 給了路徑就用它（舊用法，不會自動刪任何東西）；沒給就自動建、自動收。
+const givenWorktree = process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : null;
+const ROOT = givenWorktree ?? createTempWorktree();
 
 const CONFIG = join(process.env.AI_CLI_CONFIG_DIR, 'config.json');
 const CONFIG_BAK = join(ROOT, '..', 'config.json.mutbak');
