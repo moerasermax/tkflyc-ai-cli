@@ -1184,16 +1184,9 @@ function captureUsageAndCost(parsed: any, state: StreamState): void {
   if (parsed?.usage !== undefined && parsed?.usage !== null) {
     const next = parsed.usage && normalizeJobUsage(parsed.usage);
     if (!next) state.incompleteUsage = true;
-    else if (!state.jobUsage) state.jobUsage = next;
-    else {
-      const current = state.jobUsage;
-      current.input_tokens += next.input_tokens;
-      current.output_tokens += next.output_tokens;
-      for (const key of ['cached_input_tokens', 'reasoning_output_tokens'] as const) {
-        if (next[key] !== undefined) current[key] = (current[key] ?? 0) + next[key]!;
-      }
-      if (next.incomplete) current.incomplete = true;
-    }
+    // 同一個回應的 usage 取最後一筆、不加總：有些供應商每個 chunk 都送「累計」值，加總會倍增。
+    // 一次 run 只發一個請求，所以最後一筆就是整個 job 的用量。（既有的 tokens 欄位仍逐筆加總，未改。）
+    else state.jobUsage = next;
   }
   if (parsed?.usage) {
     state.usage = mergeCompletionUsage(state.usage, parsed.usage as CompletionUsage);

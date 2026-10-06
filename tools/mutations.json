@@ -1159,7 +1159,7 @@
     "name": "模擬終端機忽略游標定位的列（Model: 黏到上一行）",
     "from": "          case 'H': case 'f': row = clampRow((p[0] || 1) - 1); col = clampCol((p[1] || 1) - 1); line(row); break;",
     "to": "          case 'H': case 'f': col = clampCol((p[1] || 1) - 1); break;",
-    "expect": "游標定位還原成換行後",
+    "expect": "游標定位換到指定的列",
     "file": "src/plugins/usage-service.ts",
     "script": "verify-usage-parse.mjs"
   },
@@ -1237,16 +1237,16 @@
   },
   {
     "name": "session 檔的舊資料也拿來用（把十幾分鐘前的數字當現況）",
-    "from": "      if (nowMs - ts > maxAgeMs) return null;",
-    "to": "",
-    "expect": "超過 10 分鐘就不用",
+    "from": "  if (!event || nowMs - event.ts > maxAgeMs) return null;",
+    "to": "  if (!event) return null;",
+    "expect": "最後一筆 rate_limits 超過 10 分鐘",
     "file": "src/plugins/usage-service.ts",
     "script": "verify-usage-parse.mjs"
   },
   {
     "name": "session 檔的週額度分類錯（weekly 變 null）",
-    "from": "      const weekly = windows.find((w) => w.windowMinutes !== null && w.windowMinutes >= 8640) ?? null;",
-    "to": "      const weekly = windows.find((w) => w.windowMinutes !== null && w.windowMinutes <= 360) ?? null;",
+    "from": "  const weekly = windows.find((w) => w.windowMinutes !== null && w.windowMinutes >= 8640) ?? null;",
+    "to": "  const weekly = windows.find((w) => w.windowMinutes !== null && w.windowMinutes <= 360) ?? null;",
     "expect": "從 session 檔讀到週額度與 plan",
     "file": "src/plugins/usage-service.ts",
     "script": "verify-usage-parse.mjs"
@@ -1274,5 +1274,77 @@
     "expect": "從 session 檔補 plan",
     "file": "src/plugins/usage-service.ts",
     "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "session 檔視窗已重置仍拿來用（resets_at 已過）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "  if ([rl.primary, rl.secondary].some((w: any) => typeof w?.resets_at === 'number' && w.resets_at * 1000 <= nowMs)) return null;",
+    "to": "",
+    "expect": "視窗已經重置過",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "讀 session 檔的例外沒接住（整個 codex 查詢變 error、不退回 TUI）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "  try { event = _latestCodexRateLimitEvent(codexHome, nowMs, maxAgeMs); } catch { return null; }",
+    "to": "  event = _latestCodexRateLimitEvent(codexHome, nowMs, maxAgeMs);",
+    "expect": "讀 session 檔出錯時回 null",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "主 weekly 不先比對行首（Luna Reserve 排前面時被當成主額度）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "  const weekly   = limitInfo(/^[ \\t]*weekly\\s*limit\\s*:/im) ?? limitInfo(/weekly\\s*limit\\s*:/i) ?? limitInfo(/\\bweek(?:ly)?[^:]*limit[^:]*:/i);",
+    "to": "  const weekly   = limitInfo(/weekly\\s*limit\\s*:/i) ?? limitInfo(/\\bweek(?:ly)?[^:]*limit[^:]*:/i);",
+    "expect": "Luna Reserve 排在前面時",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "agy 把下一個標籤吞成 status（沒有狀態行時丟掉一個額度）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "    const status = (!isNav && !isNext && statusLine) ? statusLine : null;",
+    "to": "    const status = (!isNav && statusLine) ? statusLine : null;",
+    "expect": "agy 百分比後沒有狀態行時",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "模擬終端機不認 < = > 前綴（ESC[>1u 被印成文字）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "        const m = /^\\x1b\\[([0-?]*)[ -/]*([@-~])/.exec(s.slice(i, i + 40));",
+    "to": "        const m = /^\\x1b\\[([0-9;?]*)[ -/]*([@-~])/.exec(s.slice(i, i + 40));",
+    "expect": "帶 < = > ? 前綴的序列",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "模擬終端機把 ESC ( B 的 B 印出來",
+    "file": "src/plugins/usage-service.ts",
+    "from": "      if ('()*+'.includes(s[i + 1] ?? '')) { i += 3; continue; } // 字集指定（ESC ( B）是三個字元",
+    "to": "",
+    "expect": "ESC ( B 這類字集指定",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "模擬終端機丟掉 tab",
+    "file": "src/plugins/usage-service.ts",
+    "from": "    if (c === '\\t') { col = clampCol((Math.floor(col / 8) + 1) * 8); i++; continue; }",
+    "to": "",
+    "expect": "tab 跳到下一個定位點",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "模擬終端機不處理 ESC 8（取回游標）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "      if (s[i + 1] === '8') { row = saved.row; col = saved.col; line(row); i += 2; continue; }",
+    "to": "",
+    "expect": "存／取游標位置",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "direct-api 同一回應的 usage 加總（累計值會倍增）",
+    "file": "src/agents/direct-api.ts",
+    "from": "    else state.jobUsage = next;",
+    "to": "    else if (!state.jobUsage) state.jobUsage = next; else { state.jobUsage.input_tokens += next.input_tokens; state.jobUsage.output_tokens += next.output_tokens; }",
+    "expect": "Direct-api stream and JSON usage shape",
+    "script": "verify-job-usage.mjs"
   }
 ]

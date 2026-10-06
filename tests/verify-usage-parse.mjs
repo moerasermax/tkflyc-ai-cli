@@ -355,6 +355,50 @@ await svcFresh.queryProvider('codex', { refresh: true });
 check(svcFake.calls.length === 1, 'UsageService 的 refresh=true 會傳到 provider（強制走 TUI）', `啟動 ${svcFake.calls.length} 次`);
 process.env.CODEX_HOME = mkdtempSync(join(tmpdir(), 'ai-cli-codex-home-'));
 
+// ── 10. 稽核後補強（2026-10-06，Claude sonnet 唯讀稽核）──────────────
+// session 檔：檔案剛被寫過（mtime 新），但最後一筆 rate_limits 已超過 10 分鐘——只看 mtime 會漏掉。
+writeFile(sessFile, `${rlEvent(now - 20 * 60_000)}\n{"type":"event_msg","payload":{"type":"agent_message"}}\n`);
+utimesSync(sessFile, new Date(now), new Date(now));
+check(readCodexSessionRateLimits(sessHome, now) === null, '★ 檔案剛被寫過、但最後一筆 rate_limits 超過 10 分鐘，也不用');
+
+const resetPassed = JSON.stringify({
+  timestamp: new Date(now - 60_000).toISOString(), type: 'event_msg',
+  payload: { type: 'token_count', rate_limits: { primary: { used_percent: 90, window_minutes: 10080, resets_at: Math.floor((now - 5_000) / 1000) }, plan_type: 'prolite' } },
+});
+writeFile(sessFile, `${resetPassed}\n`);
+utimesSync(sessFile, new Date(now), new Date(now));
+check(readCodexSessionRateLimits(sessHome, now) === null, '視窗已經重置過（resets_at 已過）就不用：裡面的已用量不再是現況');
+
+const brokenHome = mkdtempSync(join(tmpdir(), 'ai-cli-codex-broken-'));
+const brokenDay = join(brokenHome, 'sessions', String(day.getFullYear()), String(day.getMonth() + 1).padStart(2, '0'));
+mkdirSync(brokenDay, { recursive: true });
+writeFile(join(brokenDay, String(day.getDate()).padStart(2, '0')), 'not a directory'); // 讓 readdirSync 丟 ENOTDIR
+let threw = false, brokenResult;
+try { brokenResult = readCodexSessionRateLimits(brokenHome, now); } catch { threw = true; }
+check(!threw && brokenResult === null, '讀 session 檔出錯時回 null（退回 TUI），不讓查詢變 error');
+
+// codex：Luna Reserve 排在主 Weekly limit 前面時，主額度仍取行首那一行。
+const lunaFirst = parseCodexUsage([
+  '  Luna Reserve Weekly limit:  [███████████████████░] 96% left (resets 3:00 AM on 7 Oct)',
+  '  Weekly limit:               [████████████████░░░░] 79% left (resets 12:30 AM on 13 Oct)',
+].join('\n'));
+check(lunaFirst?.weekly?.percentRemaining === 79, 'Luna Reserve 排在前面時，主 weekly 仍取行首的 Weekly limit', `得到 ${JSON.stringify(lunaFirst?.weekly)}`);
+
+// agy：百分比行後面直接是下一個標籤（沒有狀態行）時，不能把它吞掉。
+const agyNoStatus = parseAgyUsage(['GEMINI MODELS', 'Weekly Limit Remaining', '[████] 99%', 'Five Hour Limit Remaining', '[████] 98%', 'Refreshes in 1h'].join('\n'));
+check(
+  agyNoStatus?.models?.length === 2 && agyNoStatus.models[1].percentRemaining === 98 && agyNoStatus.models[0].status === null,
+  'agy 百分比後沒有狀態行時，下一個額度不會被吞掉',
+  `得到 ${JSON.stringify(agyNoStatus?.models)}`
+);
+
+// 模擬終端機的邊界。
+check(renderTerminal(`abc${E}[3;1Hdef`) === 'abc\n\ndef', '★ 游標定位換到指定的列（不能蓋掉上一列）', JSON.stringify(renderTerminal(`abc${E}[3;1Hdef`)));
+check(renderTerminal(`a${E}[>1ub${E}[<uc${E}[?2026hd`) === 'abcd', '帶 < = > ? 前綴的序列不會被印成文字', JSON.stringify(renderTerminal(`a${E}[>1ub${E}[<uc${E}[?2026hd`)));
+check(renderTerminal(`${E}(Bok`) === 'ok', 'ESC ( B 這類字集指定整段吃掉（不能留下 B）');
+check(renderTerminal('a\tb') === `a${' '.repeat(7)}b`, 'tab 跳到下一個定位點（8 格）');
+check(renderTerminal(`ab${E}7cd${E}8X`) === 'abXd' && renderTerminal(`ab${E}[scd${E}[uX`) === 'abXd', '存／取游標位置（ESC 7/8、ESC[s/u）');
+
 const failed = results.filter(([ok]) => !ok).length;
 if (failed > 0) {
   console.log(`\nFAIL: ${results.length - failed} passed, ${failed} failed`);

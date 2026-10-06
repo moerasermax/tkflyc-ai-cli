@@ -120,8 +120,11 @@ try {
         const compact = buildProcessResult({ pid: 1, agent: 'direct-api', status: 'completed', startTime: '', workFolder: cwd, prompt: 'test', stdout: '', stderr: '' }, parsed);
         assert.deepEqual(compact.agentOutput.usage, expected);
       }
-      const sum = await run([finish, { usage: raw }, { usage: raw }], true);
-      assert.deepEqual(sum.usage, { ...expected, input_tokens: 200, output_tokens: 40, cached_input_tokens: 60, reasoning_output_tokens: 14 });
+      // 同一個回應的 usage 取最後一筆、不加總：有些供應商每個 chunk 都送累計值，加總會倍增。
+      const twice = await run([finish, { usage: raw }, { usage: raw }], true);
+      assert.deepEqual(twice.usage, expected);
+      const cumulative = await run([finish, { usage: { ...raw, completion_tokens: 10 } }, { usage: raw }], true);
+      assert.deepEqual(cumulative.usage, expected);
       for (const usage of [undefined, null, {}, { prompt_tokens: -1, completion_tokens: 2 }, { prompt_tokens: 1, completion_tokens: '2' }]) {
         const parsed = await run([finish, { usage }], true);
         assert.equal(Object.hasOwn(parsed, 'usage'), false);

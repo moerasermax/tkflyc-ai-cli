@@ -61,14 +61,30 @@
   NOTICE 在套件裡；任一項不過就擋下 `npm publish`。開發中可用 `--no-tag` 只核對打包內容。
 - CHANGELOG `[6.2.0]` 的比較連結原本指向不存在的 tag `v6.2.0`，改指當時收版的 commit `3e291fa`。
 
+### 修正（獨立稽核：Claude sonnet，經 ai-cli 唯讀）
+
+稽核範圍是 6.4.1 之後的所有 `src` 改動（core 三支、模擬終端機、session 檔讀取、agy／direct-api 用量），
+結論沒有高嚴重度問題。逐條驗證後修正：
+- **讀 session 檔的例外沒接住**：權限或檔案剛被輪替時，整個 codex 查詢會變 error、不退回 TUI；補 `plan` 的例外
+  還會吃掉已解析好的 TUI 結果。改為讀不到就回 `null`，拆出不看資料時間的 `readCodexSessionPlan()`。
+- **視窗已經重置過仍回報舊的已用量**：事件在 10 分鐘內、但 `resets_at` 已過時作廢，退回 TUI。
+- **direct-api 同一個回應的 usage 改取最後一筆**：原本逐筆加總，若供應商每個 chunk 都送累計值會倍增
+  （一次 run 只發一個請求）。既有的 `tokens` 欄位維持逐筆加總，未改。
+- **codex 主 weekly 先比對行首**：`Luna Reserve Weekly limit` 若排在前面，原本會被當成主額度。
+- **agy 百分比行後面沒有狀態行時**，下一個額度標籤不再被吞成 status。
+- **模擬終端機**：認得 `<` `=` `>` 前綴的序列（原本 `ESC[>1u` 會被印成文字）、`ESC ( B` 整段吃掉、tab 跳到下一個
+  定位點、處理存／取游標（`ESC 7/8`；`ESC[s/u` 只認沒有參數的形式，`ESC[<u` 是鍵盤協定）。
+判定不修：畫面尺寸寫死（解析與開 PTY 用同一組尺寸）、單獨 `\n` 回行首（POSIX 的 PTY 輸出也會轉成 `\r\n`）、
+清畫面不清歷史（刻意保留，錯誤訊息才不會丟）。
+
 ### 測試
 
-- `tests/verify-usage-parse.mjs` 29 → 47 條：模擬終端機（跳過格子保留原字、局部改寫、清到行尾、寬字元）、claude
+- `tests/verify-usage-parse.mjs` 29 → 57 條：模擬終端機（跳過格子保留原字、局部改寫、清到行尾、寬字元）、claude
   實測畫面與量不到時回 error、agy 群組與方向、兩家的 `additionalLimits`、session 檔的讀取／過期／`refresh` 強制走 TUI
   ／`plan` 補值；素材都取自 2026-10-06 抓到的原始位元組。測試會把 `CODEX_HOME` 指向暫存目錄，不讀這台機器真正的
   `~/.codex`。
 - `tests/verify-job-usage.mjs` 32 → 38 條（agy、direct-api JSON／SSE、CLI 假 spawn、空 alias override 的來源）。
-- 突變 143 → 163。
+- 突變 143 → 172；全數由指定的斷言殺掉（實跑 harness 確認）。
 
 ## [6.4.1] - 2026-10-06
 

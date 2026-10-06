@@ -45,6 +45,7 @@ function _cellWidth(ch: string): number {
 export function renderTerminal(input: string, cols = 200, rows = 50): string {
   const lines: string[][] = [[]];
   let top = 0, row = 0, col = 0;
+  let saved = { row: 0, col: 0 };
   const line = (r: number) => { const i = top + r; while (lines.length <= i) lines.push([]); return lines[i]; };
   const clampRow = (r: number) => Math.min(Math.max(r, 0), rows - 1);
   const clampCol = (c: number) => Math.min(Math.max(c, 0), cols - 1);
@@ -55,10 +56,11 @@ export function renderTerminal(input: string, cols = 200, rows = 50): string {
     const c = s[i];
     if (c === '\x1b') {
       if (s[i + 1] === '[') {
-        const m = /^\x1b\[([0-9;?]*)[ -/]*([@-~])/.exec(s.slice(i, i + 40));
+        // 參數位元組是 0x30–0x3F，含 `<` `=` `>` `?` 前綴（例：`ESC[>1u`、`ESC[?2026h`）；漏掉會把序列印成文字。
+        const m = /^\x1b\[([0-?]*)[ -/]*([@-~])/.exec(s.slice(i, i + 40));
         if (!m) { i++; continue; }
         i += m[0].length;
-        const p = m[1].replace(/\?/g, '').split(';').map((v) => (v === '' ? NaN : Number(v)));
+        const p = m[1].replace(/[<=>?]/g, '').split(';').map((v) => (v === '' ? NaN : Number(v)));
         const n = Number.isFinite(p[0]) && p[0] > 0 ? p[0] : 1;
         const cur = line(row);
         switch (m[2]) {
@@ -83,6 +85,9 @@ export function renderTerminal(input: string, cols = 200, rows = 50): string {
             else if (mode === 2 || mode === 3) for (let r = 0; r < rows; r++) line(r).length = 0;
             break;
           }
+          // 存／取游標位置；只認沒有參數的形式（`ESC[<u`、`ESC[>1u` 是鍵盤協定，不是取游標）。
+          case 's': if (m[1] === '') saved = { row, col }; break;
+          case 'u': if (m[1] === '') { row = saved.row; col = saved.col; line(row); } break;
           default: break; // m（顏色）、h / l（模式）等不影響文字位置
         }
         continue;
@@ -93,9 +98,13 @@ export function renderTerminal(input: string, cols = 200, rows = 50): string {
         i += end < 0 ? rest.length : end + (rest[end] === '\x07' ? 1 : 2);
         continue;
       }
+      if (s[i + 1] === '7') { saved = { row, col }; i += 2; continue; }
+      if (s[i + 1] === '8') { row = saved.row; col = saved.col; line(row); i += 2; continue; }
+      if ('()*+'.includes(s[i + 1] ?? '')) { i += 3; continue; } // 字集指定（ESC ( B）是三個字元
       i += 2; continue;
     }
     if (c === '\r') { col = 0; i++; continue; }
+    if (c === '\t') { col = clampCol((Math.floor(col / 8) + 1) * 8); i++; continue; }
     if (c === '\n') { newline(); i++; continue; }
     if (c === '\b') { col = Math.max(0, col - 1); i++; continue; }
     if (c < ' ') { i++; continue; }
@@ -249,7 +258,8 @@ export function parseCodexUsage(text: string) {
   };
 
   const fiveHour = limitInfo(/5h\s*limit\s*:/i) ?? limitInfo(/\b5\s*hour[^:]*:/i);
-  const weekly   = limitInfo(/weekly\s*limit\s*:/i) ?? limitInfo(/\bweek(?:ly)?[^:]*limit[^:]*:/i);
+  // 先找行首的 `Weekly limit:`：`Luna Reserve Weekly limit:` 這類額外額度若排在前面，不能被當成主額度。
+  const weekly   = limitInfo(/^[ \t]*weekly\s*limit\s*:/im) ?? limitInfo(/weekly\s*limit\s*:/i) ?? limitInfo(/\bweek(?:ly)?[^:]*limit[^:]*:/i);
 
   // 抓不到任何額度行時，先試 Codex /status 格式：「N% context left」
   if (!fiveHour && !weekly) {
@@ -320,7 +330,9 @@ export function parseAgyUsage(text: string) {
     if (/^\(\d+/.test(nameLine)) continue;
     const statusLine = lines[i + 2] ?? '';
     const isNav = /↑|↓|pgup|pgdown|ctrl|esc/i.test(statusLine);
-    const status = (!isNav && statusLine) ? statusLine : null;
+    // 百分比行後面若直接是下一個額度標籤／群組標題，就沒有狀態行——不能把它吞掉當 status。
+    const isNext = /limit\s+(remaining|used)\b/i.test(statusLine) || /\bMODELS$/.test(statusLine) || /%\s*$/.test(statusLine);
+    const status = (!isNav && !isNext && statusLine) ? statusLine : null;
     const pct = _toNumber(percentMatch[1]);
     // 標籤寫明「Remaining／Used」時照標籤換算。2026-10-06 實測畫面是「Weekly Limit Remaining 99.86%」，
     // 原本把它原樣放進 percentUsed，讀的人會以為已經用掉 99.86%。
@@ -339,7 +351,7 @@ export function parseAgyUsage(text: string) {
       // 舊版畫面（每行一個模型名）：百分比是剩餘還是已用沒有驗證過，照舊放 percentUsed、不改語意。
       models.push({ model: nameLine, percentUsed: pct, status });
     }
-    i += 2;
+    i += status ? 2 : 1;
   }
 
   if (models.length > 0) return { type: 'model_quota', models, raw };
@@ -400,13 +412,8 @@ function _codexHome(): string {
   return process.env.CODEX_HOME || join(homedir(), '.codex');
 }
 
-/**
- * 讀 codex 最近的 session 檔裡最後一筆 `rate_limits`（codex 每個 turn 結束都會寫一筆 token_count 事件）。
- * 不用開 TUI：瞬間拿到，管理員權限、daemon、hook 信任畫面都不影響（2026-10-06 實測 session 檔有
- * `primary.used_percent`、`window_minutes`、`resets_at`、`plan_type`）。代價是只反映「最後一次有人用
- * codex」那一刻，所以事件超過 maxAgeMs 就回 null，由呼叫端退回 TUI；結果附 asOf，讓呼叫端知道數字是何時的。
- */
-export function readCodexSessionRateLimits(codexHome: string, nowMs = Date.now(), maxAgeMs = CODEX_SESSION_RATE_LIMITS_MAX_AGE_MS) {
+// 找最新一筆 rate_limits 事件：只看今天與昨天的資料夾、最多 5 個檔、每檔只讀尾端 256 KB。
+function _latestCodexRateLimitEvent(codexHome: string, nowMs: number, maxAgeMs: number): { rl: any; ts: number; line: string } | null {
   const root = join(codexHome, 'sessions');
   if (!existsSync(root)) return null;
   const dayDir = (offsetDays: number) => {
@@ -427,27 +434,51 @@ export function readCodexSessionRateLimits(codexHome: string, nowMs = Date.now()
       const rl = event?.payload?.rate_limits;
       const ts = Date.parse(event?.timestamp ?? '');
       if (!rl || !Number.isFinite(ts)) continue;
-      if (nowMs - ts > maxAgeMs) return null;
-      const win = (w: any) => (w && typeof w.used_percent === 'number' ? {
-        percentRemaining: Math.round((100 - w.used_percent) * 100) / 100,
-        percentUsed: w.used_percent,
-        basis: 'used' as const,
-        resetAt: typeof w.resets_at === 'number' ? new Date(w.resets_at * 1000).toISOString() : null,
-        windowMinutes: typeof w.window_minutes === 'number' ? w.window_minutes : null,
-      } : null);
-      const windows = [win(rl.primary), win(rl.secondary)].filter((w): w is NonNullable<ReturnType<typeof win>> => !!w);
-      // 依視窗長度分：≤ 6 小時是 5h 額度，≥ 6 天是週額度。
-      const fiveHour = windows.find((w) => w.windowMinutes !== null && w.windowMinutes <= 360) ?? null;
-      const weekly = windows.find((w) => w.windowMinutes !== null && w.windowMinutes >= 8640) ?? null;
-      if (!fiveHour && !weekly) return null;
-      return {
-        type: 'rate_limits', source: 'session-file', asOf: new Date(ts).toISOString(),
-        account: null, plan: typeof rl.plan_type === 'string' ? rl.plan_type : null, model: null,
-        fiveHour, weekly, raw: lines[i].trim(),
-      };
+      return { rl, ts, line: lines[i].trim() };
     }
   }
   return null;
+}
+
+/**
+ * 讀 codex 最近的 session 檔裡最後一筆 `rate_limits`（codex 每個 turn 結束都會寫一筆 token_count 事件）。
+ * 不用開 TUI：瞬間拿到，管理員權限、daemon、hook 信任畫面都不影響（2026-10-06 實測 session 檔有
+ * `primary.used_percent`、`window_minutes`、`resets_at`、`plan_type`）。代價是只反映「最後一次有人用
+ * codex」那一刻，所以事件超過 maxAgeMs、或視窗已經重置過就回 null，由呼叫端退回 TUI；結果附 asOf。
+ */
+export function readCodexSessionRateLimits(codexHome: string, nowMs = Date.now(), maxAgeMs = CODEX_SESSION_RATE_LIMITS_MAX_AGE_MS) {
+  let event: ReturnType<typeof _latestCodexRateLimitEvent>;
+  // 讀不到（權限、檔案剛被輪替）就回 null，讓呼叫端退回 TUI，不讓整個查詢變 error。
+  try { event = _latestCodexRateLimitEvent(codexHome, nowMs, maxAgeMs); } catch { return null; }
+  if (!event || nowMs - event.ts > maxAgeMs) return null;
+  const { rl, ts, line } = event;
+  // 事件雖新，但視窗已經重置過（resets_at 已過）：裡面的已用量不再是現況。
+  if ([rl.primary, rl.secondary].some((w: any) => typeof w?.resets_at === 'number' && w.resets_at * 1000 <= nowMs)) return null;
+  const win = (w: any) => (w && typeof w.used_percent === 'number' ? {
+    percentRemaining: Math.round((100 - w.used_percent) * 100) / 100,
+    percentUsed: w.used_percent,
+    basis: 'used' as const,
+    resetAt: typeof w.resets_at === 'number' ? new Date(w.resets_at * 1000).toISOString() : null,
+    windowMinutes: typeof w.window_minutes === 'number' ? w.window_minutes : null,
+  } : null);
+  const windows = [win(rl.primary), win(rl.secondary)].filter((w): w is NonNullable<ReturnType<typeof win>> => !!w);
+  // 依視窗長度分：≤ 6 小時是 5h 額度，≥ 6 天是週額度。
+  const fiveHour = windows.find((w) => w.windowMinutes !== null && w.windowMinutes <= 360) ?? null;
+  const weekly = windows.find((w) => w.windowMinutes !== null && w.windowMinutes >= 8640) ?? null;
+  if (!fiveHour && !weekly) return null;
+  return {
+    type: 'rate_limits', source: 'session-file', asOf: new Date(ts).toISOString(),
+    account: null, plan: typeof rl.plan_type === 'string' ? rl.plan_type : null, model: null,
+    fiveHour, weekly, raw: line,
+  };
+}
+
+/** 最近的 session 檔裡的方案（plan_type）。不看資料時間與重置——方案不常變。讀不到回 null。 */
+export function readCodexSessionPlan(codexHome: string): string | null {
+  try {
+    const plan = _latestCodexRateLimitEvent(codexHome, Date.now(), Number.POSITIVE_INFINITY)?.rl?.plan_type;
+    return typeof plan === 'string' ? plan : null;
+  } catch { return null; }
 }
 
 export class CodexUsageProvider {
@@ -474,7 +505,7 @@ export class CodexUsageProvider {
     }
     // 0.160 的 /status 面板沒有方案欄位；方案不常變，從最近的 session 檔補（不設時間限制）。
     if (usage.type === 'rate_limits' && !usage.plan) {
-      const plan = readCodexSessionRateLimits(_codexHome(), Date.now(), Number.POSITIVE_INFINITY)?.plan;
+      const plan = readCodexSessionPlan(_codexHome());
       if (plan) return { ...usage, plan };
     }
     return usage;
