@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+## [6.4.1] - 2026-10-06
+
+> 只有一個修正：讓 `query_usage` 在 codex-cli 0.160 上真的讀得到 Codex 額度。只動 `src/plugins/usage-service.ts`
+> 的查額度流程，派工（`run`）沒動（SemVer PATCH）。發佈前已用重新連線後的 MCP 實測：`status: "ok"`、
+> `type: "rate_limits"`、weekly `81% left`。
+
 ### 修正（codex 0.160 的 TUI：`query_usage` 送不出 `/status`）
 
 - **6.4.0 修完 `--no-daemon` 與 hook 信任之後，`query_usage` 仍讀不到 Codex 額度，60 秒逾時。**
@@ -1821,7 +1827,8 @@ Antigravity 可用；**Kiro 沒額度**（CLI 回 `Not logged in`）、**Forge �
 - Windows 上優先解析 `.cmd`/`.exe` 而非 extensionless shim。
 - 移除已壞掉的 gemini 殘留；usage 外掛路徑改由 `AI_CLI_USAGE_PLUGIN_BIN` 環境變數設定。
 
-[Unreleased]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.4.0...HEAD
+[Unreleased]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.4.1...HEAD
+[6.4.1]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.4.0...v6.4.1
 [6.4.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.3.0...v6.4.0
 [6.3.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.1.1...v6.3.0
 [6.2.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.1.1...v6.2.0
