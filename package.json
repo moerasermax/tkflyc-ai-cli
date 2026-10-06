@@ -1,6 +1,6 @@
 {
   "name": "@tkflyc/ai-cli-mcp",
-  "version": "6.4.0",
+  "version": "6.4.1",
   "description": "Run Claude, Codex, Antigravity (agy), and any third-party OpenAI-compatible API through MCP with background jobs. Self-maintained, registry-based architecture.",
   "license": "Apache-2.0",
   "author": "moerasermax",
