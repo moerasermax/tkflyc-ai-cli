@@ -40,7 +40,7 @@ function hasMeaningfulParsedOutput(agentOutput: any): boolean {
     if (value === undefined || value === null) {
       return false;
     }
-    if (key === 'session_id') {
+    if (key === 'session_id' || key === 'usage') {
       return false;
     }
     if (key === 'tools') {
@@ -85,6 +85,10 @@ export function buildProcessResult(
   if (!response.agentOutput || preserveRawFailureOutput) {
     response.stdout = context.stdout;
     response.stderr = context.stderr;
+    // 用量不構成回覆內容；保留原始錯誤輸出的同時，仍在固定位置回傳用量。
+    if (!response.agentOutput && shapedAgentOutput?.usage) {
+      response.agentOutput = { usage: shapedAgentOutput.usage };
+    }
   }
   if (verbose && preserveRawFailureOutput && hasMeaningfulParsedOutput(shapedAgentOutput)) {
     response.agentOutput = shapedAgentOutput;

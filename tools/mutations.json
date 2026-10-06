@@ -839,8 +839,8 @@
     "name": "Codex 忽略 turn.completed 用量",
     "file": "src/agents/codex.ts",
     "script": "verify-job-usage.mjs",
-    "from": "parsed.type === 'turn.completed' && parsed.usage",
-    "to": "parsed.type === 'turn.completed-mutated' && parsed.usage",
+    "from": "if (parsed.type === 'turn.completed') {",
+    "to": "if (parsed.type === 'turn.completed-mutated') {",
     "expect": "Codex single turn usage"
   },
   {
@@ -871,8 +871,8 @@
     "name": "Claude NDJSON 不讀 result 用量",
     "file": "src/agents/claude.ts",
     "script": "verify-job-usage.mjs",
-    "from": "if (parsed.type === 'result') usage = normalizeResultUsage(parsed);",
-    "to": "if (parsed.type === 'result-mutated') usage = normalizeResultUsage(parsed);",
+    "from": "if (parsed.type === 'result') usage = normalizeResultUsage(parsed) ?? usage;",
+    "to": "if (parsed.type === 'result-mutated') usage = normalizeResultUsage(parsed) ?? usage;",
     "expect": "Claude NDJSON result usage"
   },
   {
@@ -978,5 +978,61 @@
     "from": "For cost-aware dispatch (batching, duplicate jobs, polling, and agentOutput.usage), read the models tool's dispatchGuidance.",
     "to": "Read models for details.",
     "expect": "MCP run description points to cost guidance"
+  },
+  {
+    "name": "usage 被誤認為回覆而隱藏原始錯誤",
+    "file": "src/core/process-result.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "if (key === 'session_id' || key === 'usage') {",
+    "to": "if (key === 'session_id') {",
+    "expect": "Usage-only failed result keeps raw output and usage"
+  },
+  {
+    "name": "原始錯誤退路漏回傳 usage",
+    "file": "src/core/process-result.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "if (!response.agentOutput && shapedAgentOutput?.usage) {",
+    "to": "if (false && !response.agentOutput && shapedAgentOutput?.usage) {",
+    "expect": "Usage-only failed result keeps raw output and usage"
+  },
+  {
+    "name": "Codex cached 計數仍被誤列為必填",
+    "file": "src/agents/codex.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "parsed.usage && ['input_tokens', 'output_tokens'].every(",
+    "to": "parsed.usage && ['input_tokens', 'cached_input_tokens', 'output_tokens'].every(",
+    "expect": "Codex missing cache counter still counts turn"
+  },
+  {
+    "name": "Codex 壞 turn 未標 incomplete",
+    "file": "src/agents/codex.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "if (usage && incompleteUsage) usage.incomplete = true;",
+    "to": "if (usage && incompleteUsage) usage.incomplete = false;",
+    "expect": "Codex invalid turns mark partial totals incomplete"
+  },
+  {
+    "name": "Claude 總輸入漏加 cache",
+    "file": "src/agents/claude.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "input_tokens: raw.input_tokens + (raw.cache_read_input_tokens ?? 0) + (raw.cache_creation_input_tokens ?? 0),",
+    "to": "input_tokens: raw.input_tokens,",
+    "expect": "Claude total input includes both cache counters"
+  },
+  {
+    "name": "Claude 後續無效 result 清掉有效用量",
+    "file": "src/agents/claude.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "if (parsed.type === 'result') usage = normalizeResultUsage(parsed) ?? usage;",
+    "to": "if (parsed.type === 'result') usage = normalizeResultUsage(parsed);",
+    "expect": "Claude later invalid result retains valid usage"
+  },
+  {
+    "name": "Claude 單一 JSON 漏保留原始 usage",
+    "file": "src/agents/claude.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "...(raw_usage !== undefined ? { raw_usage } : {})",
+    "to": "...{}",
+    "expect": "Claude single JSON preserves raw usage and other fields"
   }
 ]

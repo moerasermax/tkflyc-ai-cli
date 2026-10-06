@@ -177,7 +177,8 @@ function normalizeResultUsage(parsed: any) {
         (key) => typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] >= 0
       )) return undefined;
   return {
-    input_tokens: raw.input_tokens,
+    // input_tokens 統一定義為含快取的總輸入；Claude 原始 input 不含兩種快取。
+    input_tokens: raw.input_tokens + (raw.cache_read_input_tokens ?? 0) + (raw.cache_creation_input_tokens ?? 0),
     cached_input_tokens: raw.cache_read_input_tokens ?? 0,
     cache_write_input_tokens: raw.cache_creation_input_tokens ?? 0,
     output_tokens: raw.output_tokens,
@@ -194,9 +195,9 @@ function parseOutput(stdout: string): unknown {
   try {
     const parsed = JSON.parse(stdout);
     if (parsed?.type === 'result') {
-      const { usage: _rawUsage, ...rest } = parsed;
+      const { usage: raw_usage, ...rest } = parsed;
       const usage = normalizeResultUsage(parsed);
-      return { ...rest, ...(usage ? { usage } : {}) };
+      return { ...rest, ...(raw_usage !== undefined ? { raw_usage } : {}), ...(usage ? { usage } : {}) };
     }
     return parsed;
   } catch {
@@ -213,7 +214,7 @@ function parseOutput(stdout: string): unknown {
       if (!line.trim()) continue;
       try {
         const parsed = JSON.parse(line);
-        if (parsed.type === 'result') usage = normalizeResultUsage(parsed);
+        if (parsed.type === 'result') usage = normalizeResultUsage(parsed) ?? usage;
         if (parsed.session_id) {
           sessionId = parsed.session_id;
         }

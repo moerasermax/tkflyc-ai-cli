@@ -10,10 +10,19 @@
 
 ### 新增（job 用量與成本派工提醒）
 
-- **Codex / Claude job 結束時回傳正規化 `agentOutput.usage`。** 過去只看得到結果，看不到每個 job 的 token 開銷，strict Codex 又帶 `--ephemeral`，事後無 session 可追。Codex 累加每筆 `turn.completed`，保留舊 `token_count`；Claude 的 NDJSON 與單一 JSON result 都映射 cache／thinking，用 `num_turns` 與 `cost_usd_nominal` 明示名目成本而非訂閱帳單。沒有量到就不放 usage；既有 compact result 會保留它，`process-result.ts` 不需修改。（Codex，@moerasermax）
+- **Codex / Claude job 結束時回傳正規化 `agentOutput.usage`。** 過去只看得到結果，看不到每個 job 的 token 開銷，strict Codex 又帶 `--ephemeral`，事後無 session 可追。Codex 累加每筆 `turn.completed`，保留舊 `token_count`；Claude 的 NDJSON 與單一 JSON result 都映射 cache／thinking，用 `num_turns` 與 `cost_usd_nominal` 明示名目成本而非訂閱帳單。沒有量到就不放 usage；compact result 會保留它；稽核後另修正只有用量時的原始輸出退路。（Codex，@moerasermax）
 - **MCP `run` 對實際送出的 xhigh / max / ultra 帶英文 `warnings`。** 影響 core 的 command-builder 與 process-service 三個 started 回傳：明確指定、alias 預設及 config（含環境覆寫）都標示 effort 與來源，提醒日常用 medium、最高強度只在使用者明確要求時使用；只增加可選回傳欄位，不擋派工、不改既有指令與欄位。low / medium / high 不附警告。CLI detached 路徑這次未延伸：增加 file-process-service 會超過核准的 12 個修改檔案。未變更 antigravity / direct-api agent。（Codex，@moerasermax）
 - **`models.dispatchGuidance` 加入合併小任務、避免重複派工、長 wait 少 peek、job 結束讀 usage。** 依 2026-10-06 使用者實測：最小 Codex input 約 2 萬、Claude context 約 3 萬 tokens，零碎派工與大 context 的短輪詢會重複支付開銷；這些數字是當時環境觀察，不是所有 job 的保證下限。MCP run 描述指向這份建議。（Codex，@moerasermax）
-- 新增 `verify-job-usage.mjs`，以假 spawn 驗證用量、compact result、effort 來源與 MCP start 警告；`npm test` 15→16 支。新增對應突變片段並檢查唯一命中；依使用者要求未執行 mutation-test，未做獨立 agent 稽核，提交／推送前的 core 稽核與突變實跑仍待完成。（Codex，@moerasermax）
+- 新增 `verify-job-usage.mjs`，以假 spawn 驗證用量、compact result、effort 來源與 MCP start 警告；`npm test` 15→16 支。新增對應突變片段並檢查唯一命中；前版由 Claude 驗收並提交為 `eb9cb41`，使用者確認新增 18 筆突變 18/18 KILLED；本次稽核修補依要求不執行 mutation-test、不 commit／push。（Codex，@moerasermax）
+
+### 修正（job 用量獨立稽核）
+
+- **獨立稽核由 Claude（sonnet，ai-cli 唯讀）執行。** 發現只有 usage 的失敗結果會隱藏原始錯誤、Codex 缺 cached 計數的 turn 被漏算且部分壞資料沒有標記、兩家 input 計數語意不同、Claude 後續無效 result 清掉有效用量、單一 JSON 原始 usage 遺失，以及環境變數測試失敗後清理不到。以下修正依稽核結論加入回歸驗證。（Codex，@moerasermax）
+- **core 退路保留原始輸出與用量。** `usage` 與 `session_id` 都不構成回覆內容；沒有有意義的 agentOutput 時先保留 stdout／stderr，再以 `agentOutput.usage` 回傳量到的值。有 message 的正常結果不變。影響共用 `buildProcessResult`，包含 MCP／CLI 的精簡與 verbose 結果。（Codex，@moerasermax）
+- **Codex turn 只要求有效 input／output。** 缺 cached 等可選計數仍加總；若任何 turn.completed 缺有效的必填用量，已量到的合計標記 `incomplete: true`，全數無效則不放 usage，避免少算卻看起來完整。（Codex，@moerasermax）
+- **統一 `usage.input_tokens` 為含快取的總輸入。** Codex 的原值已包含 cached，保持不變；Claude 改為 input + cache_read + cache_creation，實測樣本 9 + 17734 + 12528 = 30271。各 cache 子計數仍獨立回傳，呼叫端不要再加一次。（Codex，@moerasermax）
+- **Claude 保留有效用量與 vendor 原值。** NDJSON 後續無效 result 不再覆蓋有效 usage；單一 JSON 在 `raw_usage` 保留原值及其他欄位，格式不合時只省略正規化 usage。測試的環境覆寫清理改放 finally，避免失敗汙染後續斷言。（Codex，@moerasermax）
+- **兩項稽核意見判定不修：** MCP handler 只是測試未涵蓋，`mcp.ts` 用 `{...result}` 原樣轉發，未發現欄位被吃掉；可選缺欄位填 0 影響小，維持既有預設，不擴大本次範圍。新增 7 筆修補突變、更新 2 筆既有片段，新增回歸斷言；本次只做片段健檢，突變實跑留給使用者。（Codex，@moerasermax）
 
 ### 修正（`query_usage` 讀不到 Codex 額度卻回 `status: "ok"`）
 

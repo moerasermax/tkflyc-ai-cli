@@ -46,7 +46,7 @@ const result = { type: 'result', num_turns: 1, total_cost_usd: 0.0279234,
   modelUsage: { 'claude-haiku-4-5-20251001': { inputTokens: 9, outputTokens: 217,
     cacheReadInputTokens: 17734, cacheCreationInputTokens: 12528, costUSD: 0.0279234 } },
 };
-const expectedClaude = { input_tokens: 9, cached_input_tokens: 17734, cache_write_input_tokens: 12528,
+const expectedClaude = { input_tokens: 30271, cached_input_tokens: 17734, cache_write_input_tokens: 12528,
   output_tokens: 217, reasoning_output_tokens: 211, num_turns: 1,
   cost_usd_nominal: 0.0279234, source: 'claude result' };
 const options = { prompt: 'usage verification', workFolder: ROOT, model: 'codex',
@@ -73,6 +73,27 @@ try {
   check('Codex optional counters sum', () => assert.deepEqual(
     codexAgent.parseOutput(line({ ...turn, usage: { ...turn.usage, cache_write_input_tokens: 11, reasoning_output_tokens: 7 } }), '').usage,
     { ...expectedCodex, cache_write_input_tokens: 11, reasoning_output_tokens: 7 }));
+  check('Codex missing cache counter still counts turn', () => {
+    const withoutCache = structuredClone(turn);
+    delete withoutCache.usage.cached_input_tokens;
+    assert.deepEqual(codexAgent.parseOutput(`${line(turn)}\n${line(withoutCache)}`, '').usage,
+      { ...expectedCodex, input_tokens: 39684, output_tokens: 10 });
+  });
+  check('Codex invalid turns mark partial totals incomplete', () => {
+    for (const usage of [undefined, {}, { input_tokens: -1, output_tokens: 5 },
+      { input_tokens: 10, output_tokens: '5' }, { input_tokens: 10, output_tokens: -1 },
+      { input_tokens: null, output_tokens: 5 }, { input_tokens: 10 }]) {
+      const bad = { type: 'turn.completed', usage };
+      for (const events of [[turn, bad], [bad, turn]])
+        assert.deepEqual(codexAgent.parseOutput(events.map(line).join('\n'), '').usage,
+          { ...expectedCodex, incomplete: true });
+      assert.equal(Object.hasOwn(codexAgent.parseOutput(
+        `${line({ type: 'thread.started', thread_id: 'test' })}\n${line(bad)}`, ''), 'usage'), false);
+    }
+    const nonFinite = '{"type":"turn.completed","usage":{"input_tokens":1e400,"output_tokens":5}}';
+    assert.deepEqual(codexAgent.parseOutput(`${line(turn)}\n${nonFinite}`, '').usage,
+      { ...expectedCodex, incomplete: true });
+  });
   check('Codex legacy token_count preserved without usage', () => {
     const msg = { type: 'token_count', info: { total_token_usage: 17 } };
     const parsed = codexAgent.parseOutput(line({ msg }), '');
@@ -87,6 +108,29 @@ try {
   });
   check('Claude single JSON result usage', () => assert.deepEqual(claudeAgent.parseOutput(line(result), '').usage, expectedClaude));
   check('Claude NDJSON result usage', () => assert.deepEqual(claudeAgent.parseOutput(`{"type":"system"}\n${line(result)}`, '').usage, expectedClaude));
+  check('Claude total input includes both cache counters', () => {
+    for (const [read, creation] of [[17734, 0], [0, 12528], [17734, 12528]]) {
+      const event = { ...result, usage: { input_tokens: 9, output_tokens: 217,
+        cache_read_input_tokens: read, cache_creation_input_tokens: creation } };
+      assert.equal(claudeAgent.parseOutput(line(event), '').usage.input_tokens, 9 + read + creation);
+    }
+  });
+  check('Claude later invalid result retains valid usage', () => {
+    for (const usage of [undefined, {}, { input_tokens: -1, output_tokens: 0 }])
+      assert.deepEqual(claudeAgent.parseOutput(
+        `${line(result)}\n${line({ type: 'result', result: 'done', usage })}`, '').usage, expectedClaude);
+  });
+  check('Claude single JSON preserves raw usage and other fields', () => {
+    for (const raw of [result.usage, { input_tokens: 'unknown' }, null]) {
+      const event = { ...result, usage: raw, result: 'done', session_id: 'test', is_error: false };
+      const parsed = claudeAgent.parseOutput(line(event), '');
+      assert.deepEqual(parsed.raw_usage, raw);
+      const { usage: _usage, raw_usage: _rawUsage, ...rest } = parsed;
+      const { usage: _vendorUsage, ...expectedRest } = event;
+      assert.deepEqual(rest, expectedRest);
+      if (raw !== result.usage) assert.equal(Object.hasOwn(parsed, 'usage'), false);
+    }
+  });
   check('Claude missing thinking defaults to zero', () => {
     const noThinking = structuredClone(result);
     delete noThinking.usage.output_tokens_details;
@@ -109,6 +153,27 @@ try {
         workFolder: ROOT, prompt: 'test', stdout: '', stderr: '' }, { usage, tools: [{ tool: 'test' }] });
       assert.deepEqual(compact.agentOutput, { usage });
     }
+  });
+  check('Usage-only failed result keeps raw output and usage', () => {
+    for (const [agent, usage] of [['codex', expectedCodex], ['claude', expectedClaude]]) {
+      for (const verbose of [false, true]) {
+        const response = buildProcessResult({ pid: 1, agent, status: 'failed', exitCode: 1,
+          startTime: '', workFolder: ROOT, prompt: 'test', stdout: 'original stdout', stderr: 'vendor error' },
+          { message: null, session_id: 'test', usage }, verbose);
+        assert.equal(response.stdout, 'original stdout');
+        assert.equal(response.stderr, 'vendor error');
+        assert.equal(response.session_id, 'test');
+        assert.deepEqual(response.agentOutput, { usage });
+      }
+    }
+  });
+  check('Meaningful message preserves normal compact result', () => {
+    const response = buildProcessResult({ pid: 1, agent: 'claude', status: 'completed',
+      startTime: '', workFolder: ROOT, prompt: 'test', stdout: 'raw stdout', stderr: 'raw stderr' },
+      { message: 'done', session_id: 'test', usage: expectedClaude, tools: [{ tool: 'test' }] });
+    assert.deepEqual(response.agentOutput, { message: 'done', session_id: 'test', usage: expectedClaude });
+    assert.equal(Object.hasOwn(response, 'stdout'), false);
+    assert.equal(Object.hasOwn(response, 'stderr'), false);
   });
   check('Explicit expensive efforts warn and preserve command', () => {
     for (const effort of ['xhigh', 'max', 'ultra']) {
@@ -143,14 +208,20 @@ try {
   });
   check('Environment default warns as config', () => {
     process.env.AI_CLI_DEFAULT_REASONING_EFFORT = 'max';
-    warning(buildCliCommand(options), 'max', 'config');
-    delete process.env.AI_CLI_DEFAULT_REASONING_EFFORT;
-    config({});
+    try {
+      warning(buildCliCommand(options), 'max', 'config');
+    } finally {
+      delete process.env.AI_CLI_DEFAULT_REASONING_EFFORT;
+      config({});
+    }
   });
   check('Invalid environment default leaves alias source intact', () => {
     process.env.AI_CLI_DEFAULT_REASONING_EFFORT = 'invalid';
-    warning(buildCliCommand({ ...options, model: 'codex-ultra' }), 'max', 'alias');
-    delete process.env.AI_CLI_DEFAULT_REASONING_EFFORT;
+    try {
+      warning(buildCliCommand({ ...options, model: 'codex-ultra' }), 'max', 'alias');
+    } finally {
+      delete process.env.AI_CLI_DEFAULT_REASONING_EFFORT;
+    }
   });
   check('MCP start response forwards warning without real spawn', () => {
     const service = new ProcessService({ cliPaths: options.cliPaths, breaker: { check() {} } });
