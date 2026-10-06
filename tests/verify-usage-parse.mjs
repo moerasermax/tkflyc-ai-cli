@@ -29,7 +29,7 @@ function check(ok, name, detail = '') {
   console.log(`  ${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
-const { parseCodexUsage, CodexUsageProvider, UsageService } = await import(
+const { parseCodexUsage, CodexUsageProvider, UsageService, isCodexTuiReady, codexStatusWrites } = await import(
   pathToFileURL(join(ROOT, 'dist', 'plugins', 'usage-service.js')).href
 );
 
@@ -152,6 +152,44 @@ check(
   panelWithNoise.status === 'ok' && panelWithNoise.usage?.type === 'rate_limits',
   '有額度數字時，畫面上別處的 Error 字樣不影響 ok',
   `得到 status=${panelWithNoise.status} type=${panelWithNoise.usage?.type}`
+);
+
+// ── 6. codex 0.160 的 TUI：就緒判斷與 /status 的送法 ─────────────────
+// 實測畫面（2026-10-06，0.160.0，帶 --no-daemon、hook 已信任）：標題框一直停在 loading，
+// 模型名在底部狀態列；舊的就緒判斷等不到「非 loading 的模型名」，永遠不送 /status。
+const TUI_0160_READY = [
+  '>_ OpenAI Codex (v0.160.0)',
+  'loading',
+  'Take your time. The cursor can wait.',
+  '› Ask Codex to do anything',
+  '? for shortcuts~GPT-6.1-Sol default·~high · ~',
+].join('\n');
+check(isCodexTuiReady(TUI_0160_READY, 2000), '★ 0.160 標題框停在 loading 時，提示列出現且靜止就算就緒');
+check(!isCodexTuiReady(TUI_0160_READY, 500), '輸出還沒靜止時不送 /status');
+check(!isCodexTuiReady(`${TUI_0160_READY}\nBooting MCP server: knowledge`, 2000), '還在啟動 MCP 時不送 /status');
+check(isCodexTuiReady('╭──╮\n│ model:     gpt-6-astra   │\n╰──╯\n', 2000), '舊版 TUI：標題框換成真模型名仍算就緒');
+
+check(
+  JSON.stringify(codexStatusWrites(TUI_0160_READY)) === JSON.stringify(['/status', '\r']),
+  '★ /status 與 Enter 分兩次寫（同一次寫入時 Enter 會被指令選單吞掉）',
+  `得到 ${JSON.stringify(codexStatusWrites(TUI_0160_READY))}`
+);
+check(
+  JSON.stringify(codexStatusWrites(`${TUI_0160_READY}\n›/status`)) === JSON.stringify(['\r']),
+  '重試時 /status 還在輸入框，只補 Enter（不能變成 /status/status）'
+);
+
+// 同一次實測拿到的面板原文：Weekly limit 跟 Session 擠在同一行、% 與 left 之間沒有空白。
+const PANEL_0160 = [
+  'Account:                    Pro100',
+  'Session:                    01a10f0d-a1dd-7040-b2a1-ececd0382a07  Weekly limit:               [████████████████░░░░]82%left (resets 12:30 AM on 13 Oct)',
+  'Luna Reserve Weekly limit:  [███████████████████░]96%left (resets 3:00 AM on 7 Oct)',
+].join('\n');
+const panel = await queryWith(new FakeCodex([PANEL_0160]));
+check(
+  panel.status === 'ok' && panel.usage?.weekly?.percentRemaining === 82 && panel.usage?.weekly?.resetAt === '12:30 AM on 13 Oct',
+  '★ 0.160 實測面板解得出 weekly 82% left 與重置時間',
+  `得到 status=${panel.status} weekly=${JSON.stringify(panel.usage?.weekly)}`
 );
 
 const failed = results.filter(([ok]) => !ok).length;

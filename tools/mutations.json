@@ -1034,5 +1034,37 @@
     "from": "...(raw_usage !== undefined ? { raw_usage } : {})",
     "to": "...{}",
     "expect": "Claude single JSON preserves raw usage and other fields"
+  },
+  {
+    "name": "0.160 TUI 不認提示列（標題框停在 loading，永遠不送 /status、60 秒逾時）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "  return /Ask Codex to do anything|\\?\\s*for shortcuts/i.test(tail);",
+    "to": "  return false;",
+    "expect": "0.160 標題框停在 loading 時，提示列出現且靜止就算就緒",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "還在啟動 MCP 就送 /status（會被開機畫面吃掉）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "  if (/Starting MCP|Booting MCP/i.test(tail)) return false;",
+    "to": "",
+    "expect": "還在啟動 MCP 時不送 /status",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "/status 與 Enter 同一次寫入（Enter 被指令選單吞掉）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "  return /›\\s*\\/status\\s*$/.test(screenTail.trimEnd()) ? ['\\r'] : ['/status', '\\r'];",
+    "to": "  return /›\\s*\\/status\\s*$/.test(screenTail.trimEnd()) ? ['\\r'] : ['/status\\r'];",
+    "expect": "/status 與 Enter 分兩次寫",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "重試時再打一次 /status（輸入框變成 /status/status）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "  return /›\\s*\\/status\\s*$/.test(screenTail.trimEnd()) ? ['\\r'] : ['/status', '\\r'];",
+    "to": "  return ['/status', '\\r'];",
+    "expect": "重試時 /status 還在輸入框，只補 Enter",
+    "script": "verify-usage-parse.mjs"
   }
 ]

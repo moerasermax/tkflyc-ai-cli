@@ -218,6 +218,28 @@ export function isCodexNoDaemonUnsupported(output: string): boolean {
   return /unexpected argument\s+'--no-daemon'/i.test(_cleanUsageText(output));
 }
 
+// 就緒判斷（輸入是去掉 ANSI 的畫面）。舊版 TUI：標題框的 model 從 loading 換成真模型名。
+// 0.160 起標題框一直停在 loading、模型名改到底部狀態列，所以另認「提示列出現」——
+// 這條路不能拿 loading 當開機訊號，否則永遠不就緒、等到 60 秒逾時。
+export function isCodexTuiReady(screen: string, idleMs: number): boolean {
+  if (idleMs <= 1500) return false;
+  const tail = screen.slice(-1500);
+  if (/Starting MCP|Booting MCP/i.test(tail)) return false;
+  let m: RegExpExecArray | null, model: string | null = null;
+  const re = /model:\s+(\S+)/g;
+  while ((m = re.exec(screen)) !== null) model = m[1];
+  if (model && !/^loading$/i.test(model) && !/loading/i.test(tail)) return true;
+  return /Ask Codex to do anything|\?\s*for shortcuts/i.test(tail);
+}
+
+// 送 /status 的按鍵。0.160 打 `/` 會開指令選單，跟文字同一次寫入的 Enter 會被吞掉，
+// 畫面只剩輸入框裡的 `›/status`——所以文字與 Enter 分兩次寫。重試時若 /status 還在輸入框，
+// 只補 Enter，不再打一次（否則變成 /status/status）。
+export const CODEX_STATUS_ENTER_DELAY_MS = 500;
+export function codexStatusWrites(screenTail: string): string[] {
+  return /›\s*\/status\s*$/.test(screenTail.trimEnd()) ? ['\r'] : ['/status', '\r'];
+}
+
 export class CodexUsageProvider {
   provider = 'codex';
   transport = 'pty';
@@ -273,9 +295,13 @@ export class CodexUsageProvider {
       };
 
       const strip = (x: string) => x.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
-      const latestModel = (str: string) => { const re = /model:\s+(\S+)/g; let mm, last: string | null = null; while ((mm = re.exec(str)) !== null) last = mm[1]; return last; };
       const panelRe = /(?:5h|weekly|rate)\s*limit|%\s*(?:left|used)|resets?\s+\d{1,2}:\d{2}|\d+%\s*context\s+left/i;
-      const sendStatus = () => { sent = true; sends++; lastSendAt = Date.now(); try { ptyProc.write('/status\r'); } catch {} };
+      const sendStatus = () => {
+        sent = true; sends++; lastSendAt = Date.now();
+        const [first, ...rest] = codexStatusWrites(strip(output).slice(-400));
+        try { ptyProc.write(first); } catch {}
+        for (const keys of rest) setTimeout(() => { if (!settled) { try { ptyProc.write(keys); } catch {} } }, CODEX_STATUS_ENTER_DELAY_MS);
+      };
 
       hardKillT = setTimeout(() => { timedOut = true; settle({ output, exitCode: null, signal: null, timedOut }); }, 60_000);
 
@@ -286,16 +312,10 @@ export class CodexUsageProvider {
         pollT = null;
         if (settled) return;
         const s = strip(output);
-        const tail = s.slice(-1500);
-        const model = latestModel(s);
         const idleMs = Date.now() - lastDataAt;
-        // booting 不納入 "esc to interrupt"（那是執行中常駐提示，非開機訊號）
-        const booting = /loading|Starting MCP|Booting MCP/i.test(tail);
-        // 就緒：抓到非 loading 的模型、未在 booting、且輸出已靜止
-        const stableReady = !!model && !/^loading$/i.test(model) && !booting && idleMs > 1500;
 
         if (!sent) {
-          if (stableReady) sendStatus();
+          if (isCodexTuiReady(s, idleMs)) sendStatus();
         } else if (!panelRe.test(s)) {
           // 重試以「距上次送出」計時，避免畫面持續刷新時 idleMs 偏低而永遠不重試
           if (sends < 3 && Date.now() - lastSendAt > 2500) sendStatus();

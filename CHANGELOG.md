@@ -8,6 +8,24 @@
 
 ## [Unreleased]
 
+### 修正（codex 0.160 的 TUI：`query_usage` 送不出 `/status`）
+
+- **6.4.0 修完 `--no-daemon` 與 hook 信任之後，`query_usage` 仍讀不到 Codex 額度，60 秒逾時。**
+  6.4.0 會如實回 `status: "error"`（`no quota panel in output (timed out after 60s)`），不再假綠燈，但數字還是出不來。
+  2026-10-06 實機追到兩個原因，都是 codex-cli 0.160 的 TUI 跟程式的假設不同：（Claude）
+  - **就緒判斷等不到**：舊判斷要等標題框的 `model:` 從 `loading` 換成真模型名才送 `/status`。
+    0.160 的標題框一直停在 `loading`，模型名改到底部狀態列（`GPT-6.1-Sol default · high`），
+    於是永遠不送。現在另認「提示列（`Ask Codex to do anything` / `? for shortcuts`）出現、
+    沒有在啟動 MCP、輸出靜止 1.5 秒」為就緒；舊版的判斷原樣保留。
+  - **Enter 被吞掉**：0.160 打 `/` 會開指令選單，`/status\r` 一次寫入時 Enter 被選單吃掉，
+    畫面只剩輸入框裡的 `›/status`。改成文字與 Enter 分兩次寫（間隔 500 ms）；重試時若 `/status`
+    還在輸入框，只補 Enter，不再打一次。
+  - 實機驗收（管理員權限、codex 0.160.0）：`status: "ok"`、`type: "rate_limits"`、
+    weekly `82% left (resets 12:30 AM on 13 Oct)`，與 TUI 畫面一致。
+- `tests/verify-usage-parse.mjs` +7 條（22 條），素材是同日抓到的 0.160 實際畫面與面板原文
+  （面板裡 `Weekly limit` 跟 `Session` 擠在同一行、`82%left` 中間沒有空白，解析器原本就吃得下，這次釘住）。
+  突變 +4（不認提示列、啟動 MCP 時就送、`/status\r` 一次寫入、重試再打一次）。
+
 ## [6.4.0] - 2026-10-06
 
 > 本版兩批工作：`query_usage` 讀不到 Codex 額度卻回 `ok` 的假綠燈修正，以及每個 job 結束時
