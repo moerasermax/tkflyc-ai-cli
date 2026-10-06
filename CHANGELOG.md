@@ -51,6 +51,22 @@
   `command-builder.ts`、`file-process-service.ts`，既有行為不變。
 - 已知限制：direct-api 串流的 usage 沿用既有做法逐筆加總；若某個供應商在每個 chunk 都送累計值，會重複計算。
 
+### 變更（輪詢成本：精簡結果不再整份帶原始輸出）
+
+- **執行中的 job，`wait` / `get_result` 的精簡結果不再回傳原始 stdout / stderr。** 2026-10-06 實測：執行中的 claude job
+  還沒有回覆內容、只解析得出 `session_id`，被判定為「沒有可用的輸出」而退回帶完整 stdout——claude 的 stream-json
+  光開頭的 init 事件就約 90 KB，**派工端每輪詢一次就灌 90 KB 進自己的 context**。這是 ai-cli 本身的輪詢成本，
+  不是 vendor 的。現在執行中只給 `liveness`（進度、輸出量），要看即時內容用 `peek`。（Claude）
+- **已結束但沒有可解析回覆的 job，只帶 stdout / stderr 的結尾 4,096 字元**（錯誤原文通常在最後），被截掉時另外標
+  `stdoutTruncated` / `stderrTruncated`（含原始長度，不從半個 UTF-16 字元開始）。沒有可解析回覆時，`verbose: true`
+  回傳完整原始輸出。MCP 與 CLI 都走同一個 `buildProcessResult`，行為一致；`wait` / `get_result` 的工具說明同步寫明。
+  影響 core：`process-result.ts`。
+- 相容性：若有程式在 job 執行中讀精簡結果的 `stdout`，改用 `verbose: true` 或 `peek`。
+- 稽核（Claude sonnet，經 ai-cli 唯讀）：沒有高嚴重度問題。成立並修正——工具說明原本寫「verbose 回傳完整原始輸出」，
+  實際只在沒有可解析回覆時才給（有回覆時給的是詳細解析結果），已改措辭；截取結尾可能從半個代理對開始，已修。
+  判定不成立——「running 以外的狀態也當成已結束」：結果狀態只有 running / completed / failed / lost / terminated，
+  後四者都是已結束。待辦（既有、非本次引入）：`shouldPreserveRawFailureOutput()` 恆為 false，是死碼。
+
 ### 變更（發版流程）
 
 - **`package.json` 的 `files` 從整個 `dist` 收窄為 `dist/**/*.js` 與 `dist/**/*.js.map`。** 6.4.0 發版時，派出去的
@@ -83,8 +99,8 @@
   實測畫面與量不到時回 error、agy 群組與方向、兩家的 `additionalLimits`、session 檔的讀取／過期／`refresh` 強制走 TUI
   ／`plan` 補值；素材都取自 2026-10-06 抓到的原始位元組。測試會把 `CODEX_HOME` 指向暫存目錄，不讀這台機器真正的
   `~/.codex`。
-- `tests/verify-job-usage.mjs` 32 → 38 條（agy、direct-api JSON／SSE、CLI 假 spawn、空 alias override 的來源）。
-- 突變 143 → 172；全數由指定的斷言殺掉（實跑 harness 確認）。
+- `tests/verify-job-usage.mjs` 32 → 42 條（agy、direct-api JSON／SSE 與累計值不倍增、CLI 假 spawn、空 alias override 的來源、精簡結果的原始輸出規則）。
+- 突變 143 → 176；全數由指定的斷言殺掉（實跑 harness 確認）。
 
 ## [6.4.1] - 2026-10-06
 

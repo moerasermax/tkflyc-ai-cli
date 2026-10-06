@@ -1346,5 +1346,37 @@
     "to": "    else if (!state.jobUsage) state.jobUsage = next; else { state.jobUsage.input_tokens += next.input_tokens; state.jobUsage.output_tokens += next.output_tokens; }",
     "expect": "Direct-api stream and JSON usage shape",
     "script": "verify-job-usage.mjs"
+  },
+  {
+    "name": "執行中的 job 照樣帶原始 stdout（每次輪詢灌 90 KB）",
+    "file": "src/core/process-result.ts",
+    "from": "    } else if (context.status !== 'running') {",
+    "to": "    } else {",
+    "expect": "Running job compact result omits raw stdout",
+    "script": "verify-job-usage.mjs"
+  },
+  {
+    "name": "已結束的 job 帶整份原始輸出（不截結尾）",
+    "file": "src/core/process-result.ts",
+    "from": "  if (value.length <= RAW_OUTPUT_TAIL_CHARS) return { [field]: value };",
+    "to": "  return { [field]: value };",
+    "expect": "keeps only the raw output tail",
+    "script": "verify-job-usage.mjs"
+  },
+  {
+    "name": "截斷時不標原始長度（呼叫端以為看到的是全部）",
+    "file": "src/core/process-result.ts",
+    "from": "    [`${field}Truncated`]: { totalChars: value.length, shownChars: tail.length },",
+    "to": "",
+    "expect": "keeps only the raw output tail",
+    "script": "verify-job-usage.mjs"
+  },
+  {
+    "name": "verbose 也被截斷（要全文時拿不到）",
+    "file": "src/core/process-result.ts",
+    "from": "      response.stdout = context.stdout;",
+    "to": "      response.stdout = context.stdout.slice(-4096);",
+    "expect": "Verbose result still returns the full raw output",
+    "script": "verify-job-usage.mjs"
   }
 ]

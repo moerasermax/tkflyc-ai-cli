@@ -351,6 +351,35 @@ try {
   });
   check('MCP run description points to cost guidance', () => assert.ok(
     readFileSync(join(ROOT, 'src/app/mcp.ts'), 'utf8').includes("For cost-aware dispatch (batching, duplicate jobs, polling, and agentOutput.usage), read the models tool's dispatchGuidance.")));
+  // 輪詢成本（2026-10-06 實測）：執行中的 claude job 只解析得出 session_id，
+  // wait 每次都回傳約 90 KB 的原始 stream-json。精簡結果不再整份帶原始輸出。
+  const big = 'x'.repeat(90_000);
+  const ctx = (status) => ({ pid: 9, agent: 'claude', status, startTime: '', workFolder: '', prompt: 'p', stdout: `${big}TAIL-END`, stderr: 'boom', liveness: { alive: true } });
+  check('Running job compact result omits raw stdout', () => {
+    const r = buildProcessResult(ctx('running'), { session_id: 's1', message: null });
+    assert.equal(Object.hasOwn(r, 'stdout'), false);
+    assert.equal(Object.hasOwn(r, 'stderr'), false);
+    assert.deepEqual(r.liveness, { alive: true });
+    assert.equal(r.session_id, 's1');
+  });
+  check('Finished job without reply keeps only the raw output tail', () => {
+    const r = buildProcessResult(ctx('failed'), { session_id: 's1', message: null });
+    assert.equal(r.stdout.length, 4096);
+    assert.ok(r.stdout.endsWith('TAIL-END'));
+    assert.deepEqual(r.stdoutTruncated, { totalChars: 90_008, shownChars: 4096 });
+    assert.equal(r.stderr, 'boom');
+    assert.equal(Object.hasOwn(r, 'stderrTruncated'), false);
+  });
+  check('Verbose result still returns the full raw output', () => {
+    const r = buildProcessResult(ctx('running'), { session_id: 's1', message: null }, true);
+    assert.equal(r.stdout.length, 90_008);
+    assert.equal(Object.hasOwn(r, 'stdoutTruncated'), false);
+  });
+  check('Job with a reply still omits raw output', () => {
+    const r = buildProcessResult(ctx('completed'), { session_id: 's1', message: 'done' });
+    assert.equal(Object.hasOwn(r, 'stdout'), false);
+    assert.equal(r.agentOutput.message, 'done');
+  });
 } finally {
   cp.spawn = originalSpawn;
   syncBuiltinESMExports();
