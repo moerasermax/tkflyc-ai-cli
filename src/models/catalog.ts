@@ -120,6 +120,26 @@ export const DISPATCH_GUIDANCE: ReadonlyArray<{
   note: string;
 }> = [
   {
+    situation: '合併零碎小任務',
+    model: 'codex / claude',
+    note: '2026-10-06 實測最小 codex job input 約 2 萬 tokens、最小 claude job context 約 3 萬 tokens；每個 job 有固定開銷，零碎小任務應合併成一個 job。這是當時環境的觀察，不是所有 job 的保證下限。',
+  },
+  {
+    situation: '避免重複派工',
+    model: '所有模型',
+    note: '不要對同一件事重複派兩個 job，除非是刻意的交叉驗證；重複派工會再次支付 context 與啟動開銷。',
+  },
+  {
+    situation: '減少輪詢成本',
+    model: '所有模型',
+    note: '呼叫端每次 wait/peek 都是自己 session 的一個回合，大 context 的 session 輪詢很貴；用 wait 且 timeout 接近 90 秒，少用 peek，不要用 5~10 秒的短輪詢。',
+  },
+  {
+    situation: '記錄每個 job 用量',
+    model: 'codex / claude',
+    note: 'job 結束後讀 agentOutput.usage 記錄成本；缺欄位代表 unknown，不是 0。Claude cost_usd_nominal 是名目成本，不是訂閱帳單。',
+  },
+  {
     situation: '日常派工',
     model: 'gpt-6.1-sol',
     reasoningEffort: 'medium',

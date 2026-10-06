@@ -132,7 +132,7 @@ function resolveDefaultReasoningEffort(
   return configured;
 }
 
-export function buildCliCommand(options: BuildCliCommandOptions): BuiltCommand {
+export function buildCliCommand(options: BuildCliCommandOptions): BuiltCommand & { warnings?: string[] } {
   if (!options.workFolder || typeof options.workFolder !== 'string') {
     throw new Error('Missing or invalid required parameter: workFolder');
   }
@@ -186,11 +186,22 @@ export function buildCliCommand(options: BuildCliCommandOptions): BuiltCommand {
   // 的 agent 因此整個 run 失敗。
   const explicitEffort = options.reasoning_effort;
   let reasoningEffort: string;
+  let effortSource: 'explicit' | 'alias' | 'config';
   if (typeof explicitEffort === 'string' && explicitEffort.trim() !== '') {
     reasoningEffort = resolveReasoningEffort(agent.reasoning, explicitEffort);
+    effortSource = 'explicit';
   } else {
     reasoningEffort = resolveDefaultReasoningEffort(agent, rawModel, userConfig);
+    // 空設定會保留內建 alias 預設；環境變數及持久化覆寫都歸 config。
+    effortSource = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(
+      process.env.AI_CLI_DEFAULT_REASONING_EFFORT?.trim().toLowerCase() ?? ''
+    ) ||
+      Object.prototype.hasOwnProperty.call(userConfig.aliasReasoningEffort ?? {}, rawModel) ||
+      userConfig.defaultReasoningEffort ? 'config' : 'alias';
   }
+  const warningFields = ['xhigh', 'max', 'ultra'].includes(reasoningEffort)
+    ? { warnings: [`High-cost effort "${reasoningEffort}" (source: ${effortSource}). Use medium for everyday dispatch; xhigh/max/ultra should be used only when explicitly requested by the user.`] }
+    : {};
 
   const input = {
     cliPath: options.cliPaths[agent.id] || '',
@@ -241,8 +252,8 @@ export function buildCliCommand(options: BuildCliCommandOptions): BuiltCommand {
           '退回一般模式會帶著權限旁路執行，而呼叫端以為有限制——不做這件事。'
       );
     }
-    return strict(input, options.capabilities);
+    return { ...strict(input, options.capabilities), ...warningFields };
   }
 
-  return agent.buildCommand(input);
+  return { ...agent.buildCommand(input), ...warningFields };
 }

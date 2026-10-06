@@ -151,12 +151,24 @@ function parseOutput(stdout: string, stderr: string): unknown {
     const lines = combined.trim().split('\n');
     let lastMessage: string | null = null;
     let tokenCount: unknown = null;
+    let usage: { input_tokens: number; cached_input_tokens: number; cache_write_input_tokens: number; output_tokens: number; reasoning_output_tokens: number; source: string } | undefined;
     let threadId: string | null = null;
     const tools: unknown[] = [];
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
         const parsed = JSON.parse(line);
+        // 每個 turn 都回報自己的用量；只累加量到的值，缺事件不代表零用量。
+        if (parsed.type === 'turn.completed' && parsed.usage &&
+            ['input_tokens', 'cached_input_tokens', 'output_tokens'].every(
+              (key) => typeof parsed.usage[key] === 'number' && Number.isFinite(parsed.usage[key]) && parsed.usage[key] >= 0
+            )) {
+          usage ??= { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, source: 'codex turn.completed' };
+          for (const key of ['input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens', 'reasoning_output_tokens'] as const) {
+            const value = parsed.usage[key];
+            if (typeof value === 'number' && Number.isFinite(value) && value >= 0) usage[key] += value;
+          }
+        }
         if (parsed.type === 'thread.started' && parsed.thread_id) {
           threadId = parsed.thread_id;
         } else if (parsed.item?.type === 'agent_message') {
@@ -203,10 +215,11 @@ function parseOutput(stdout: string, stderr: string): unknown {
         debugLog(`[Debug] Skipping invalid JSON line: ${line}`);
       }
     }
-    if (lastMessage || tokenCount || threadId || tools.length > 0) {
+    if (lastMessage || tokenCount || threadId || tools.length > 0 || usage) {
       return {
         message: lastMessage,
         token_count: tokenCount,
+        ...(usage ? { usage } : {}),
         session_id: threadId,
         tools: tools.length > 0 ? tools : undefined,
       };

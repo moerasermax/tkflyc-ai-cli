@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+### 新增（job 用量與成本派工提醒）
+
+- **Codex / Claude job 結束時回傳正規化 `agentOutput.usage`。** 過去只看得到結果，看不到每個 job 的 token 開銷，strict Codex 又帶 `--ephemeral`，事後無 session 可追。Codex 累加每筆 `turn.completed`，保留舊 `token_count`；Claude 的 NDJSON 與單一 JSON result 都映射 cache／thinking，用 `num_turns` 與 `cost_usd_nominal` 明示名目成本而非訂閱帳單。沒有量到就不放 usage；既有 compact result 會保留它，`process-result.ts` 不需修改。（Codex，@moerasermax）
+- **MCP `run` 對實際送出的 xhigh / max / ultra 帶英文 `warnings`。** 影響 core 的 command-builder 與 process-service 三個 started 回傳：明確指定、alias 預設及 config（含環境覆寫）都標示 effort 與來源，提醒日常用 medium、最高強度只在使用者明確要求時使用；只增加可選回傳欄位，不擋派工、不改既有指令與欄位。low / medium / high 不附警告。CLI detached 路徑這次未延伸：增加 file-process-service 會超過核准的 12 個修改檔案。未變更 antigravity / direct-api agent。（Codex，@moerasermax）
+- **`models.dispatchGuidance` 加入合併小任務、避免重複派工、長 wait 少 peek、job 結束讀 usage。** 依 2026-10-06 使用者實測：最小 Codex input 約 2 萬、Claude context 約 3 萬 tokens，零碎派工與大 context 的短輪詢會重複支付開銷；這些數字是當時環境觀察，不是所有 job 的保證下限。MCP run 描述指向這份建議。（Codex，@moerasermax）
+- 新增 `verify-job-usage.mjs`，以假 spawn 驗證用量、compact result、effort 來源與 MCP start 警告；`npm test` 15→16 支。新增對應突變片段並檢查唯一命中；依使用者要求未執行 mutation-test，未做獨立 agent 稽核，提交／推送前的 core 稽核與突變實跑仍待完成。（Codex，@moerasermax）
+
 ### 修正（`query_usage` 讀不到 Codex 額度卻回 `status: "ok"`）
 
 - **查 Codex 額度的 TUI 改帶 `--no-daemon`。** 2026-10-06 實測（codex-cli 0.160.0、Windows 11）：

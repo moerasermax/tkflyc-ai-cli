@@ -169,11 +169,36 @@ function buildCommand(input: BuildCommandInput): BuiltCommand {
   return { cliPath, args, cwd, agent: 'claude', prompt, resolvedModel, stdinPrompt: prompt };
 }
 
+/** result 的成本是 vendor 名目美元估值，不是訂閱帳單；兩條解析路徑共用映射。 */
+function normalizeResultUsage(parsed: any) {
+  const raw = parsed?.usage;
+  if (parsed?.type !== 'result' || !raw ||
+      !['input_tokens', 'output_tokens'].every(
+        (key) => typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] >= 0
+      )) return undefined;
+  return {
+    input_tokens: raw.input_tokens,
+    cached_input_tokens: raw.cache_read_input_tokens ?? 0,
+    cache_write_input_tokens: raw.cache_creation_input_tokens ?? 0,
+    output_tokens: raw.output_tokens,
+    reasoning_output_tokens: raw.output_tokens_details?.thinking_tokens ?? 0,
+    ...(typeof parsed.num_turns === 'number' ? { num_turns: parsed.num_turns } : {}),
+    ...(typeof parsed.total_cost_usd === 'number' ? { cost_usd_nominal: parsed.total_cost_usd } : {}),
+    source: 'claude result',
+  };
+}
+
 function parseOutput(stdout: string): unknown {
   if (!stdout) return null;
   // Claude 有時直接吐單一 JSON
   try {
-    return JSON.parse(stdout);
+    const parsed = JSON.parse(stdout);
+    if (parsed?.type === 'result') {
+      const { usage: _rawUsage, ...rest } = parsed;
+      const usage = normalizeResultUsage(parsed);
+      return { ...rest, ...(usage ? { usage } : {}) };
+    }
+    return parsed;
   } catch {
     /* fall through to NDJSON parsing */
   }
@@ -182,11 +207,13 @@ function parseOutput(stdout: string): unknown {
     let lastMessage: string | null = null;
     let assistantTextBuffer = '';
     let sessionId: string | null = null;
+    let usage: ReturnType<typeof normalizeResultUsage>;
     const toolsMap = new Map<string, { tool: string; input: unknown; output: unknown }>();
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
         const parsed = JSON.parse(line);
+        if (parsed.type === 'result') usage = normalizeResultUsage(parsed);
         if (parsed.session_id) {
           sessionId = parsed.session_id;
         }
@@ -225,8 +252,8 @@ function parseOutput(stdout: string): unknown {
     const tools = Array.from(toolsMap.values());
     const fallbackMessage = assistantTextBuffer.trim() ? assistantTextBuffer : null;
     const message = lastMessage || fallbackMessage;
-    if (message || sessionId || tools.length > 0) {
-      return { message, session_id: sessionId, tools: tools.length > 0 ? tools : undefined };
+    if (message || sessionId || tools.length > 0 || usage) {
+      return { message, session_id: sessionId, tools: tools.length > 0 ? tools : undefined, ...(usage ? { usage } : {}) };
     }
   } catch (e) {
     debugLog(`[Debug] Failed to parse Claude NDJSON output: ${e}`);

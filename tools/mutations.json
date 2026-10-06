@@ -834,5 +834,149 @@
     "to": "    if (usage.type === 'raw' && false) {",
     "expect": "沒抓到額度面板（卡在互動畫面、逾時）時 status 不是 ok",
     "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "Codex 忽略 turn.completed 用量",
+    "file": "src/agents/codex.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "parsed.type === 'turn.completed' && parsed.usage",
+    "to": "parsed.type === 'turn.completed-mutated' && parsed.usage",
+    "expect": "Codex single turn usage"
+  },
+  {
+    "name": "Codex 多 turn 覆蓋而非累加",
+    "file": "src/agents/codex.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "usage[key] += value;",
+    "to": "usage[key] = value;",
+    "expect": "Codex multiple turns sum usage"
+  },
+  {
+    "name": "Codex cache write 計入錯欄位",
+    "file": "src/agents/codex.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "usage[key] += value;",
+    "to": "usage[key] += key === 'cache_write_input_tokens' ? 0 : value;",
+    "expect": "Codex optional counters sum"
+  },
+  {
+    "name": "Claude 單一 JSON 不正規化用量",
+    "file": "src/agents/claude.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "const usage = normalizeResultUsage(parsed);",
+    "to": "const usage = undefined;",
+    "expect": "Claude single JSON result usage"
+  },
+  {
+    "name": "Claude NDJSON 不讀 result 用量",
+    "file": "src/agents/claude.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "if (parsed.type === 'result') usage = normalizeResultUsage(parsed);",
+    "to": "if (parsed.type === 'result-mutated') usage = normalizeResultUsage(parsed);",
+    "expect": "Claude NDJSON result usage"
+  },
+  {
+    "name": "Claude cache read 映射錯誤",
+    "file": "src/agents/claude.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "cached_input_tokens: raw.cache_read_input_tokens ?? 0,",
+    "to": "cached_input_tokens: 0,",
+    "expect": "Claude single JSON result usage"
+  },
+  {
+    "name": "Claude thinking 未映射",
+    "file": "src/agents/claude.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "reasoning_output_tokens: raw.output_tokens_details?.thinking_tokens ?? 0,",
+    "to": "reasoning_output_tokens: 0,",
+    "expect": "Claude single JSON result usage"
+  },
+  {
+    "name": "Claude 名目成本錯當缺失",
+    "file": "src/agents/claude.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "{ cost_usd_nominal: parsed.total_cost_usd }",
+    "to": "{ cost_usd_nominal: 0 }",
+    "expect": "Claude single JSON result usage"
+  },
+  {
+    "name": "高成本 effort 不發警告",
+    "file": "src/core/command-builder.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "['xhigh', 'max', 'ultra'].includes(reasoningEffort)",
+    "to": "['xhigh', 'max'].includes(reasoningEffort)",
+    "expect": "Explicit expensive efforts warn"
+  },
+  {
+    "name": "Alias effort 來源誤標 config",
+    "file": "src/core/command-builder.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "userConfig.defaultReasoningEffort ? 'config' : 'alias';",
+    "to": "userConfig.defaultReasoningEffort ? 'config' : 'config';",
+    "expect": "Flagship aliases warn"
+  },
+  {
+    "name": "Config effort 來源誤標 alias",
+    "file": "src/core/command-builder.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "userConfig.defaultReasoningEffort ? 'config' : 'alias';",
+    "to": "userConfig.defaultReasoningEffort ? 'alias' : 'alias';",
+    "expect": "Config default and alias override warn"
+  },
+  {
+    "name": "Strict builder 丟掉成本警告",
+    "file": "src/core/command-builder.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "return { ...strict(input, options.capabilities), ...warningFields };",
+    "to": "return { ...strict(input, options.capabilities) };",
+    "expect": "Strict builder preserves warning"
+  },
+  {
+    "name": "MCP started 回傳丟掉警告",
+    "file": "src/core/process-service.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "return { pid, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully`, ...(cmd.warnings ? { warnings: cmd.warnings } : {}) };",
+    "to": "return { pid, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully` };",
+    "expect": "MCP start response forwards warning"
+  },
+  {
+    "name": "移除成本建議：合併零碎小任務",
+    "file": "src/models/catalog.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "situation: '合併零碎小任務',",
+    "to": "situation: '合併零碎小任務（停用）',",
+    "expect": "Dispatch guidance: 合併零碎小任務"
+  },
+  {
+    "name": "移除成本建議：避免重複派工",
+    "file": "src/models/catalog.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "situation: '避免重複派工',",
+    "to": "situation: '避免重複派工（停用）',",
+    "expect": "Dispatch guidance: 避免重複派工"
+  },
+  {
+    "name": "移除成本建議：減少輪詢成本",
+    "file": "src/models/catalog.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "situation: '減少輪詢成本',",
+    "to": "situation: '減少輪詢成本（停用）',",
+    "expect": "Dispatch guidance: 減少輪詢成本"
+  },
+  {
+    "name": "移除成本建議：記錄每個 job 用量",
+    "file": "src/models/catalog.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "situation: '記錄每個 job 用量',",
+    "to": "situation: '記錄每個 job 用量（停用）',",
+    "expect": "Dispatch guidance: 記錄每個 job 用量"
+  },
+  {
+    "name": "MCP run 描述不指向成本建議",
+    "file": "src/app/mcp.ts",
+    "script": "verify-job-usage.mjs",
+    "from": "For cost-aware dispatch (batching, duplicate jobs, polling, and agentOutput.usage), read the models tool's dispatchGuidance.",
+    "to": "Read models for details.",
+    "expect": "MCP run description points to cost guidance"
   }
 ]

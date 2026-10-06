@@ -110,6 +110,7 @@ export class ProcessService {
     status: string;
     agent: AgentId;
     message: string;
+    warnings?: string[];
   } {
     const cmd = buildCliCommand({
       ...options,
@@ -203,7 +204,7 @@ export class ProcessService {
       }
     });
 
-    return { pid, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully` };
+    return { pid, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully`, ...(cmd.warnings ? { warnings: cmd.warnings } : {}) };
   }
 
   private allocateDirectPid(): number {
@@ -307,6 +308,7 @@ export class ProcessService {
       status: 'started',
       agent: cmd.agent,
       message: `${cmd.agent} request started successfully`,
+      ...(cmd.warnings ? { warnings: cmd.warnings } : {}),
     };
   }
 
@@ -348,6 +350,7 @@ export class ProcessService {
       status: 'started',
       agent: cmd.agent,
       message: `${cmd.agent} process started successfully (pty mode)`,
+      ...(cmd.warnings ? { warnings: cmd.warnings } : {}),
     };
   }
 

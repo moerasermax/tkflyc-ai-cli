@@ -111,6 +111,7 @@ export class AiCliMcpServer {
 • Multi-step workflows & GitHub integration
 
 **IMPORTANT**: This tool now returns immediately with a PID. Use other tools to check status and get results.
+For cost-aware dispatch (batching, duplicate jobs, polling, and agentOutput.usage), read the models tool's dispatchGuidance.
 
 **Candidate models** — this is NOT an allowlist. claude is the routing catch-all, so a name that is
 absent from this list may still run; call the models tool and read "modelListCaveat" before concluding
