@@ -1066,5 +1066,53 @@
     "to": "  return ['/status', '\\r'];",
     "expect": "重試時 /status 還在輸入框，只補 Enter",
     "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "游標右移不還原成空格（Pro 100 變 Pro100）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "    if (targetRow === undefined) return ' '.repeat(Math.min(Math.max(1, Number(cols) || 1), 200));",
+    "to": "    if (targetRow === undefined) return '';",
+    "expect": "游標右移還原成空格後",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "換列的游標定位不還原成換行（Model: 黏到上一行）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "    return sameRow ? ' ' : '\\n';",
+    "to": "    return sameRow ? ' ' : '';",
+    "expect": "游標定位還原成換行後",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "同一列內的游標跳躍也換行（Weekly limit 跟數字被拆開）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "    return sameRow ? ' ' : '\\n';",
+    "to": "    return '\\n';",
+    "expect": "同一列內的游標跳躍只補空格",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "parseCodexUsage 清 ANSI 前不還原游標移動",
+    "file": "src/plugins/usage-service.ts",
+    "from": "  const raw = _cleanUsageText(_expandCursorMoves(text));",
+    "to": "  const raw = _cleanUsageText(text);",
+    "expect": "游標定位還原成換行後",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "query 清 ANSI 前不還原游標移動（解析器拿到的已經黏在一起）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "    const text = _cleanUsageText(_expandCursorMoves(result.output));",
+    "to": "    const text = _cleanUsageText(result.output);",
+    "expect": "經過 query 的完整路徑",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "沒有 email 時 account 退回 null（0.160 的 Account: Pro 100 被丟掉）",
+    "file": "src/plugins/usage-service.ts",
+    "from": "    ?? (accountLine.replace(/^Account:\\s*/i, '').replace(/\\s*\\([^)]*\\)\\s*$/, '').trim() || null);",
+    "to": "    ?? null;",
+    "expect": "account 照畫面原樣",
+    "script": "verify-usage-parse.mjs"
   }
 ]

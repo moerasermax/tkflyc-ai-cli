@@ -192,6 +192,48 @@ check(
   `得到 status=${panel.status} weekly=${JSON.stringify(panel.usage?.weekly)}`
 );
 
+// ── 7. 0.160 用游標移動排版：還原後才解得出 model / account ───────────
+// 實測原始位元組（2026-10-06）：`ESC[1C` 代替空格、`ESC[列;1H` 代替換行。直接清 ANSI 會變成
+// `Pro100`、`Model:` 黏到上一行行尾，model / account 都解成 null。
+const E = '\u001b';
+const PANEL_0160_RAW =
+  `for up-to-date${E}[12;3Hinformation on rate limits and credits${E}[m${E}[2m` +
+  `${E}[14;1H  Model:                      ${E}[22mGPT-6.1-Sol${E}[2m (reasoning high, summaries auto)\r\n` +
+  `  Permissions:                ${E}[22mWorkspace${E}[1C(Ask${E}[1Cfor${E}[1Capproval)${E}[2m\r\n` +
+  `  Account:                    ${E}[22mPro${E}[1C100${E}[2m\r\n` +
+  `  Session:                    ${E}[22m01a10f38-c3ae-77d2-b220-3c47c3de74fd${E}[2m` +
+  `${E}[23;1H  Weekly limit:               ${E}[22m[████████████████░░░░]${E}[1C80%${E}[1Cleft${E}[2m (resets 12:30 AM on 13 Oct)\r\n`;
+const rawParsed = parseCodexUsage(PANEL_0160_RAW);
+check(rawParsed?.model === 'GPT-6.1-Sol', '★ 游標定位還原成換行後，model 解得出來', `得到 ${JSON.stringify(rawParsed?.model)}`);
+check(rawParsed?.account === 'Pro 100', '★ 游標右移還原成空格後，account 照畫面原樣是 "Pro 100"', `得到 ${JSON.stringify(rawParsed?.account)}`);
+check(
+  rawParsed?.weekly?.percentRemaining === 80 && rawParsed?.weekly?.resetAt === '12:30 AM on 13 Oct',
+  '原始位元組的面板，weekly 數字與重置時間不受還原影響',
+  `得到 ${JSON.stringify(rawParsed?.weekly)}`
+);
+check(String(rawParsed?.raw).includes('Ask for approval'), 'raw 原文的空格也還原了（可讀）');
+
+const viaQuery = await queryWith(new FakeCodex([PANEL_0160_RAW]));
+check(
+  viaQuery.usage?.model === 'GPT-6.1-Sol' && viaQuery.usage?.account === 'Pro 100',
+  '經過 query 的完整路徑，model / account 也解得出來（query 先清 ANSI，不能在那之前漏掉還原）',
+  `得到 model=${JSON.stringify(viaQuery.usage?.model)} account=${JSON.stringify(viaQuery.usage?.account)}`
+);
+
+const sameRow = parseCodexUsage(`${E}[5;1H  Weekly limit:${E}[5;30H[████]${E}[1C64%${E}[1Cleft (resets 1:00 AM)`);
+check(
+  sameRow?.weekly?.percentRemaining === 64,
+  '同一列內的游標跳躍只補空格，不會把 Weekly limit 跟數字拆到兩行',
+  `得到 ${JSON.stringify(sameRow?.weekly)}`
+);
+
+const oldAccount = parseCodexUsage('Account: user@example.com (Plus)\n5h limit: [██] 70% left (resets 14:00)');
+check(
+  oldAccount?.account === 'user@example.com' && oldAccount?.plan === 'Plus',
+  '舊版「email (方案)」格式照舊：account 是 email、plan 是括號內容',
+  `得到 account=${JSON.stringify(oldAccount?.account)} plan=${JSON.stringify(oldAccount?.plan)}`
+);
+
 const failed = results.filter(([ok]) => !ok).length;
 if (failed > 0) {
   console.log(`\nFAIL: ${results.length - failed} passed, ${failed} failed`);

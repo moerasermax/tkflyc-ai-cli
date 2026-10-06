@@ -8,6 +8,21 @@
 
 ## [Unreleased]
 
+### 修正（codex 額度面板的 `model` / `account` 解成 `null`）
+
+- **6.4.1 起 `query_usage(codex)` 讀得到額度，但 `model`、`account` 永遠是 `null`。** 2026-10-06 抓原始位元組查到：
+  codex-cli 0.160 的 TUI 用游標移動排版，`ESC[1C`（右移一格）代替空格、`ESC[列;欄H` 代替換行。清 ANSI 時這些
+  跳脫碼整段被刪掉，於是 `Pro 100` 變 `Pro100`、`Workspace (Ask for approval)` 變 `Workspace(Askforapproval)`、
+  下一列的 `Model:` 黏到上一行行尾——解析器要求 `Model:` 在行首，就抓不到。（Claude）
+  - 清 ANSI 之前先還原游標移動：右移 n 格 → n 個空格；換到別的列 → 換行；**同一列內的跳躍只補一個空格**，
+    不能換行，否則會把 `Weekly limit:` 跟它的數字拆到兩行。只套用在 codex，claude / agy 的解析不受影響。
+    `usage.raw` 也因此變得可讀（`80% left`、`Ask for approval`）。
+  - `account`：0.160 不再顯示 email，`Account:` 後面只有 `Pro 100`。有 email 時照舊取 email、括號內容進 `plan`；
+    沒有 email 時照畫面原樣回傳那個值，不去猜它是帳號還是方案。`plan` 在 0.160 上如實是 `null`（畫面沒有括號）。
+  - 實機驗收（管理員權限、codex 0.160.0）：`model: "GPT-6.1-Sol"`、`account: "Pro 100"`、weekly `80% left`。
+- `tests/verify-usage-parse.mjs` +7 條（29 條），素材是同日抓到的原始位元組（含跳脫碼）；另外釘住舊版
+  `email (方案)` 格式照舊、同一列跳躍不拆行、經過 `query()` 完整路徑也解得出來。突變 +6。
+
 ## [6.4.1] - 2026-10-06
 
 > 只有一個修正：讓 `query_usage` 在 codex-cli 0.160 上真的讀得到 Codex 額度。只動 `src/plugins/usage-service.ts`

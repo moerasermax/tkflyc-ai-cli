@@ -25,6 +25,21 @@ function _cleanUsageText(text: string): string {
     .trim();
 }
 
+// codex 0.160 的 TUI 用游標移動排版：`ESC[nC`（右移 n 格）代替空格、`ESC[列;欄H` 代替換行。
+// stripAnsi 會把它們整段刪掉，於是 `Pro 100` 變 `Pro100`、下一列的 `Model:` 黏到上一行行尾。
+// 清 ANSI 之前先還原：右移 → n 個空格；換到「別的列」→ 換行；同一列內的跳躍 → 一個空格
+// （不能換行，否則會把 `Weekly limit:` 跟它的數字拆到兩行）。只給 codex 用，claude / agy 不受影響。
+function _expandCursorMoves(text: string): string {
+  let row: number | null = null;
+  return (text ?? '').replace(/\x1b\[(\d*)C|\x1b\[(\d+)(?:;\d+)?H|\n/g, (match, cols, targetRow) => {
+    if (match === '\n') { if (row !== null) row++; return match; }
+    if (targetRow === undefined) return ' '.repeat(Math.min(Math.max(1, Number(cols) || 1), 200));
+    const sameRow = row === Number(targetRow);
+    row = Number(targetRow);
+    return sameRow ? ' ' : '\n';
+  });
+}
+
 function _toNumber(value: unknown): number | null {
   if (value === undefined || value === null) return null;
   const parsed = Number(String(value).replace(/,/g, '').trim());
@@ -98,14 +113,17 @@ export function parseClaudeUsage(text: string) {
 }
 
 export function parseCodexUsage(text: string) {
-  const raw = _cleanUsageText(text);
+  const raw = _cleanUsageText(_expandCursorMoves(text));
   // 去掉進度條方塊與框線字元，只留文字，方便比對
   const s = raw.replace(/[█░▓▒■□▪▫]+/g, ' ').replace(/[│╭╮╰╯┌┐└┘┃━]+/g, ' ');
 
   // 帳號 / 方案 / 模型都只在「單行」內擷取，避免 \s* 跨行誤抓下一行括號內容。
   const accountLine = s.match(/Account:[^\n]*/i)?.[0] ?? '';
-  const email = accountLine.match(/(\S+@\S+)/)?.[1] ?? null;
   const plan  = accountLine.match(/\(([^)\n]+)\)/)?.[1]?.trim() ?? null;
+  // 舊版是「Account: user@example.com (Plus)」；0.160 不再顯示 email，只有「Account: Pro 100」。
+  // 沒有 email 時照畫面原樣回傳那個值，不去猜它代表帳號還是方案。
+  const email = accountLine.match(/(\S+@\S+)/)?.[1]
+    ?? (accountLine.replace(/^Account:\s*/i, '').replace(/\s*\([^)]*\)\s*$/, '').trim() || null);
   // 用大小寫敏感的 "Model:" 只抓面板那行，避開啟動框的小寫 "model:     loading"。
   const modelLine = s.match(/^[ \t]*Model:[^\n]*/m)?.[0] ?? '';
   const model = modelLine
@@ -250,7 +268,7 @@ export class CodexUsageProvider {
     // （cliPath 在 Windows 常是 .cmd shim，PTY 吃得下、child_process 直接 spawn 吃不下）。
     let result = await this._run(CODEX_USAGE_ARGS);
     if (isCodexNoDaemonUnsupported(result.output)) result = await this._run([]);
-    const text = _cleanUsageText(result.output);
+    const text = _cleanUsageText(_expandCursorMoves(result.output));
     if (!text) throw new Error('codex usage: no output');
     const usage = parseCodexUsage(text);
     // 沒抓到額度面板也沒錯誤字樣（例：被 hook 信任等互動畫面擋住、/status 送不進去）：同樣是 unknown。
