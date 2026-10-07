@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+## [6.6.1] - 2026-10-08
+
+> 修正 6.6.0 的巢狀派工硬擋（F2）在 Codex worker 底下不生效：Codex 不把 `AI_CLI_WORKER` 交給它啟動的 MCP server，
+> 6.6.0 說明裡「worker 自己的 MCP server 也擋得住」對 Codex 不成立。向後相容的修正（SemVer PATCH）；
+> **看得到的行為變化一處**：一般模式的 Codex job 命令列多了 `-c mcp_servers.<名>.env.AI_CLI_WORKER='1'`（每個 stdio MCP server 一組）。
+
 ### 修正（F2 在 codex worker 底下擋不到巢狀派工）
 
 - **codex worker 啟動的 MCP server 收不到 `AI_CLI_WORKER`，6.6.0 的 F2 對 codex 形同沒有。** codex 只把白名單環境變數交給 MCP server：2026-10-08 以假 MCP server 實測 codex-cli 0.160.1，在 `AI_CLI_WORKER=1` 下它只收到 19 個白名單變數、標記不在其中（claude 整份繼承 86 個，不受影響）。於是 codex worker 底下的那個 ai-cli 永遠判斷自己不是 worker。同日一台機器升級後跑 `verify:worker-identity`，Codex 的 SessionStart hook 尚未信任、身分鎖沒注入，gpt-6-sol 呼叫 `ai-cli.run` **兩次都回 started**、worker 峰值 2——兩層防線同時失守，硬擋那層是因為這個缺口。修法：`buildCommand` 對 `$CODEX_HOME/config.toml`（預設 `~/.codex`）裡的 stdio MCP server 補 `-c mcp_servers.<名>.env.AI_CLI_WORKER='1'`（主導者明示 `AI_CLI_ALLOW_NESTED=1` 時一併轉交）。原則是**寧可漏補、不可錯補**——對 codex 不收的目標下覆寫，codex 會整個起不來、等於所有一般模式的 codex job 失敗，實測兩種：不存在的名稱回 `invalid transport`、url 型 server 回 `env is not supported for streamable_http`。所以只收 `[mcp_servers.<名>]` 主表裡有 `command =` 的、跳過多行字串裡長得像表頭的行、不掃專案層設定；相對路徑的 `CODEX_HOME` 以 job 的 cwd 解析（實測 codex 自己就這樣解析）；值用 TOML 單引號，因為 Windows 經 `cmd.exe /c` 時雙引號會被剝掉、`"1"` 會變整數；嚴格模式帶 `--ignore-user-config` 不載使用者 MCP，所以不補。點號鍵、inline table 等寫法不解析，屬漏補，這時仍有 SessionStart hook 的身分鎖那一層。端到端以真 codex＋實機 config.toml、關掉 hooks 只留 F2 實跑：`ai-cli.run` 回 `AI_CLI_NESTED_DISPATCH_BLOCKED`、沒有任何 job 被啟動。新增 4 項 worker-guards 測試與 7 筆突變；共用測試環境 `catalog-test-env.mjs` 改把 `CODEX_HOME` 指向空目錄，免得組 codex 指令的測試隨機器上的真設定變。另提醒：**新加進 `~/.codex/hooks.json` 的 hook 要先在互動 codex 核准信任**，未信任時 `codex exec` 會直接跳過它，靜態檢查看不出來，只有驗收探針的 B 欄會露餡。（Claude，moerasermax 指示）
