@@ -15,6 +15,8 @@ process.env.GIT_ALLOW_PROTOCOL = 'file';
 process.env.AI_CLI_CONFIG_DIR = join(temp, 'config');
 process.env.AI_CLI_STATE_DIR = join(temp, 'state');
 process.env.AI_CLI_PROVIDERS_PATH = join(temp, 'providers.json');
+// codex 指令會依 $CODEX_HOME/config.toml 補 MCP 覆寫；指向空目錄，免得測試結果隨機器上的真設定變。
+process.env.CODEX_HOME = join(temp, 'codex-home');
 fs.writeFileSync(process.env.AI_CLI_PROVIDERS_PATH, '{"providers":{}}');
 const stub = fileURLToPath(new URL(process.platform === 'win32'
   ? './agy-models-error.cmd' : './agy-models-error.mjs', import.meta.url));

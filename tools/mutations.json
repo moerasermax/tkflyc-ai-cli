@@ -1538,5 +1538,61 @@
     "to": "  return false;",
     "expect": "T6 F2 拒絕可標註",
     "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] codex 一般模式不補 MCP worker 標記（F2 在 codex 底下又擋不到）",
+    "file": "src/agents/codex.ts",
+    "from": "  args.push(...workerMcpEnvOverrides(cwd));",
+    "to": "  // mutated：不補 MCP worker 標記",
+    "expect": "F2 codex 一般模式只對 config.toml 的 stdio MCP server 補 AI_CLI_WORKER",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] MCP 覆寫值改用雙引號（Windows 經 cmd.exe 後變整數 1）",
+    "file": "src/agents/codex.ts",
+    "from": ".env.${v}='1'`",
+    "to": ".env.${v}=\"1\"`",
+    "expect": "F2 codex 一般模式只對 config.toml 的 stdio MCP server 補 AI_CLI_WORKER",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] 多行字串裡的偽表頭被當成 server（對不存在的名稱下覆寫，codex 起不來）",
+    "file": "src/agents/codex.ts",
+    "from": "for (const delimiter of ['\"\"\"', \"'''\"]) {",
+    "to": "for (const delimiter of [] as string[]) {",
+    "expect": "F2 codex 一般模式只對 config.toml 的 stdio MCP server 補 AI_CLI_WORKER",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] url 型 MCP server 也補 env（codex 不收，整個起不來）",
+    "file": "src/agents/codex.ts",
+    "from": "/^[ \\t]*command[ \\t]*=/",
+    "to": "/^[ \\t]*(?:command|url)[ \\t]*=/",
+    "expect": "F2 codex 一般模式只對 config.toml 的 stdio MCP server 補 AI_CLI_WORKER",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] 相對 CODEX_HOME 以 ai-cli 自己的 cwd 解析（與 codex 讀的不是同一份）",
+    "file": "src/agents/codex.ts",
+    "from": "resolve(cwd, process.env.CODEX_HOME)",
+    "to": "process.env.CODEX_HOME",
+    "expect": "F2 codex 相對路徑的 CODEX_HOME 以 job 的 cwd 解析",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] codex 嚴格模式也補 MCP 覆寫（--ignore-user-config 下名稱不存在，codex 起不來）",
+    "file": "src/agents/codex.ts",
+    "from": "    '--ignore-user-config',",
+    "to": "    ...workerMcpEnvOverrides(cwd), '--ignore-user-config',",
+    "expect": "F2 codex 嚴格模式與缺設定檔時不補 MCP 覆寫",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] 主導者明示 AI_CLI_ALLOW_NESTED=1 時沒轉交給 codex 的 MCP server",
+    "file": "src/agents/codex.ts",
+    "from": "process.env.AI_CLI_ALLOW_NESTED === '1' ?",
+    "to": "process.env.AI_CLI_ALLOW_NESTED === '0' ?",
+    "expect": "F2 codex 主導者明示 AI_CLI_ALLOW_NESTED=1 時一併轉交給 MCP server",
+    "script": "verify-worker-guards.mjs"
   }
 ]

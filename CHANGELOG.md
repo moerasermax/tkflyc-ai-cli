@@ -8,6 +8,17 @@
 
 ## [Unreleased]
 
+### 修正（F2 在 codex worker 底下擋不到巢狀派工）
+
+- **codex worker 啟動的 MCP server 收不到 `AI_CLI_WORKER`，6.6.0 的 F2 對 codex 形同沒有。** codex 只把白名單環境變數交給 MCP server：2026-10-08 以假 MCP server 實測 codex-cli 0.160.1，在 `AI_CLI_WORKER=1` 下它只收到 19 個白名單變數、標記不在其中（claude 整份繼承 86 個，不受影響）。於是 codex worker 底下的那個 ai-cli 永遠判斷自己不是 worker。同日一台機器升級後跑 `verify:worker-identity`，Codex 的 SessionStart hook 尚未信任、身分鎖沒注入，gpt-6-sol 呼叫 `ai-cli.run` **兩次都回 started**、worker 峰值 2——兩層防線同時失守，硬擋那層是因為這個缺口。修法：`buildCommand` 對 `$CODEX_HOME/config.toml`（預設 `~/.codex`）裡的 stdio MCP server 補 `-c mcp_servers.<名>.env.AI_CLI_WORKER='1'`（主導者明示 `AI_CLI_ALLOW_NESTED=1` 時一併轉交）。原則是**寧可漏補、不可錯補**——對 codex 不收的目標下覆寫，codex 會整個起不來、等於所有一般模式的 codex job 失敗，實測兩種：不存在的名稱回 `invalid transport`、url 型 server 回 `env is not supported for streamable_http`。所以只收 `[mcp_servers.<名>]` 主表裡有 `command =` 的、跳過多行字串裡長得像表頭的行、不掃專案層設定；相對路徑的 `CODEX_HOME` 以 job 的 cwd 解析（實測 codex 自己就這樣解析）；值用 TOML 單引號，因為 Windows 經 `cmd.exe /c` 時雙引號會被剝掉、`"1"` 會變整數；嚴格模式帶 `--ignore-user-config` 不載使用者 MCP，所以不補。點號鍵、inline table 等寫法不解析，屬漏補，這時仍有 SessionStart hook 的身分鎖那一層。端到端以真 codex＋實機 config.toml、關掉 hooks 只留 F2 實跑：`ai-cli.run` 回 `AI_CLI_NESTED_DISPATCH_BLOCKED`、沒有任何 job 被啟動。新增 4 項 worker-guards 測試與 7 筆突變；共用測試環境 `catalog-test-env.mjs` 改把 `CODEX_HOME` 指向空目錄，免得組 codex 指令的測試隨機器上的真設定變。另提醒：**新加進 `~/.codex/hooks.json` 的 hook 要先在互動 codex 核准信任**，未信任時 `codex exec` 會直接跳過它，靜態檢查看不出來，只有驗收探針的 B 欄會露餡。（Claude，moerasermax 指示）
+- **上一筆的獨立稽核**（`gpt-6.1-sol` high、唯讀，沒寫這段程式碼）判「暫不通過」，逐條實測後：
+  - **成立、已修**：多行字串裡的 `[mcp_servers.ghost]` 會被當成 server 而錯補（高）；初版對每個 `[mcp_servers.<名>]` 都補、包括 url 型——稽核標「需實測」，實測 codex 直接拒絕載入設定（高）；相對路徑的 `CODEX_HOME` 以 ai-cli 自己的 cwd 解析、與 codex 讀的不是同一份（中，實測 codex 以 job 的 cwd 解析）；其他組 codex 指令的既有測試會讀到機器上的真設定（中）。
+  - **成立、已修（我自己寫錯的）**：初版正規式加了 `\r?` 並在本筆寫「初版在 CRLF 下一個都抓不到」——**這是錯的**。JS 多行模式的 `$` 本來就會停在 `\r` 前面，那句是推理出來、沒實跑舊版，對應的突變因此是殺不掉的等價突變。已拿掉 `\r?` 與該突變、更正本筆敘述；CRLF 的 fixture 保留當回歸防護。
+  - **成立、不修（漏補，屬已知限制）**：點號鍵、inline table、`[[...]]`、專案層設定裡的 server 不補——補錯的代價是所有 codex job 起不來，漏補只是回到 hook 身分鎖那一層。
+  - **不成立**：「使用者在 server 的 env 自己寫 `AI_CLI_ALLOW_NESTED=1` 時沒被覆寫掉」——那是使用者明示解除，與 README 的解除語意一致，不覆寫。
+  - **建議未採用**：改用 TOML parser。新增相依套件需要人工同意，而「只補有 `command` 的主表＋跳過多行字串」已封住錯補；parser 能多補到的只有上面那些漏補寫法。
+  - **與本次無關的既有問題，另案**：Windows 前景 `exec` 以 `shell:false` 直接啟動 `.cmd` shim、POSIX 背景 wrapper 沒有把 `stdinPrompt` 送進 stdin。兩條都只經程式碼閱讀，未實測。（Claude，moerasermax 指示）
+
 ## [6.6.0] - 2026-10-07
 
 > worker 防遞迴的一批：ai-cli 啟動的 CLI 帶 `AI_CLI_WORKER=1`、派工政策 hook 依身分分流、帶標記的 ai-cli 拒絕再派工、

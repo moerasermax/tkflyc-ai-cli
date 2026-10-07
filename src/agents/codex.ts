@@ -3,8 +3,9 @@
  * shell:true 下 cmd.exe 重新切詞。行為 1:1 還原 dist。
  */
 
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { AgentDefinition, BuildCommandInput, BuiltCommand } from './types.js';
 import { debugLog } from '../core/debug.js';
 
@@ -123,6 +124,63 @@ function buildStrictCommand(
   return { cliPath, args, cwd, agent: 'codex', prompt, resolvedModel, stdinPrompt: prompt };
 }
 
+/**
+ * 把 worker 標記補進 codex 啟動的 MCP server 環境。
+ *
+ * codex 只把白名單環境變數交給 MCP server（2026-10-08 實測 codex-cli 0.160.1：
+ * 在 AI_CLI_WORKER=1 下啟動的 MCP server 只收到 19 個白名單變數，標記不在其中）。
+ * 於是 codex worker 底下的那個 ai-cli 看不到標記，`assertCanStartJob` 擋不到巢狀派工——
+ * 同日驗收 gpt-6-sol 的 `ai-cli.run` 兩次都回 started、worker 峰值 2。claude 會整份繼承，不受影響。
+ *
+ * **寧可漏補，不可錯補**：對 codex 不認得的名稱或不收 env 的 server 下覆寫，codex 會整個起不來，
+ * 等於讓所有一般模式的 codex job 失敗（同日實測兩種：不存在的名稱回 `invalid transport`，
+ * url 型回 `env is not supported for streamable_http`）。所以只補「一定是 stdio server」的那些：
+ * - 只讀 `$CODEX_HOME/config.toml`（預設 `~/.codex`）。相對路徑的 CODEX_HOME 以 job 的 cwd 解析——
+ *   codex 自己就是這樣解析（實測錯誤訊息指向 `<cwd>/<CODEX_HOME>/config.toml`）。讀不到＝不補。
+ *   專案層 `.codex/config.toml` 只在信任的專案才載入，不掃。
+ * - 只收 `[mcp_servers.<名>]` 主表、且該表裡有 `command =` 的（stdio）；url 型與只有子表的跳過。
+ *   多行字串（`"""`／`'''`）裡長得像表頭的行不算——它不是設定，補了就是對不存在的名稱下覆寫。
+ * - 點號鍵、inline table 等其他寫法不解析，屬漏補；這時仍有 SessionStart hook 的身分鎖那一層。
+ * - 值用 TOML 單引號字面字串：Windows 經 cmd.exe /c 時雙引號會被剝掉，`"1"` 會變整數 1。
+ * - 名稱只收 bare key 字元；codex 的 `-c` 路徑以 `.` 切段，其他名稱跳過。
+ * - 每個 stdio server 都補、不只 ai-cli：標記的語意是「這棵行程樹是 ai-cli worker」，對其他 server 無害，
+ *   也不必猜使用者把 ai-cli 註冊成什麼名字。AI_CLI_ALLOW_NESTED 照 buildWorkerEnv 的繼承語意一併轉交；
+ *   使用者若自己在 server 的 env 寫了 AI_CLI_ALLOW_NESTED=1，視為明示解除，不覆寫。
+ */
+function workerMcpEnvOverrides(cwd: string): string[] {
+  const codexHome = process.env.CODEX_HOME ? resolve(cwd, process.env.CODEX_HOME) : join(homedir(), '.codex');
+  let config: string;
+  try {
+    config = readFileSync(join(codexHome, 'config.toml'), 'utf8');
+  } catch {
+    return [];
+  }
+  const names = new Set<string>();
+  let server: string | null = null;
+  let multiline: string | null = null;
+  for (const line of config.split(/\r?\n/)) {
+    // 一行裡分隔符出現奇數次＝開或關一段多行字串。
+    if (multiline) {
+      if (line.split(multiline).length % 2 === 0) multiline = null;
+      continue;
+    }
+    if (/^[ \t]*\[/.test(line)) {
+      const m = /^[ \t]*\[[ \t]*mcp_servers[ \t]*\.[ \t]*(?:"([^"]*)"|'([^']*)'|([A-Za-z0-9_-]+))[ \t]*\][ \t]*(?:#.*)?$/.exec(line);
+      server = m ? (m[1] ?? m[2] ?? m[3]) : null;
+      continue;
+    }
+    if (server !== null && /^[ \t]*command[ \t]*=/.test(line)) {
+      if (/^[A-Za-z0-9_-]+$/.test(server)) names.add(server);
+      else debugLog(`[codex] MCP server 名稱「${server}」無法用 -c 定址，未補 worker 標記`);
+    }
+    for (const delimiter of ['"""', "'''"]) {
+      if (line.split(delimiter).length % 2 === 0) { multiline = delimiter; break; }
+    }
+  }
+  const vars = process.env.AI_CLI_ALLOW_NESTED === '1' ? ['AI_CLI_WORKER', 'AI_CLI_ALLOW_NESTED'] : ['AI_CLI_WORKER'];
+  return [...names].flatMap(name => vars.flatMap(v => ['-c', `mcp_servers.${name}.env.${v}='1'`]));
+}
+
 function buildCommand(input: BuildCommandInput): BuiltCommand {
   const { cliPath, cwd, prompt, resolvedModel, reasoningEffort, sessionId } = input;
   let args: string[];
@@ -137,6 +195,8 @@ function buildCommand(input: BuildCommandInput): BuiltCommand {
   if (resolvedModel && resolvedModel !== 'codex') {
     args.push('--model', resolvedModel);
   }
+  // 嚴格模式帶 --ignore-user-config、不載使用者的 MCP server，所以只在這裡補（補了反而會讓它起不來）。
+  args.push(...workerMcpEnvOverrides(cwd));
   // prompt 走 stdin（positional `-`）：Windows 下 shell:true，Node 不會跳脫 args，
   // cmd.exe 會對含空白/換行/數字的 prompt 重新切詞。Codex 文件：用 `-` 從 stdin 讀。
   args.push('--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--json', '-');

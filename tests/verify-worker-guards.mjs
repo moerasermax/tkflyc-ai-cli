@@ -1,7 +1,7 @@
 /** F1–F3 / G1–G2：隔離設定、CLI stub、mock fetch、假行程表；不呼叫真模型。 */
 import '../tools/stubs/catalog-test-env.mjs';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, chmod, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -77,6 +77,33 @@ try {
   });
   await check('F2 buildWorkerEnv 不改主導者環境或觸發自身閘門', async () => withEnv({}, () => {
     assert.equal(buildWorkerEnv().AI_CLI_WORKER, '1'); assert.equal(process.env.AI_CLI_WORKER, undefined); assertCanStartJob();
+  }));
+  // codex 只把白名單環境變數交給 MCP server，標記要靠 -c 補進每個已定義 server 的 env（2026-10-08 實測）。
+  const codexHome = join(temp, 'codex-home');
+  await mkdir(codexHome, { recursive: true });
+  // 錯補（codex 不認得的名稱、url 型）會讓 codex 整個起不來，所以 fixture 刻意放進這幾種陷阱。
+  await writeFile(join(codexHome, 'config.toml'), ['model = "gpt-6.1-sol"', 'note = """一行內開關"""', '[mcp_servers."ai-cli"]', 'command = "node"',
+    '[mcp_servers.planner] # 註解', 'args = []', 'command = "node"', '[mcp_servers.planner.env]', 'X = "1"', "[mcp_servers.'quoted_name']", 'command = "node"',
+    '[mcp_servers.remote]', 'url = "http://127.0.0.1:9/mcp"', '[mcp_servers."has.dot"]', 'command = "node"', '# [mcp_servers.commented]', '[profiles.mcp_servers]', 'x = 1',
+    'developer_instructions = """', '[mcp_servers.ghost]', 'command = "node"', '"""', "other = '''", '[mcp_servers.ghost2]', 'command = "node"', "'''", ''].join('\r\n'));
+  const codexInput = { cliPath: 'codex', cwd: temp, prompt: 'p', resolvedModel: 'gpt-6.1-sol', rawModel: 'gpt-6.1-sol', reasoningEffort: 'medium' };
+  const mcpOverrides = args => args.filter((a, i) => args[i - 1] === '-c' && a.startsWith('mcp_servers.'));
+  await check('F2 codex 一般模式只對 config.toml 的 stdio MCP server 補 AI_CLI_WORKER（單引號字面值；跳過 url 型、多行字串、無法定址的名稱）', async () => withEnv({ CODEX_HOME: codexHome }, () => {
+    const args = getAgent('codex').buildCommand(codexInput).args;
+    assert.deepEqual(mcpOverrides(args), ["mcp_servers.ai-cli.env.AI_CLI_WORKER='1'", "mcp_servers.planner.env.AI_CLI_WORKER='1'", "mcp_servers.quoted_name.env.AI_CLI_WORKER='1'"]);
+    assert(args.indexOf("mcp_servers.ai-cli.env.AI_CLI_WORKER='1'") < args.indexOf('-'), '覆寫要在 stdin prompt 的 - 之前');
+    assert.deepEqual(mcpOverrides(getAgent('codex').buildCommand({ ...codexInput, sessionId: 's1' }).args).length, 3, 'resume 也要補');
+  }));
+  await check('F2 codex 相對路徑的 CODEX_HOME 以 job 的 cwd 解析（codex 自己就這樣解析）', async () => withEnv({ CODEX_HOME: 'codex-home' }, () => {
+    assert.equal(mcpOverrides(getAgent('codex').buildCommand(codexInput).args).length, 3);
+  }));
+  await check('F2 codex 嚴格模式與缺設定檔時不補 MCP 覆寫（不存在的名稱會讓 codex 起不來）', async () => {
+    await withEnv({ CODEX_HOME: codexHome }, () => assert.deepEqual(mcpOverrides(getAgent('codex').buildStrictCommand(codexInput, ['fs/read']).args), []));
+    await withEnv({ CODEX_HOME: join(temp, 'no-codex-home') }, () => assert.deepEqual(mcpOverrides(getAgent('codex').buildCommand(codexInput).args), []));
+  });
+  await check('F2 codex 主導者明示 AI_CLI_ALLOW_NESTED=1 時一併轉交給 MCP server', async () => withEnv({ CODEX_HOME: codexHome, AI_CLI_ALLOW_NESTED: '1' }, () => {
+    const overrides = mcpOverrides(getAgent('codex').buildCommand(codexInput).args);
+    assert.equal(overrides.length, 6); assert(overrides.includes("mcp_servers.ai-cli.env.AI_CLI_ALLOW_NESTED='1'"));
   }));
   await check('F2 直接呼叫 ProcessService 與 FileProcessService 也拒絕', async () => withEnv({ AI_CLI_WORKER: '1' }, async () => {
     assert.throws(() => new ProcessService({ cliPaths: paths }).startProcess({ workFolder: temp, prompt: 'stub', model: 'codex' }), /AI_CLI_NESTED_DISPATCH_BLOCKED/);
