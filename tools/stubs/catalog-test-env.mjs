@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 const fs = createRequire(import.meta.url)('node:fs');
 const temp = fs.mkdtempSync(join(tmpdir(), 'ai-cli-catalog-tests-'));
 process.env.AI_CLI_AUTO_UPDATE = 'off';
+// 測試預設模擬主導者；worker 防護測試自行指定每個環境組合，不繼承執行測試的 worker。
+delete process.env.AI_CLI_WORKER;
+delete process.env.AI_CLI_ALLOW_NESTED;
 process.env.GIT_ALLOW_PROTOCOL = 'file';
 process.env.AI_CLI_CONFIG_DIR = join(temp, 'config');
 process.env.AI_CLI_STATE_DIR = join(temp, 'state');

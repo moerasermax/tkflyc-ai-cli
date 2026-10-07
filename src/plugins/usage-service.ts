@@ -5,6 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { buildWorkerEnv } from '../core/worker-env.js';
 import { createRequire } from 'node:module';
 import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -520,7 +521,7 @@ export class CodexUsageProvider {
       try {
         const pty = _loadPtyModule();
         // 在 homedir 啟動，盡量避免專案層級 MCP server 拖慢開機
-        ptyProc = pty.spawn(this.cliPath, args, { name: 'xterm-color', cols: 200, rows: 50, cwd: homedir(), env: process.env });
+        ptyProc = pty.spawn(this.cliPath, args, { name: 'xterm-color', cols: 200, rows: 50, cwd: homedir(), env: buildWorkerEnv() });
       } catch (e) { reject(e); return; }
       if (!ptyProc?.pid) { try { ptyProc?.kill?.(); } catch {} reject(new Error('codex pty.spawn returned no pid')); return; }
 
@@ -602,7 +603,7 @@ class AgyUsageProvider {
       let ptyProc: any;
       try {
         const pty = _loadPtyModule();
-        ptyProc = pty.spawn(this.cliPath, ['--dangerously-skip-permissions'], { name: 'xterm-color', cols: 220, rows: 50, cwd: process.cwd(), env: process.env });
+        ptyProc = pty.spawn(this.cliPath, ['--dangerously-skip-permissions'], { name: 'xterm-color', cols: 220, rows: 50, cwd: process.cwd(), env: buildWorkerEnv() });
       } catch (e) { reject(e); return; }
       if (!ptyProc?.pid) { reject(new Error('agy pty.spawn returned no pid')); return; }
 
@@ -659,7 +660,7 @@ class ClaudeUsageProvider {
       let ptyProc: any;
       try {
         const pty = _loadPtyModule();
-        ptyProc = pty.spawn(this.cliPath, [], { name: 'xterm-color', cols: 200, rows: 50, cwd: process.cwd(), env: process.env });
+        ptyProc = pty.spawn(this.cliPath, [], { name: 'xterm-color', cols: 200, rows: 50, cwd: process.cwd(), env: buildWorkerEnv() });
       } catch (e) { reject(e); return; }
       if (!ptyProc?.pid) { reject(new Error('claude pty.spawn returned no pid')); return; }
 

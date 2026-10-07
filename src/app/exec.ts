@@ -30,6 +30,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { buildWorkerEnv, assertCanStartJob } from '../core/worker-env.js';
 import { buildCliCommand } from '../core/command-builder.js';
 import { inspectCliBinary } from '../core/binary-resolver.js';
 import { listAgents, selectAgentForModel } from '../agents/registry.js';
@@ -246,6 +247,13 @@ export function planExec(request: ExecRequest): ExecPlan {
 }
 
 export async function runExec(): Promise<number> {
+  // 先於讀 stdin，worker 即使沒送 JSON 也立即收到明確拒絕。
+  try { assertCanStartJob(); }
+  catch (error) {
+    writeFrame({ v: 1, type: 'terminal', status: 'spawn-failed', exitCode: null,
+      signal: null, detail: (error as Error).message });
+    return 2;
+  }
   let request: ExecRequest;
   try {
     request = parseRequest(await readStdin());
@@ -320,6 +328,7 @@ export async function runExec(): Promise<number> {
   let child: ReturnType<typeof spawn>;
   try {
     child = spawn(built.cliPath, built.args, {
+      env: buildWorkerEnv(),
       cwd: built.cwd,
       stdio: [usesStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       detached: false,

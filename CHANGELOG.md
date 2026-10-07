@@ -8,6 +8,34 @@
 
 ## [Unreleased]
 
+### 修正（worker 遞迴防護 F1–F3 與驗收行程隔離 G1–G2）
+
+- H1／H2 審查修正：本機 ConPTY stub 重現完成後殘留 MessagePort／pipe，驗收器釋放已結束 job 串流，報告、監控收尾與輸出排空後按報告碼退出自身；每項 run 立即複製 direct-api session 與其他 agent 可取得的 session 紀錄至 evidence 並附報告連結，A=有但缺少／錯誤第一行原文改列「探針回答不可信」能力類，只有正確主導者政策標題才列安全性失敗，補完整生命週期、存證與分類 stub 測試。（Codex）
+
+- 2026-10-07 全模型實測中，gemini-3.7-flash-high（agy）從 shell 找到 `dist/bin/ai-cli.js`，再開 codex worker 並寫 child_process 派工腳本，監控峰值達 2；其他 Gemini 尋找 CLI 管道耗盡時間，haiku 則因身分鎖與「再派工」prompt 衝突而停下反問。F1 明定轉派要求代表工作已派到自己，直接完成；F2 用共用 helper 檢查 ai-cli 自身 `AI_CLI_WORKER=1`，MCP run、CLI run/exec 與共用 command-builder 拒絕啟動新 job，明示 `AI_CLI_ALLOW_NESTED=1` opt-in，查詢照常；F3 在 agy normal/strict prompt 與 direct-api 實送 user message 開頭補相同身分鎖，每次續接都補，保留 prompt_file、[no-tools] 與影像解析，以逐字測試綁定 src 常數和 hook 正典。驗收報告辨識「嘗試派工，被 F2 拒絕」，只豁免同一 call id 已確認的 run 拒絕，agy/direct-api 仍只強制 A=沒有。背景驗收第 31 顆 direct-api 因整場累積 1,835 個裸 PID 且 Windows 重用 PID，誤認外部 Codex worker 並殺掉整棵：G1 改為每項 run 獨立追蹤 PID＋建立時間與父生命期，只认領父最後確認存活前建立的遺留子行程，Windows 用 UTC CreationDate、POSIX 用 ps lstart（秒精度不明則保守跳過），逐 PID 擊殺前重新核對身分，不用 /T；不符只 WARN、跳過，外部行程與 node 保護不變。G2 為 direct-api Bash 與 rg shell 子行程加入 buildWorkerEnv，補上主導者 Node 內 API worker 沒有環境標記的缺口。新增隔離 CLI/API／PID 重用 stub 測試與對應突變；不執行真模型、不修改已安裝 hook。core 獨立稽核與真模型複驗由主導者後續安排。（Codex）
+
+- 驗證：`npm run build` 與完整 `npm test` 均 exit 0（18 支）；新增 worker-guards 36/36、既有 worker-identity 57/57，196 筆突變清單健康檢查 8/8。新增 15 筆突變在 repo 外的未提交工作樹副本逐一驗基準、語法／編譯與對應斷言，15/15 KILLED，主 repo/dist 未套突變。實送 agy prompt 的 Windows stub 原經 `.cmd %*` 把多行截斷，改用 Node fixture 直接接 argv、保留正式 agy builder，完整 suite 重跑全過。（Codex）
+
+### 新增（可重複 worker 身分驗收）
+
+- 新增 opt-in `npm run verify:worker-identity`：先驗已安裝 hook 的主導者／worker 分流、位元組同步與 SessionStart 設定，再沿 MCP run 的 ProcessService 路徑序列驗四家模型的身分探針與顯性再派工 T6；每 5 秒監控 worker 峰值、指定 PID 收尾並排除祖先與 node，驗 add.py 自測，逐顆續寫 Markdown／JSON 報告。支援模型／家族／alias、tempt folder、逾時與零模型 dry-run，帳號及 knownBad 失敗保留 EXPECTED_FAIL 依據；純邏輯與流程 stub 測試加入 npm test、峰值突變手動驗證，真實模型驗收由主導者於升級／同步後及 commit／push 前執行。審查後將計數與擊殺限定於驗收程式的累積子孫集合（父行程結束仍保留），外部 worker 僅 WARN 並附 PID／命令列前 120 字，並修正 Windows `.CMD` 版本檢查的重複引號跳脫；補子孫隔離／中間層消失／CMD stub 與對應突變驗證。（Codex）
+
+### 修正（vendor CLI worker 身分）
+
+- **ai-cli 啟動的 claude / codex / agy CLI 一律帶 `AI_CLI_WORKER=1`，其語意是「這個 CLI 行程由 ai-cli 啟動，不是人直接開的」。** 共用 `buildWorkerEnv()` 保留其餘父行程環境，涵蓋 MCP run 的 pipe / PTY、CLI run 的 POSIX / Windows detached wrapper 與 PTY、前景 exec、agy 模型查詢，以及三家的額度查詢 TUI。wrapper 的 vendor 子行程沿用 wrapper 環境。讓 SessionStart hook 能辨識 worker，避免誤注入主導者派工政策而遞迴派工；hook 端另行處理。本次以 stub 實測子行程環境與 helper 突變驗證。（Codex）
+
+### 變更（派工政策 hook 依身分分流）
+
+- **`tools/hooks/aicli-model-policy.py` 看到 `AI_CLI_WORKER=1` 時改注入 `WORKER_CONTEXT`（worker 身分鎖），不再注入主導者的 `ctx`。**
+  2026-10-07 實測：Claude 與 Codex worker 都收到主導者政策，Codex worker 還在回覆開頭自問「由誰執行」；
+  另一個專案有更糟的前例（知識庫紀錄：worker 讀到「PM 不寫碼／一律派工」自認 PM，遞迴派工 4～5 個行程）。
+  不採「worker 什麼都不給」：那樣 CLAUDE.md / AGENTS.md / memory 裡的主導者規則照樣會讓它誤判。
+  身分鎖四要素照該前例實證有效的做法（身分證明、硬禁加後果、凌駕聲明、首個動作），凌駕範圍只限「角色與派工」類規則，
+  安全限制與禁改範圍對 worker 照樣有效。分歧檢查同時比對 `ctx` 與 `WORKER_CONTEXT`；worker 不顯示分歧警告。
+  驗收（Windows）：主導者仍收到 v2.0；Claude（haiku）與 Codex（gpt-6.1-sol）worker 只收到身分鎖；
+  workFolder 設在含「PM 不寫碼」記憶的專案、並在 prompt 明令「用 mcp__ai-cli__run 派工」時，
+  sonnet 與 gpt-6.1-sol 都拒絕再派工、自行完成，行程監控全程 worker 峰值 1。（Claude）
+
 ### 變更（開發流程：突變測試自動收掉 worktree）
 
 - **`tools/mutation-test.mjs` 不給 worktree 路徑時，自己在系統暫存目錄建一個（HEAD），結束時自動收掉。**
@@ -22,6 +50,79 @@
 
 - `src/core/process-result.ts` 的 `shouldPreserveRawFailureOutput()`：寫死回傳 `false`，相關的兩個分支永遠不執行（6.5.0 稽核指出）。
   移除並化簡條件，行為不變。（Claude）
+
+### 新增（NVIDIA 免費模型進入可用清單）
+
+- **`models` 的 `direct-api` 清單從 4 筆樣板變成 4 筆樣板 + 11 顆實測可用的 NVIDIA 免費模型。**
+  在此之前，呼叫端要用 NVIDIA 那批只能靠 `dispatchGuidance` 的散落提及，
+  清單本身一個具體名字都沒有——而挑模型的是 AI，它讀的是清單。
+
+  11 顆是 2026-09-10 逐顆實測的結果，附實測延遲區間（快到慢）：
+  `nv-poolside/laguna-xs-2.1`（2.5–2.7s，最快且最穩）、
+  `nv-nvidia/ising-calibration-1.5-31b`、`nv-google/diffusiongemma-26b-a4b-it`、
+  `nv-meta/muse-glimmer-30b`、`nv-nvidia/nemotron-3.5-lightning-30b-a3b`（2.9–20.1s，很不穩）、
+  `nv-nvidia/nemotron-3-super-120b-a12b`、`nv-nvidia/nemotron-3-nano-omni-30b-a3b-reasoning`、
+  `nv-openai/gpt-oss-20b`、`nv-moonshotai/kimi-k3`、`nv-google/gemma-4-31b-it`、
+  `nv-nvidia/nemotron-3-ultra-550b-a55b`（兩輪只過一輪）。
+
+- **新增 `nvidiaFreeTierCaveats` 欄位。** 與 `knownBadModels` 分開：那份講「哪一顆別派」，
+  這份講「整條免費路徑的性質」——踩到的人會以為是模型壞了而去換模型，換哪顆都一樣。
+  六條，包含「要序列化」「HTTP 200 不等於內容對」「exec 跑不了 direct-api」等。
+
+### 修正（catalog 的 routable 對使用者自設的 provider 說謊）
+
+- **`direct-api.matchesModel` 寫死只認 `or-` / `ds-`，不讀 `providers.json`。**
+  但真正決定路由的是 `command-builder.ts:58` 先呼叫的 `resolveDirectApiModel`，
+  它**會**讀 provider key。兩邊不一致的後果：使用者自己設的 provider（例如 `nv`）
+  派得動，`catalogV2` 卻把它標成 `routable: false`——而 catalog 存在的意義
+  就是讓呼叫端不必自己猜。改成呼叫同一個 `resolveDirectApiModel`，單一事實來源。
+
+  這也是 11 顆能安全寫進共用 repo 的前提：`routable` 是每台機器現算的。
+  實測沒設 `nv` provider 的機器上，那 11 個名字全部 `routable: false`，
+  不會拿到「列出來卻叫不動」的假承諾。
+
+  解析失敗時回 `true` 而不是 `false`：那代表「形狀像 direct-api 但寫壞了」
+  （例如 `ds-` 沒接 model）。回 `false` 會讓它掉進 claude 的 catch-all
+  **靜默改跑 Claude**——這個 repo 已為同類的靜默路由吃過虧。
+
+- **`verify-direct-api.mjs` 補一組不變量**：routable 必須跟著 `providers.json` 走
+  （加了 provider 就要翻成可路由，不必重啟），且寫壞的名字不得被 claude 接走。
+  對應突變兩個（`tools/mutations.json` 裡 `matchesModel` 開頭的兩筆），實測皆 KILLED 且由預期斷言擊殺。
+  （2026-10-07 併入 6.5.0 時補正：第一筆的 `to` 原本漏了引號 `startsWith(or-)`，不是合法 JS，已改回 `startsWith('or-')`。）
+  突變在 `dist/` 上套用而非 worktree——CONTRIBUTING 記載 Windows junction
+  的刪除順序踩爆過兩次主 repo 的 `node_modules`；套用前先 `node --check`
+  確認突變後仍是合法 JS，否則「殺掉」只是語法錯誤、不算數。
+
+### 修正（過時的派工建議與 known-bad 判定）
+
+- **`nv-moonshotai/kimi-k3` 與 `nv-google/gemma-4-31b-it` 移出 `knownBadModels`。**
+  2026-09-10 重測兩顆都兩輪全過（7.8–22.2s / 8.0–25.8s，慢但可用）。
+  舊判定是 2026-09-09 的抽樣（kimi-k3「429 打不穿，3/10」、gemma「工具迴圈 91 秒」）。
+  程式碼留了註解說明**問題本質是免費共享端點的負載，不是模型壞掉**——
+  尖峰時可能復發，屆時那是舊病不是新問題。
+
+- **`knownBadModels` 新增三顆「raw API 通、走 ai-cli 一定壞」的**：
+  `nv-meta/llama-3.2-11b-vision-instruct`（帶 tools 回 `content:null` 去叫工具，
+  進工具迴圈卡死；不帶 tools 是 440ms 正常）與
+  `nv-nvidia/riva-translate-4b-instruct-v1.1 / -v2`（帶 tools 直接 400，
+  那個部署沒開工具呼叫）。**direct-api 每次都附工具定義且關不掉**，
+  所以判斷一顆能不能用要用 ai-cli 測，不能只用 curl 測。
+
+- **`dispatchGuidance` 的實測數字全部對回 2026-09-10。** 舊的寫
+  gpt-oss-20b「實測 10/10、最快（5.1s）」——今天量到 4.5–6.6s，而且它不是最快的
+  （laguna-xs-2.1 才是）。nemotron-3.5-lightning 舊寫「6.1s」，今天是 2.9–20.1s。
+  另把「1M context」標註為 vendor 宣稱、本專案未實測。
+
+- **`nv-nvidia/nemotron-3-nano-30b-a3b` 的說明補上實測**：`/v1/models` 上那個
+  長得很像的 `nemotron-nano-3-30b-a3b`（`nano-3` 與 `3-nano` 顛倒）2026-09-10
+  實測也是 404，一併別派。
+
+### 說明（這份清單的效力範圍）
+
+- nv-* 是在**一個** NVIDIA 免費帳號上測的。該端點 `/v1/models` 回 80 顆，
+  這個帳號實際打得通 16 顆，走 ai-cli 能用 11 顆——**55 顆回
+  `404 Not found for account`**。模型可用性綁帳號，別的帳號會拿到不同的 404 集合。
+  清單列的是「有人實測過能用」，不是「你一定叫得動」。
 
 ## [6.5.0] - 2026-10-06
 

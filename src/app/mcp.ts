@@ -33,6 +33,7 @@ import { CircuitBreakerError } from '../core/circuit-breaker.js';
 import { UsageService } from '../plugins/usage-service.js';
 import { consumeNotice, scheduleBackgroundUpdates } from '../core/updater.js';
 import { getServerIdentity } from '../core/identity.js';
+import { assertCanStartJob } from '../core/worker-env.js';
 
 // 版本與 doctor / models 回傳的 server.version 取自同一份來源，避免兩處各讀一次
 // package.json 而在某天分岔。
@@ -518,6 +519,8 @@ Note: antigravity (agy) does accept model selection — the resolved name is nor
   }
 
   private handleRun(toolArguments: Record<string, unknown>): ServerResult {
+    try { assertCanStartJob(); }
+    catch (error) { throw new McpError(ErrorCode.InvalidRequest, (error as Error).message); }
     if (isFirstToolUse) {
       console.error(`ai_cli_mcp v${SERVER_VERSION} started at ${serverStartupTime}`);
       isFirstToolUse = false;

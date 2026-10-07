@@ -8,6 +8,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { buildWorkerEnv } from './worker-env.js';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { AgentId } from '../agents/types.js';
@@ -153,7 +154,7 @@ export class ProcessService {
       detached: false,
       shell: false,
       windowsVerbatimArguments: needsShell,
-      env: process.env,
+      env: buildWorkerEnv(),
     });
 
     // 立即掛 error listener，避免 async spawn error 變成 uncaughtException 殺掉 MCP server

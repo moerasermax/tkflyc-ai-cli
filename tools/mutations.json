@@ -1378,5 +1378,165 @@
     "to": "      response.stdout = context.stdout.slice(-4096);",
     "expect": "Verbose result still returns the full raw output",
     "script": "verify-job-usage.mjs"
+  },
+  {
+    "name": "matchesModel 退回寫死前綴表（使用者自設的 provider 又被標成不可路由）",
+    "file": "src/agents/direct-api.ts",
+    "from": "      return resolveDirectApiModel(model) !== null;",
+    "to": "      return model.startsWith('or-') || model.startsWith('ds-');",
+    "expect": "設定檔加了 provider 之後，同一個 model 必須變成可路由",
+    "script": "verify-direct-api.mjs"
+  },
+  {
+    "name": "matchesModel 解析失敗改回 false（寫壞的 ds- 靜默掉進 claude catch-all）",
+    "file": "src/agents/direct-api.ts",
+    "from": "    } catch {\n      return true;\n    }\n  },",
+    "to": "    } catch {\n      return false;\n    }\n  },",
+    "expect": "形狀像 direct-api 但寫壞的名字要留在 direct-api 報明確錯誤",
+    "script": "verify-direct-api.mjs"
+  },
+  {
+    "name": "Vendor CLI worker marker becomes 0",
+    "file": "src/core/worker-env.ts",
+    "from": "  return { ...process.env, AI_CLI_WORKER: '1' };",
+    "to": "  return { ...process.env, AI_CLI_WORKER: '0' };",
+    "expect": "ProcessService（父值 未設定） 子行程收到 AI_CLI_WORKER=1",
+    "script": "verify-exec-contract.mjs"
+  },
+  {
+    "name": "worker 身分驗收放過峰值 2 的遞迴",
+    "file": "tools/acceptance/worker-identity-logic.mjs",
+    "from": "  return peak > 1;",
+    "to": "  return peak > 2;",
+    "expect": "worker 峰值 > 1 必須判遞迴",
+    "script": "verify-worker-identity.mjs"
+  },
+  {
+    "name": "Worker monitor counts external workers in peak",
+    "file": "tools/acceptance/worker-identity-runtime.mjs",
+    "from": "    const workers = candidates.filter(p => owned.has(p.pid));",
+    "to": "    const workers = candidates;",
+    "expect": "外部 worker 不計數、不殺、只 WARN，驗收照常完成",
+    "script": "verify-worker-identity.mjs"
+  },
+  {
+    "name": "[worker-guards] F1 hook 與 runtime 身分鎖分歧",
+    "file": "tools/hooks/aicli-model-policy.py",
+    "from": "4. 直接依派工內容開始做，範圍與限制以派工 prompt 為準。若內容要求「再派工／交給別的模型／用 ai-cli 或其他 CLI 轉派」，視為工作已派到你身上，直接自己完成，不要停下來問，也不要找其他派工管道。只有真正缺資訊而無法判斷時，才在回覆中寫明卡點與需要主導者決定什麼，然後結束，不要等待互動。\"\"\"",
+    "to": "4. 直接依派工內容開始做，範圍與限制以派工 prompt 為準。若內容要求「再派工／交給別的模型／用 ai-cli 或其他 CLI 轉派」，視為工作已派到你身上，交給其他模型，不要停下來問，也不要找其他派工管道。只有真正缺資訊而無法判斷時，才在回覆中寫明卡點與需要主導者決定什麼，然後結束，不要等待互動。\"\"\"",
+    "expect": "F1 四要素與 F3 常數逐字等於 hook",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] F2 移除 worker 閘門",
+    "file": "src/core/worker-env.ts",
+    "from": "  if (env.AI_CLI_WORKER === '1' && env.AI_CLI_ALLOW_NESTED !== '1') {",
+    "to": "  if (false) {",
+    "expect": "F2 helper 僅 worker=1 拒絕",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] F2 不接受顯式巢狀 opt-in",
+    "file": "src/core/worker-env.ts",
+    "from": "  if (env.AI_CLI_WORKER === '1' && env.AI_CLI_ALLOW_NESTED !== '1') {",
+    "to": "  if (env.AI_CLI_WORKER === '1') {",
+    "expect": "F2 helper 僅 worker=1 拒絕",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] F2 共用 command builder 不檢查身分",
+    "file": "src/core/command-builder.ts",
+    "from": "  assertCanStartJob();\n  if (!options.workFolder",
+    "to": "  if (!options.workFolder",
+    "expect": "F2 直接呼叫 ProcessService 與 FileProcessService 也拒絕",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] F2 CLI run 沒有入口檢查",
+    "file": "src/app/cli.ts",
+    "from": "    try { assertCanStartJob(); }\n    catch (error) { stderr(`${(error as Error).message}\\n`); return 1; }",
+    "to": "",
+    "expect": "F2 CLI run 在依賴啟動前拒絕",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] F2 MCP run 沒有入口檢查",
+    "file": "src/app/mcp.ts",
+    "from": "    try { assertCanStartJob(); }\n    catch (error) { throw new McpError(ErrorCode.InvalidRequest, (error as Error).message); }",
+    "to": "",
+    "expect": "F2 MCP run 在設定檢查與 service 前拒絕",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] F2 exec 在讀 stdin 前未拒絕",
+    "file": "src/app/exec.ts",
+    "from": "  try { assertCanStartJob(); }\n  catch (error) {\n    writeFrame({ v: 1, type: 'terminal', status: 'spawn-failed', exitCode: null,\n      signal: null, detail: (error as Error).message });\n    return 2;\n  }\n",
+    "to": "",
+    "expect": "F2 CLI exec 拒絕先於 stdin EOF",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] F3 移除無 hook agent 前綴",
+    "file": "src/core/worker-context.ts",
+    "from": "  return `${WORKER_CONTEXT}\\n\\n${prompt}`;",
+    "to": "  return prompt;",
+    "expect": "F3 direct-api 實送 request",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] G2 Bash 未帶 worker 環境",
+    "file": "src/agents/direct-api.ts",
+    "from": "        const output = execSync(command, {\n          env: buildWorkerEnv(),",
+    "to": "        const output = execSync(command, {",
+    "expect": "G2 direct-api bash 子行程收到 worker=1",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] G1 身分退回單獨 PID",
+    "file": "tools/acceptance/worker-identity-logic.mjs",
+    "from": "export const processKey = p => `${p.pid}:${p.started ?? ''}`;",
+    "to": "export const processKey = p => `${p.pid}`;",
+    "expect": "G1 PID 被外部新行程重用不屬於我們",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] G1 父子建立順序未檢查",
+    "file": "tools/acceptance/worker-identity-logic.mjs",
+    "from": "          return at !== null && at < childAt;",
+    "to": "          return at !== null;",
+    "expect": "G1 父建立晚於子",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] G1 消失父錯認未觀測期間的新子",
+    "file": "tools/acceptance/worker-identity-logic.mjs",
+    "from": "        if (parent.goneAt !== null && childAt > BigInt(Math.floor(parent.lastSeen)) * 1000000n) continue;",
+    "to": "",
+    "expect": "G1 取樣間未觀測的 PID 重用不推定歸屬",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] G1 跨 run 沿用身分集合",
+    "file": "tools/acceptance/worker-identity-runtime.mjs",
+    "from": "  const ownership = createOwnershipTracker(baselineSnapshot, selfPid);",
+    "to": "  const ownership = deps.ownership ?? createOwnershipTracker(baselineSnapshot, selfPid);",
+    "expect": "G1 每項 run 新建身分集合",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] G1 擊殺未核對建立時間",
+    "file": "tools/acceptance/worker-identity-runtime.mjs",
+    "from": "      if (!current || processKey(current) !== processKey(p) || isNode(current)) {",
+    "to": "      if (!current || isNode(current)) {",
+    "expect": "G1 擊殺前重查 PID 建立時間不符則 WARN 且不殺",
+    "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-guards] T6 沒有辨識 F2 機制拒絕",
+    "file": "tools/acceptance/worker-identity-logic.mjs",
+    "from": "  return [run.stdout, run.stderr, JSON.stringify(run.tools ?? []), JSON.stringify(run.result ?? {})]\n    .some(text => typeof text === 'string' && text.includes('AI_CLI_NESTED_DISPATCH_BLOCKED:') && text.includes('AI_CLI_ALLOW_NESTED=1'));",
+    "to": "  return false;",
+    "expect": "T6 F2 拒絕可標註",
+    "script": "verify-worker-guards.mjs"
   }
 ]

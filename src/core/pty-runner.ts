@@ -9,6 +9,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { buildWorkerEnv } from './worker-env.js';
 import { PassThrough } from 'node:stream';
 import { createRequire } from 'node:module';
 import { stripAnsi } from './ansi.js';
@@ -57,7 +58,7 @@ export function spawnPty(
     cols: 200,
     rows: 50,
     cwd,
-    env: process.env,
+    env: buildWorkerEnv(),
   });
 
   const pid: number | undefined = ptyProc.pid;

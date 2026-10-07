@@ -299,6 +299,99 @@ const registry = await load('agents/registry.js');
   );
 }
 
+// ── 6. ai-cli 啟動的 vendor CLI 一律帶 worker 標記 ────────────
+// 用實際子行程寫檔驗證；父行程不預設標記，並覆寫衝突值，避免只驗到繼承而假綠。
+{
+  const { mkdtempSync, chmodSync, readFileSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { resolve, basename } = await import('node:path');
+  const { ProcessService } = await load('core/process-service.js');
+  const { FileProcessService } = await load('core/file-process-service.js');
+  const temp = mkdtempSync(join(tmpdir(), 'ai-cli-worker-env-'));
+  const stubJs = join(ROOT, 'tools', 'stubs', 'worker-env.mjs');
+  const stub = process.platform === 'win32' ? join(ROOT, 'tools', 'stubs', 'worker-env.cmd') : stubJs;
+  if (process.platform !== 'win32') chmodSync(stub, 0o755);
+  const keys = ['AI_CLI_WORKER', 'AI_CLI_WORKER_ENV_OUTPUT', 'AI_CLI_WORKER_ENV_SENTINEL', 'CODEX_CLI_NAME'];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const assertEnv = (label, output) => {
+    const received = JSON.parse(readFileSync(output, 'utf8'));
+    check(received.worker === '1', `${label} 子行程收到 AI_CLI_WORKER=1`, JSON.stringify(received));
+    check(received.inherited === 'keep-parent-env', `${label} 子行程保留其他環境變數`);
+  };
+  try {
+    process.env.AI_CLI_WORKER_ENV_SENTINEL = 'keep-parent-env';
+    for (const parentValue of [undefined, '0']) {
+      if (parentValue === undefined) delete process.env.AI_CLI_WORKER;
+      else process.env.AI_CLI_WORKER = parentValue;
+      const label = `ProcessService（父值 ${parentValue ?? '未設定'}）`;
+      const output = join(temp, `process-${parentValue ?? 'unset'}.json`);
+      process.env.AI_CLI_WORKER_ENV_OUTPUT = output;
+      const service = new ProcessService({ cliPaths: { codex: stub, claude: stub, antigravity: stub } });
+      const run = service.startProcess({ model: 'gpt-6.1-sol', prompt: 'capture worker env', workFolder: ROOT });
+      const [result] = await service.waitForProcesses([run.pid], 10);
+      check(result.status === 'completed' && result.exitCode === 0, `${label} stub 成功結束`);
+      assertEnv(label, output);
+      check(process.env.AI_CLI_WORKER === parentValue, `${label} 不改父行程環境`);
+    }
+
+    // Windows 的 Node wrapper / POSIX 的 sh wrapper 必須把環境傳到真正的 CLI。
+    const fileOutput = join(temp, 'detached.json');
+    process.env.AI_CLI_WORKER_ENV_OUTPUT = fileOutput;
+    const fileService = new FileProcessService({ stateDir: join(temp, 'state'), cliPaths: { codex: stub } });
+    const fileRun = await fileService.startProcess({ model: 'gpt-6.1-sol', prompt: 'capture detached env', cwd: ROOT });
+    const [fileResult] = await fileService.waitForProcesses([fileRun.pid], 10);
+    check(fileResult.status === 'completed' && fileResult.exitCode === 0, 'FileProcessService wrapper stub 成功結束');
+    assertEnv('FileProcessService wrapper', fileOutput);
+
+    const discoveryOutput = join(temp, 'discovery.json');
+    process.env.AI_CLI_WORKER_ENV_OUTPUT = discoveryOutput;
+    const discovery = await registry.getAgent('antigravity').discoverModels(stub);
+    check(discovery.models?.includes('gemini-worker-stub'), 'agy models stub 成功結束');
+    assertEnv('agy models', discoveryOutput);
+
+    // exec 在 Windows 不接受 .cmd shim；測試 runner 只替換 command builder 為 Node stub。
+    // runExec 本身的 spawn、環境設定與 frame 契約照正式路徑執行。
+    const execOutput = join(temp, 'exec.json');
+    process.env.AI_CLI_WORKER_ENV_OUTPUT = execOutput;
+    process.env.CODEX_CLI_NAME = process.execPath;
+    const runner = join(temp, 'exec-stub-runner.mjs');
+    writeFileSync(runner, `
+import { getAgent } from ${JSON.stringify(pathToFileURL(join(ROOT, 'dist', 'agents', 'registry.js')).href)};
+import { runExec } from ${JSON.stringify(pathToFileURL(join(ROOT, 'dist', 'app', 'exec.js')).href)};
+getAgent('codex').buildCommand = (input) => ({
+  cliPath: process.execPath, args: [${JSON.stringify(stubJs)}], cwd: input.cwd,
+  agent: 'codex', prompt: input.prompt, stdinPrompt: input.prompt,
+});
+process.exitCode = await runExec();
+`);
+    const execResult = await new Promise((resolveResult, reject) => {
+      const child = spawn(process.execPath, [runner], { stdio: ['pipe', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+      child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+      child.on('error', reject);
+      child.on('close', (code) => resolveResult({ code, stdout, stderr }));
+      child.stdin.end(JSON.stringify({ cwd: ROOT, model: 'codex/gpt-6.1-sol', prompt: 'capture exec env', authority: 'unrestricted' }));
+    });
+    const terminal = execResult.stdout.trim().split('\n').map((line) => JSON.parse(line)).at(-1);
+    check(execResult.code === 0 && terminal?.type === 'terminal' && terminal.status === 'succeeded' && terminal.exitCode === 0,
+      'exec stub 成功結束', execResult.stderr || JSON.stringify(terminal));
+    assertEnv('exec', execOutput);
+  } catch (error) {
+    check(false, 'worker 環境測試完整執行', error.stack ?? String(error));
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    if (dirname(resolve(temp)) !== resolve(tmpdir()) || !basename(temp).startsWith('ai-cli-worker-env-')) {
+      throw new Error(`Unexpected worker test cleanup path: ${temp}`);
+    }
+    rmSync(temp, { recursive: true, force: true });
+  }
+}
+
 const passed = results.filter(([ok]) => ok).length;
 console.log(`\n=== ${passed}/${results.length} passed ===`);
 if (passed !== results.length) {

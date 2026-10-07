@@ -11,6 +11,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { buildWorkerEnv } from './worker-env.js';
 import {
   appendFileSync,
   chmodSync,
@@ -180,6 +181,7 @@ export class FileProcessService {
     }
     const wrapperPath = this.ensureDetachedWrapperScript();
     const childProcess = spawn(wrapperPath, [this.stateDir, cwdKey, cmd.cliPath, ...cmd.args], {
+      env: buildWorkerEnv(),
       cwd: cmd.cwd,
       detached: true,
       stdio: 'ignore',
@@ -297,6 +299,7 @@ export class FileProcessService {
     }), 'utf-8');
 
     const childProcess = spawn(process.execPath, [wrapperPath, specPath], {
+      env: buildWorkerEnv(),
       cwd: cmd.cwd,
       detached: true,
       stdio: 'ignore',
@@ -338,7 +341,7 @@ export class FileProcessService {
       cols: 200,
       rows: 50,
       cwd: cmd.cwd,
-      env: process.env,
+      env: buildWorkerEnv(),
     });
     const pid: number | undefined = ptyProc.pid;
     if (!pid) {

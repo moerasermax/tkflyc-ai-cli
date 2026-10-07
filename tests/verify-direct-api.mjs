@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ProcessService } from '../dist/core/process-service.js';
+import { WORKER_CONTEXT } from '../dist/core/worker-context.js';
 
 const tempRoot = mkdtempSync(join(tmpdir(), 'aicli-direct-api-'));
 // 清理掛在 exit 上，不能只放在最後一行 —— assertion 中途拋錯時那行根本跑不到，
@@ -68,7 +69,7 @@ globalThis.fetch = async (url, init = {}) => {
   capturedAuthorization = String(init.headers.authorization || init.headers.Authorization || '');
   const messages = Array.isArray(requestBody.messages) ? requestBody.messages : [];
   const firstUser = messages.find((message) => message?.role === 'user');
-  const firstUserContent = typeof firstUser?.content === 'string' ? firstUser.content : '';
+  const firstUserContent = typeof firstUser?.content === 'string' ? firstUser.content.replace(`${WORKER_CONTEXT}\n\n`, '') : '';
 
   if (firstUserContent === 'Read package.json and tell me the version' && !messages.some((message) => message?.role === 'tool')) {
     return streamResponse([
@@ -187,7 +188,7 @@ assert.strictEqual(capturedBodies[0].model, 'test/model');
 assert.strictEqual(capturedBodies[0].stream, true);
 assert.ok(capturedBodies[0].tools.some((tool) => tool.function?.name === 'read_file'));
 assert.deepStrictEqual(capturedBodies[0].messages, [
-  { role: 'user', content: 'Read package.json and tell me the version' },
+  { role: 'user', content: `${WORKER_CONTEXT}\n\nRead package.json and tell me the version` },
 ]);
 assert.strictEqual(capturedBodies[1].messages[1].role, 'assistant');
 assert.deepStrictEqual(capturedBodies[1].messages[1].tool_calls, [
@@ -219,7 +220,7 @@ assert.strictEqual(noToolsResult.status, 'completed');
 assert.strictEqual(capturedBodies.length, 3);
 assert.strictEqual(capturedBodies[2].tools, undefined);
 assert.deepStrictEqual(capturedBodies[2].messages, [
-  { role: 'user', content: 'Say hello without tools' },
+  { role: 'user', content: `${WORKER_CONTEXT}\n\nSay hello without tools` },
 ]);
 
 const xmlStarted = service.startProcess({
@@ -260,3 +261,61 @@ assert.strictEqual(capturedBodies[4].messages[2].tool_call_id, 'xml_call_0');
 assert.ok(capturedBodies[4].messages[2].content.includes(`Wrote ${xmlReportContent.length} chars`));
 
 console.log('PASS: direct-api mock fetch route/output/session verified');
+
+// ── catalog 的 routable 要跟著 providers.json 走（2026-09-10） ──────────────
+// 舊的 matchesModel 寫死 `or-` / `ds-`，使用者自己設的 provider（例如 nv）
+// 派得動、catalog 卻標 routable:false。這組斷言鎖住「標示與現實一致」。
+{
+  const { directApiAgent } = await import('../dist/agents/direct-api.js');
+  const { selectAgentForModel } = await import('../dist/agents/registry.js');
+  const NV_MODEL = 'nv-openai/gpt-oss-20b';
+
+  // 此刻 providers.json 只有 openrouter（檔頭寫的），所以 nv- 不該被認領。
+  assert.strictEqual(
+    directApiAgent.matchesModel(NV_MODEL),
+    false,
+    '★ 沒設定的 provider 前綴不得標成可路由（會變成「列出來卻叫不動」的假承諾）'
+  );
+
+  // 把 nv 加進 providers.json，同一個名字就該翻成可路由——不必重啟。
+  const withNv = JSON.parse(readFileSync(providersPath, 'utf8'));
+  withNv.providers.nv = { base_url: 'https://mock.nv.test/v1', api_key: 'test-key' };
+  writeFileSync(providersPath, JSON.stringify(withNv, null, 2));
+  assert.strictEqual(
+    directApiAgent.matchesModel(NV_MODEL),
+    true,
+    '★ 設定檔加了 provider 之後，同一個 model 必須變成可路由（catalog 不得停在靜態前綴表）'
+  );
+  assert.strictEqual(
+    selectAgentForModel(NV_MODEL).id,
+    'direct-api',
+    '★ 標成可路由的，實際選 agent 時也要真的選到 direct-api'
+  );
+
+  // 內建前綴不受設定檔影響。
+  assert.strictEqual(directApiAgent.matchesModel('or-anything'), true, '內建 or- 前綴恆可路由');
+  assert.strictEqual(directApiAgent.matchesModel('ds-anything'), true, '內建 ds- 前綴恆可路由');
+  // 樣板字串不是真 model，不得被認領。
+  assert.strictEqual(
+    directApiAgent.matchesModel('<provider>-<model>'),
+    false,
+    '樣板 <provider>-<model> 不是可派的名字'
+  );
+
+  // 寫壞的 direct-api 名字要由 direct-api 自己報錯，不得掉進 claude 的 catch-all。
+  assert.strictEqual(
+    directApiAgent.matchesModel('ds-'),
+    true,
+    '★ 形狀像 direct-api 但寫壞的名字要留在 direct-api 報明確錯誤，回 false 會靜默改跑 Claude'
+  );
+  assert.strictEqual(
+    selectAgentForModel('ds-').id,
+    'direct-api',
+    '★ 寫壞的 direct-api 名字不得被 claude 的 catch-all 接走'
+  );
+
+  // 還原，不影響後續（或重跑）。
+  delete withNv.providers.nv;
+  writeFileSync(providersPath, JSON.stringify(withNv, null, 2));
+  console.log('PASS: catalog routable 跟隨 providers.json，且寫壞的名字不會靜默改跑 Claude');
+}

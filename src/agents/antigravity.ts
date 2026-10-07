@@ -15,6 +15,8 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { withWorkerContext } from '../core/worker-context.js';
+import { buildWorkerEnv } from '../core/worker-env.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentDefinition, BuildCommandInput, BuiltCommand, ModelDiscoveryResult } from './types.js';
@@ -120,6 +122,7 @@ function discoverModels(cliPath: string): Promise<ModelDiscoveryResult> {
       const needsShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(cliPath);
       child = spawn(needsShell ? (process.env.ComSpec || 'cmd.exe') : cliPath,
         needsShell ? ['/d', '/s', '/c', `""${cliPath}" models"`] : ['models'], {
+          env: buildWorkerEnv(),
           windowsHide: true,
           windowsVerbatimArguments: needsShell,
           detached: process.platform !== 'win32',
@@ -200,7 +203,8 @@ function buildStrictCommand(
   input: BuildCommandInput,
   capabilities: readonly string[]
 ): BuiltCommand {
-  const { cliPath, cwd, prompt, resolvedModel, sessionId } = input;
+  const { cliPath, cwd, resolvedModel, sessionId } = input;
+  const prompt = withWorkerContext(input.prompt);
   for (const capability of capabilities) {
     if (!AGY_SAFE_CAPABILITIES.has(capability)) {
       throw new Error(
@@ -255,7 +259,8 @@ function buildStrictCommand(
 }
 
 function buildCommand(input: BuildCommandInput): BuiltCommand {
-  const { cliPath, cwd, prompt, resolvedModel, sessionId } = input;
+  const { cliPath, cwd, resolvedModel, sessionId } = input;
+  const prompt = withWorkerContext(input.prompt);
   // - agy 用 --print (-p) 做非互動單次模式
   // - --dangerously-skip-permissions 自動核准工具呼叫
   // - cwd 自動作為 workspace

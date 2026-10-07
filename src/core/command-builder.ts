@@ -21,6 +21,7 @@ import {
   type UserConfig,
 } from './user-config.js';
 import { debugLog } from './debug.js';
+import { assertCanStartJob } from './worker-env.js';
 
 export interface BuildCliCommandOptions {
   prompt?: string;
@@ -134,6 +135,8 @@ function resolveDefaultReasoningEffort(
 }
 
 export function buildCliCommand(options: BuildCliCommandOptions): BuiltCommand & { warnings?: string[] } {
+  // MCP / file service / exec 共用的啟動閘門；buildWorkerEnv 是子行程環境，不能拿來判斷。
+  assertCanStartJob();
   if (!options.workFolder || typeof options.workFolder !== 'string') {
     throw new Error('Missing or invalid required parameter: workFolder');
   }

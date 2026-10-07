@@ -173,17 +173,23 @@ export const DISPATCH_GUIDANCE: ReadonlyArray<{
   {
     situation: '大量低價值工作（分類、摘要、格式轉換、批次改寫）',
     model: 'nv-openai/gpt-oss-20b',
-    note: '走 NVIDIA 免費 API，不吃訂閱額度。實測 10/10、最快（5.1s）。不吃 reasoning_effort。',
+    note: '走 NVIDIA 免費 API，不吃訂閱額度。2026-09-10 兩輪全過（4.5–6.6s）。不吃 reasoning_effort。',
+  },
+  {
+    situation: '要快',
+    model: 'nv-poolside/laguna-xs-2.1',
+    note: '2026-09-10 實測最快且延遲最穩（2.5–2.7s，兩輪只差 5ms）。免費。無 reasoning，輸出精簡。',
   },
   {
     situation: '長脈絡',
     model: 'nv-nvidia/nemotron-3.5-lightning-30b-a3b',
-    note: '1M context、免費、實測 10/10。設定檔已配 reasoning_effort=none（28.0s → 6.1s）。',
+    note: '免費。設定檔已配 reasoning_effort=none（不設會把思考當正文吐出來、直接撞 max_tokens）。'
+      + '延遲很不穩：2026-09-10 兩輪是 2.9s 與 20.1s。1M context 是 vendor 宣稱，本專案未實測。',
   },
   {
     situation: '較難的 coding／agentic，但不想動用訂閱額度',
     model: 'nv-meta/muse-glimmer-30b',
-    note: '實測 10/10。hosted 預設 max_tokens 只有 2048 且與推理共用，設定檔已改成 16384。',
+    note: '2026-09-10 兩輪全過（2.9–3.4s）。hosted 預設 max_tokens 只有 2048 且與推理共用，設定檔已改成 16384。',
   },
 ];
 
@@ -196,16 +202,19 @@ export const DISPATCH_GUIDANCE: ReadonlyArray<{
  */
 export const KNOWN_BAD_MODELS: ReadonlyArray<{ model: string; reason: string }> = [
   {
-    model: 'nv-moonshotai/kimi-k3',
-    reason: '429 額度爭用，實測 3/10；連 8 次指數退避都打不穿。不是尖峰抖動，重試救不了。',
+    model: 'nv-meta/llama-3.2-11b-vision-instruct',
+    reason: '直接打 API 正常（440ms），但走 ai-cli 一定壞：帶 tools 就回 content:null 去叫工具，'
+      + '進工具迴圈卡死。direct-api 每次都附工具定義且關不掉，所以這顆在 ai-cli 裡沒救。',
+  },
+  {
+    model: 'nv-nvidia/riva-translate-4b-instruct-v1.1 / -v2',
+    reason: '帶 tools 直接 400：「"auto" tool choice requires --enable-auto-tool-choice」——'
+      + '那個部署沒開工具呼叫。而且它是翻譯模型，會把指令翻成外語而不是照做。',
   },
   {
     model: 'nv-nvidia/nemotron-3-nano-30b-a3b',
-    reason: '410 Gone，已終止服務。/v1/models 仍會列出一個打不通的舊 id（nemotron-nano-3-…）。',
-  },
-  {
-    model: 'nv-google/gemma-4-31b-it',
-    reason: '工具迴圈要 91 秒。純文字（prompt 開頭加 [no-tools]）14 秒還可以。',
+    reason: '410 Gone，已終止服務。/v1/models 上還有個長得很像的 nemotron-nano-3-30b-a3b'
+      + '（nano-3 與 3-nano 顛倒），2026-09-10 實測那個也是 404，別派。',
   },
   {
     model: 'gpt-5.4 / gpt-5.4-mini / gpt-5.3-codex / gpt-5.3-codex-spark / gpt-5.2',
@@ -224,6 +233,31 @@ export const KNOWN_BAD_MODELS: ReadonlyArray<{ model: string; reason: string }> 
       'vendor 目錄的 upgrade 欄位標明 2026-10-14T19:00Z 退役，建議改用 gpt-6.1-sol；'
       + '退役前仍可派，但 effort 只到 xhigh（傳 max 會收到 API HTTP 400——沿用 2026-09-09 的實測，本次未重測）。',
   },
+];
+
+/**
+ * 前一版把 nv-moonshotai/kimi-k3（429 打不穿，3/10）與 nv-google/gemma-4-31b-it
+ * （工具迴圈 91 秒）列為 KNOWN_BAD。2026-09-10 重測兩顆都兩輪全過——
+ * kimi-k3 7.8–22.2s、gemma-4-31b-it 8.0–25.8s，慢但可用，所以移出這份清單。
+ *
+ * 留這段註解而不是靜默刪掉：兩顆的問題本質是**免費共享端點的負載**，不是模型壞掉。
+ * 尖峰時可能再度變成 3/10。看到它們變慢或撞 429 時，那是舊病復發，不是新問題。
+ */
+
+/**
+ * 免費層的操作限制。這些不是模型個別的毛病，是整條 NVIDIA 免費路徑的性質。
+ */
+export const NVIDIA_FREE_TIER_CAVEATS: ReadonlyArray<string> = [
+  '端點列出的 ≠ 你的帳號能用的：/v1/models 回 80 顆，實測只有 16 顆打得通，'
+    + '其餘 55 顆回 404「Not found for account」。可用性綁帳號，別照抄任何清單。',
+  '要序列化。並行 4 條掃描時，連已知正常的 nemotron-3.5-lightning 都被判 30 秒逾時；'
+    + '序列化重測 384ms 就回。並行造成的假陰性會讓你以為模型壞了。',
+  'HTTP 200 不等於內容是對的。2026-09-09 有一次 nemotron-3.5-lightning 回 exit 0 / '
+    + 'finish_reason stop，內容卻是亂碼。retry 只認 429/5xx，攔不到這種——結果要自己看過。',
+  'capabilities 參數對 direct-api 無效（沒有 buildStrictCommand，會被明確拒絕）。'
+    + '這條路徑沒有唯讀沙箱，派會動檔案的工作前先確認 workFolder。',
+  'ai-cli exec 完全跑不了 direct-api——exec 是 spawn vendor CLI 的，direct-api 沒有二進位檔。要用 run。',
+  'NVIDIA API Trial Terms 明文禁止送入機密資訊與個資。這是使用條件，不是隱私偏好。',
 ];
 
 
@@ -512,6 +546,12 @@ export function getModelsPayload(snapshot: ConfigSnapshot = loadUserConfigSnapsh
     */
     dispatchGuidance: DISPATCH_GUIDANCE,
     knownBadModels: KNOWN_BAD_MODELS,
+    /*
+      免費層的操作限制。與 knownBadModels 分開，因為那份講「哪一顆不要派」，
+      這份講「整條路徑的性質」——踩到的人會以為是模型壞了而去換模型，
+      實際上換哪顆都一樣。
+    */
+    nvidiaFreeTierCaveats: NVIDIA_FREE_TIER_CAVEATS,
     /*
       ★ 上面那四個陣列該怎麼讀。呼叫端是 AI，它只看得到 payload——
       清單沒說自己不是全集，讀的人就會把它當全集。見 MODEL_LIST_CAVEAT 上方註解。

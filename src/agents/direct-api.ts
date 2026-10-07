@@ -6,6 +6,8 @@
  */
 
 import { execSync } from 'node:child_process';
+import { withWorkerContext } from '../core/worker-context.js';
+import { buildWorkerEnv } from '../core/worker-env.js';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -18,11 +20,41 @@ import type {
 } from './types.js';
 import { debugLog } from '../core/debug.js';
 
+/**
+ * direct-api 對外的 model 清單。
+ *
+ * 前三筆是**樣板**（告訴呼叫端命名規則），其餘是**實測過可用的具體 model**。
+ *
+ * ── 為什麼具體 model 可以寫進共用 repo ──
+ * 因為 `routable` 是每台機器現算的（catalog-v2 呼叫 `matchesModel`，而
+ * `matchesModel` 讀 providers.json）。沒設 `nv` provider 的機器看到這些名字
+ * 會是 `routable: false`，不會拿到「列出來卻叫不動」的假承諾。
+ *
+ * ── 這份清單的效力範圍 ──
+ * nv-* 是 2026-09-10 在**一個** NVIDIA 免費帳號上逐顆實測的結果：端點
+ * `/v1/models` 回 80 顆，該帳號實際打得通 16 顆，走 ai-cli 能用 11 顆。
+ * **模型可用性是綁帳號的**——別的帳號會拿到不同的 404 集合。所以這裡列的是
+ * 「有人實測過能用」，不是「你一定叫得動」。要確認自己的帳號打得到什麼，
+ * 打 `GET <base_url>/models` 再逐顆試，不要照抄任何清單（包括這一份）。
+ */
 const DIRECT_API_MODELS = [
   'or-<model>',
   'ds-<model>',
   '<provider>-<model>',
   'or-qwen/qwen3.7-plus',
+  // 以下 NVIDIA 免費 API，2026-09-10 各跑兩輪（算術＋事實＋格式三項全對才算過）。
+  // 括號是實測延遲區間；不吃 reasoning_effort（那是 claude/codex 的 CLI 旗標）。
+  'nv-poolside/laguna-xs-2.1',                        // 2.5–2.7s，最快且延遲最穩
+  'nv-nvidia/ising-calibration-1.5-31b',              // 2.5–2.7s
+  'nv-google/diffusiongemma-26b-a4b-it',              // 2.8–3.8s
+  'nv-meta/muse-glimmer-30b',                         // 2.9–3.4s
+  'nv-nvidia/nemotron-3.5-lightning-30b-a3b',         // 2.9–20.1s，延遲跳很大
+  'nv-nvidia/nemotron-3-super-120b-a12b',             // 3.3–9.0s
+  'nv-nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', // 3.5–7.2s
+  'nv-openai/gpt-oss-20b',                            // 4.5–6.6s
+  'nv-moonshotai/kimi-k3',                            // 7.8–22.2s，慢
+  'nv-google/gemma-4-31b-it',                         // 8.0–25.8s，慢
+  'nv-nvidia/nemotron-3-ultra-550b-a55b',             // 10.8s，兩輪只過一輪
 ] as const;
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/;
@@ -879,6 +911,7 @@ function formatExecError(error: unknown): string {
 function execRg(command: string, workFolder: string, noMatchOk = true): string {
   try {
     return execSync(command, {
+      env: buildWorkerEnv(),
       cwd: pathResolve(workFolder),
       encoding: 'utf-8',
       maxBuffer: 10 * 1024 * 1024,
@@ -934,6 +967,7 @@ function executeTool(name: string, rawArgs: unknown, workFolder: string): ToolEx
       const command = requireStringArg(args, 'command', name);
       try {
         const output = execSync(command, {
+          env: buildWorkerEnv(),
           cwd: pathResolve(workFolder),
           encoding: 'utf-8',
           timeout: BASH_TIMEOUT_MS,
@@ -1606,7 +1640,8 @@ async function runDirect(cmd: BuiltCommand, io: DirectRunIO): Promise<void> {
   const existing = readSession(sessionPath);
   const toolsEnabled = !NO_TOOLS_MARKER.test(cmd.prompt);
   const prompt = toolsEnabled ? cmd.prompt : cmd.prompt.replace(NO_TOOLS_MARKER, '');
-  const userMessage = await buildUserMessage(prompt, cmd.cwd);
+  // 先解析 [no-tools]，再加身分鎖，保留控制標記與 image/prompt_file 的既有行為。
+  const userMessage = await buildUserMessage(withWorkerContext(prompt), cmd.cwd);
   const messages = [...(existing?.messages || []), userMessage];
   const state: StreamState = {
     sessionId,
@@ -1717,7 +1752,27 @@ export const directApiAgent: AgentDefinition = {
       是不同的錢。消費端必須看得出差別，不能混在同一組選項裡。
   */
   billingRoute: 'metered-api',
-  matchesModel: (model) => model.startsWith('or-') || model.startsWith('ds-'),
+  /*
+    ★ 用 resolveDirectApiModel 而不是自己寫一套前綴判斷。
+
+    舊寫法是 `model.startsWith('or-') || model.startsWith('ds-')`，只認兩個
+    內建前綴。但真正決定路由的是 command-builder 先呼叫的 resolveDirectApiModel，
+    它**會**讀 providers.json 的 provider key。兩邊不一致的後果是：使用者自己設的
+    provider（例如 nv）派得動，catalog 卻把它標成 `routable: false`——標示與現實
+    打架，而 catalog 存在的意義就是讓呼叫端不必自己猜。
+
+    解析失敗（丟錯）時回 true 而不是 false：那代表「形狀像 direct-api 但寫壞了」，
+    例如 `ds-` 後面沒接 model。這種要由 direct-api 自己丟出明確錯誤，
+    回 false 會讓它掉進 claude 的 catch-all 靜默改跑 Claude——
+    這個 repo 已經為同類的靜默路由吃過虧（見 REMOVED_MODELS 的註解）。
+  */
+  matchesModel: (model) => {
+    try {
+      return resolveDirectApiModel(model) !== null;
+    } catch {
+      return true;
+    }
+  },
   reasoning: {
     supported: false,
     unsupportedMessage: 'reasoning_effort is not supported for direct-api.',

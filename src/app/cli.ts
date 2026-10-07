@@ -14,6 +14,7 @@ import { runExec } from './exec.js';
 import { validatePeekPids, validatePeekTimeSec } from '../core/peek.js';
 import { runUsagePlugin } from '../plugins/usage.js';
 import { runUpdateCli } from '../core/updater.js';
+import { assertCanStartJob } from '../core/worker-env.js';
 
 export const CLI_HELP_TEXT = `Usage: ai-cli <command> [options]
 
@@ -323,6 +324,8 @@ export async function runCli(argv: string[], deps: Partial<CliDeps> = {}): Promi
       stdout(RUN_HELP_TEXT);
       return 0;
     }
+    try { assertCanStartJob(); }
+    catch (error) { stderr(`${(error as Error).message}\n`); return 1; }
     const cwd = getFirstFlag(flags, ['cwd', 'workFolder', 'work-folder']);
     if (!cwd) {
       stderr('Missing required option: --cwd\n');

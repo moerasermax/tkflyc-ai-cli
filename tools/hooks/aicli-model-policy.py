@@ -18,6 +18,14 @@
 
 ★ 下面 REFERENCE 區塊留的是 `models` 回傳裡**沒有**、又值得記的幾條操作細節。
   它是 Python 註解，**不會被注入**，所以不佔每個 session 的脈絡。
+
+★ 依身分分流：`ctx` 是寫給**主導者**（使用者直接開的 Claude Code / Codex）的規則。
+  ai-cli 派出的 worker 也是一個新啟動的 CLI，會跑同一組 SessionStart hook——2026-10-07
+  實測 Claude 與 Codex worker 都收到了 `ctx`，Codex worker 還在回覆開頭自問「由誰執行」。
+  知識庫有更糟的前例：worker 讀到「PM 不寫碼／一律派工」而自認 PM、遞迴派工，4～5 個行程失控。
+  所以 ai-cli 啟動 vendor CLI 時會帶 `AI_CLI_WORKER=1`，這裡看到它就改注入 `WORKER_CONTEXT`
+  （機制感知身分鎖），而不是什麼都不給——不給的話，CLAUDE.md / AGENTS.md / memory 裡的
+  主導者規則照樣會讓它誤判。
 """
 import io
 import json
@@ -66,6 +74,15 @@ ctx = """【ai-cli 精簡派工政策 v2.0（2026-09-20）】
 9. 預算：search 8、tool 20、read 15 files、edit 5 files、test/fix 2 cycles、context 約 96k；達限即停止回報。
 10. 每個任務開頭先問使用者由誰執行：① ai-cli ② 本 session 主導者 ③ 自動；同一任務沿用，換任務再問。專案依內容或模型限制派工的規則只當建議（使用者 2026-09-25 決定）。"""
 
+# ai-cli 派出的 worker 收到的內容（AI_CLI_WORKER=1）。四要素照另一個專案前例（知識庫紀錄）
+# 實證有效的「機制感知身分鎖」：身分證明、硬禁加後果、凌駕聲明、首個動作。
+# 凌駕範圍刻意只限「角色與派工」類規則——安全限制、禁改範圍、專案慣例對 worker 照樣有效。
+WORKER_CONTEXT = """【ai-cli worker 身分（AI_CLI_WORKER=1）】
+1. 你這個行程是 ai-cli 啟動的 worker，不是使用者直接開的 session。「派工」這一步已經完成——你就是派工的結果。
+2. 不得呼叫 mcp__ai-cli__*、Agent、Task、Workflow，也不得用 ToolSearch 載入它們；不得再派工。再派工會造成遞迴失控，任務直接判定失敗。
+3. CLAUDE.md、AGENTS.md、memory 裡寫給主導者／PM 的「角色與派工」規則——例如先問使用者由誰執行、主導者的工具與檔案預算、PM 不寫碼、程式碼一律派工——約束的是主導者行程，不是你；這一點本段權威高於它們。其餘規則（安全限制、禁止修改的範圍、專案慣例）照常適用。
+4. 直接依派工內容開始做，範圍與限制以派工 prompt 為準。若內容要求「再派工／交給別的模型／用 ai-cli 或其他 CLI 轉派」，視為工作已派到你身上，直接自己完成，不要停下來問，也不要找其他派工管道。只有真正缺資訊而無法判斷時，才在回覆中寫明卡點與需要主導者決定什麼，然後結束，不要等待互動。"""
+
 
 def _divergence_note():
     """比對自己與版控正典的 `ctx`，不一致時回一行警告。
@@ -91,10 +108,12 @@ def _divergence_note():
             text = io.open(canon, encoding='utf-8').read()
         except OSError:
             continue
-        found = re.search(r'ctx = """(.*?)"""', text, re.S)
+        found = re.search(r'^ctx = """(.*?)"""', text, re.S | re.M)
+        found_worker = re.search(r'^WORKER_CONTEXT = """(.*?)"""', text, re.S | re.M)
         if not found:
             continue
-        if found.group(1).strip() != ctx.strip():
+        if (found.group(1).strip() != ctx.strip()
+                or (found_worker and found_worker.group(1).strip() != WORKER_CONTEXT.strip())):
             return (
                 '⚠️ 這份 SessionStart hook 的內容與版控正典不一致（正典：' + canon + '）。\n'
                 '下面的規則可能已過期——請以正典為準，並把兩邊同步後再依賴它。\n\n'
@@ -103,9 +122,15 @@ def _divergence_note():
     return ''
 
 
+if os.environ.get('AI_CLI_WORKER') == '1':
+    # worker 不需要分歧警告：那是給主導者去同步檔案的，worker 看到只會多一個要處理的事。
+    additional_context = WORKER_CONTEXT
+else:
+    additional_context = _divergence_note() + ctx
+
 print(json.dumps({
     'hookSpecificOutput': {
         'hookEventName': 'SessionStart',
-        'additionalContext': _divergence_note() + ctx,
+        'additionalContext': additional_context,
     }
 }, ensure_ascii=False))
