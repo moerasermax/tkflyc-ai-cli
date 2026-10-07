@@ -8,6 +8,15 @@
 
 ## [Unreleased]
 
+## [6.6.0] - 2026-10-07
+
+> worker 防遞迴的一批：ai-cli 啟動的 CLI 帶 `AI_CLI_WORKER=1`、派工政策 hook 依身分分流、帶標記的 ai-cli 拒絕再派工、
+> agy／direct-api 的 prompt 開頭加 worker 身分鎖、direct-api 的 bash 子行程也帶標記；新增全模型驗收工具
+> `npm run verify:worker-identity`；`models` 的 direct-api 清單加入 11 顆實測可用的 NVIDIA 免費模型。
+> 新增功能為主（SemVer MINOR）；**看得到的行為變化有三處**：ai-cli 在 `AI_CLI_WORKER=1` 的環境裡執行
+> `run`／`exec` 會回 `AI_CLI_NESTED_DISPATCH_BLOCKED`（確定要巢狀派工時設 `AI_CLI_ALLOW_NESTED=1`）、
+> 派給 agy／direct-api 的 prompt 開頭多一段身分鎖、使用者自設 provider 的模型在 catalog 改為正確的 `routable`。
+
 ### 修正（worker 遞迴防護 F1–F3 與驗收行程隔離 G1–G2）
 
 - H1／H2 審查修正：本機 ConPTY stub 重現完成後殘留 MessagePort／pipe，驗收器釋放已結束 job 串流，報告、監控收尾與輸出排空後按報告碼退出自身；每項 run 立即複製 direct-api session 與其他 agent 可取得的 session 紀錄至 evidence 並附報告連結，A=有但缺少／錯誤第一行原文改列「探針回答不可信」能力類，只有正確主導者政策標題才列安全性失敗，補完整生命週期、存證與分類 stub 測試。（Codex）
