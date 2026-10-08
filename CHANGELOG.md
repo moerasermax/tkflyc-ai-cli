@@ -8,6 +8,14 @@
 
 ## [Unreleased]
 
+## [6.7.0] - 2026-10-08
+
+> 跨 session 的 job 監看：每個 ai-cli 行程把自己追蹤的 job 發佈到共用狀態目錄，`ai-cli jobs [--watch|--json|--running]`
+> 聚合所有 session（MCP 與 CLI 派的 job）——Claude Code 與 Codex 當主導者都能在旁邊的終端機看到派工進度。
+> 另含驗收工具兩項判定修正（逾時改歸能力類、hook 比對忽略換行差異）與 `SECURITY.md` 的文件更新。
+> 新增功能為主（SemVer MINOR）；**看得到的行為變化一處**：`ai-cli run` 在 Windows 上改為先回 PID、身分查詢改非同步
+> （實測拿到 PID 由 2.1～2.7 秒降到 0.27～0.53 秒），行程會在補寫 metadata 後才結束。
+
 ### 新增（跨 session job 監看）
 
 - 新增唯讀 `ai-cli jobs [--watch] [--json] [--running]`，聚合所有 session 的 MCP job 摘要與 CLI detached 狀態；MCP 以每行程的原子快照及兩秒節流發佈，只存短任務摘要、模型／effort、事件與派工端資訊，依 OS 的 PID＋建立時間排除殘檔與 PID 重用，完成紀錄保留十分鐘。依獨立稽核修正 macOS ps 非零退出保留有效結果、寫端安全回收過期殘檔、CLI 未驗證身分仍顯示及合併非同步身分查詢／快取派工端；補強刷新容差、閒置省寫、錯誤去重與恢復提示、讀檔重試、OSC 過濾、非 TTY watch、發佈 rejection 收尾，並釐清 lastEvent 可能含模型回覆片段。加入 stub 回歸與關鍵突變驗證，中英文 README 與 help 同步補充。（Codex）
