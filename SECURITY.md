@@ -13,8 +13,12 @@ Two consequences follow, and they are the security-relevant facts about this pro
    MCP server, the `ai-cli` command, or the detached runner to untrusted input or to
    a network boundary.
 2. **It reads provider credentials.** API keys for third-party OpenAI-compatible
-   providers live in `providers.json` under the user's data directory, in plaintext
-   today. Anything that can read that file can use those keys.
+   providers live in `providers.json` under the user's data directory, in plaintext,
+   by design. Anything that can read that file can use those keys, including any
+   process running as you, such as a dispatched agent. Protecting them is the
+   operator's job: put a spending limit on each key, keep the file out of backups,
+   synced folders and repositories, and `chmod 600` it on shared POSIX hosts.
+   The reasoning is in [#9](https://github.com/moerasermax/tkflyc-ai-cli/issues/9).
 
 If you are considering running this in a shared, multi-tenant, or CI context, the
 answer is that it was not built for that.
