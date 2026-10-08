@@ -927,8 +927,8 @@
     "name": "Strict builder 丟掉成本警告",
     "file": "src/core/command-builder.ts",
     "script": "verify-job-usage.mjs",
-    "from": "return { ...strict(input, options.capabilities), ...warningFields };",
-    "to": "return { ...strict(input, options.capabilities) };",
+    "from": "return { ...strict(input, options.capabilities), reasoningEffort, ...warningFields };",
+    "to": "return { ...strict(input, options.capabilities), reasoningEffort };",
     "expect": "Strict builder preserves warning"
   },
   {
@@ -1610,5 +1610,261 @@
     "to": "    const same = Buffer.from(installed).equals(Buffer.from(canonical));",
     "expect": "hook stub 忽略 CRLF/LF 差異但保留其他每個位元組",
     "script": "verify-worker-identity.mjs"
+  },
+  {
+    "name": "[jobs] missing initial publication",
+    "file": "src/core/live-jobs.ts",
+    "from": "    this.publish(true);\n  }\n  publish(force = false)",
+    "to": "    // mutation: no initial publication\n  }\n  publish(force = false)",
+    "expect": "publish sanitized summary and schema",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] task exceeds 40 characters",
+    "file": "src/core/live-jobs.ts",
+    "from": "|| '', 40);",
+    "to": "|| '', 400);",
+    "expect": "publish sanitized summary and schema",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] output writes are not throttled",
+    "file": "src/core/live-jobs.ts",
+    "from": "    if (!force && now - this.lastWrite < JOB_REFRESH_MS - 50) return;",
+    "to": "    // mutation: no throttle",
+    "expect": "throttle output refresh at two seconds",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] terminal update incorrectly throttled",
+    "file": "src/core/live-jobs.ts",
+    "from": "if (!force && now - this.lastWrite < JOB_REFRESH_MS - 50)",
+    "to": "if (now - this.lastWrite < JOB_REFRESH_MS - 50)",
+    "expect": "forced terminal update bypasses throttle",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] terminal records never expire",
+    "file": "src/core/live-jobs.ts",
+    "from": "return job.status === 'running' || (!!job.endTime && now - Date.parse(job.endTime) < JOB_RETENTION_MS);",
+    "to": "return true;",
+    "expect": "terminal retention expires after ten minutes",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] overwrite instead of atomic rename",
+    "file": "src/core/live-jobs.ts",
+    "from": "      renameSync(temp, this.filePath);",
+    "to": "      writeFileSync(this.filePath, readFileSync(temp));",
+    "expect": "atomic reader sees previous complete snapshot until rename",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] ignore PID creation time",
+    "file": "src/core/live-jobs.ts",
+    "from": "if (!identity || identity.started !== snapshot.owner.started) return [];",
+    "to": "if (!identity) return [];",
+    "expect": "stale owner and PID reuse excluded without deleting",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] accept dead owner snapshot",
+    "file": "src/core/live-jobs.ts",
+    "from": "if (!identity || identity.started !== snapshot.owner.started) return [];",
+    "to": "if (identity && identity.started !== snapshot.owner.started) return [];",
+    "expect": "stale owner and PID reuse excluded without deleting",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] aggregate only first session",
+    "file": "src/core/live-jobs.ts",
+    "from": "return snapshots.flatMap(snapshot => {",
+    "to": "return snapshots.slice(0, 1).flatMap(snapshot => {",
+    "expect": "aggregate two OS processes and concurrent atomic reads",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] ignore json option",
+    "file": "src/app/jobs.ts",
+    "from": "const json = args.includes('--json');",
+    "to": "const json = false;",
+    "expect": "jobs json and running options select correct rows",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] invert running filter",
+    "file": "src/app/jobs.ts",
+    "from": "jobs = jobs.filter(job => job.status === 'running');",
+    "to": "jobs = jobs.filter(job => job.status !== 'running');",
+    "expect": "jobs json and running options select correct rows",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] overflow narrow terminal",
+    "file": "src/app/jobs.ts",
+    "from": "if (displayWidth(output + character) > width) break;",
+    "to": "if (displayWidth(output + character) > width + 20) break;",
+    "expect": "table statuses model effort elapsed dispatcher and narrow CJK",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] watch exits after first frame",
+    "file": "src/app/jobs.ts",
+    "from": "const watch = args.includes('--watch');",
+    "to": "const watch = false;",
+    "expect": "watch repeats then Ctrl+C removes handlers",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] block readonly jobs in workers",
+    "file": "src/app/cli.ts",
+    "from": "if (command === 'jobs') return runJobs(argv.slice(1), { stdout, stderr });",
+    "to": "if (command === 'jobs') { assertCanStartJob(); return runJobs(argv.slice(1), { stdout, stderr }); }",
+    "expect": "worker jobs remains allowed and help advertises options",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] skip owner cleanup on exit",
+    "file": "src/core/live-jobs.ts",
+    "from": "    try { rmSync(this.filePath, { force: true }); } catch {}",
+    "to": "    // mutation: no owner cleanup",
+    "expect": "dispose removes owner snapshot and timer",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] treat reused CLI PID as running",
+    "file": "src/core/file-process-service.ts",
+    "from": "(identity && started !== undefined && identity.started !== started)",
+    "to": "false",
+    "expect": "CLI detached stub included after launcher and readonly projection",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] readonly command creates state directory",
+    "file": "src/core/file-process-service.ts",
+    "from": "if (!options.readOnly) mkdirSync(this.stateDir, { recursive: true });",
+    "to": "mkdirSync(this.stateDir, { recursive: true });",
+    "expect": "CLI detached stub included after launcher and readonly projection",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] skip immediate MCP terminal publication",
+    "file": "src/core/process-service.ts",
+    "from": "queueMicrotask(() => this.publishJobs());",
+    "to": "// mutation: no immediate terminal snapshot",
+    "expect": "MCP stub publishes start output terminal and cleanup",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] readonly binary clears updater notice",
+    "file": "src/bin/ai-cli.ts",
+    "from": "  if (process.argv[2] !== 'mcp' && process.argv[2] !== 'jobs') {",
+    "to": "  if (process.argv[2] !== 'mcp') {",
+    "expect": "binary worker jobs preserves updater state and stdout JSON",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] reused directory retains old output event",
+    "file": "src/core/file-process-service.ts",
+    "from": "      if (!cached || cached.startTime !== proc.startTime || size < cached.offset) {",
+    "to": "      if (!cached || size < cached.offset) {",
+    "expect": "CLI reused directory resets cached output identity",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs] POSIX session timezone changes creation token",
+    "file": "src/core/live-jobs.ts",
+    "from": "LC_ALL: 'C', TZ: 'UTC'",
+    "to": "LC_ALL: 'C'",
+    "expect": "POSIX creation token uses stable UTC across session timezones",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs audit] partial ps discards valid stdout",
+    "file": "src/core/live-jobs.ts",
+    "from": "stdout = typeof (error as { stdout?: unknown }).stdout === 'string' ? (error as { stdout: string }).stdout : '';",
+    "to": "stdout = '';",
+    "expect": "POSIX partial nonzero ps preserves live owners",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs audit] GC deletes live owner",
+    "file": "src/core/live-jobs.ts",
+    "from": "    if (identity ? identity.started === snapshot.owner.started : alive(snapshot.owner.pid)) continue;",
+    "to": "    // mutation: delete live owner too",
+    "expect": "publisher GC removes only expired proven stale owners",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs audit] CLI hides unverified job",
+    "file": "src/core/file-process-service.ts",
+    "from": "          identityVerified = !!identity && started !== undefined && identity.started === started;",
+    "to": "          if (identity && proc.dispatcher && !started) continue;\n          identityVerified = !!identity && started !== undefined && identity.started === started;",
+    "expect": "CLI missing creation token remains running and unverified",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs audit] CLI waits for identity before PID",
+    "file": "src/core/file-process-service.ts",
+    "from": "    const result = await this.startDetachedTracked(cmd, options.model);",
+    "to": "    const result = await this.startDetachedTracked(cmd, options.model);\n    await flushJobIdentities();",
+    "expect": "CLI identity batching caches dispatcher without blocking PID",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs audit] dispatcher cache is bypassed",
+    "file": "src/core/file-process-service.ts",
+    "from": "this.dispatcherReady ? [pid] : [pid, process.pid, process.ppid]",
+    "to": "[pid, process.pid, process.ppid]",
+    "expect": "CLI identity batching caches dispatcher without blocking PID",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs audit] idle snapshots rewrite unchanged jobs",
+    "file": "src/core/live-jobs.ts",
+    "from": "    if (!force && !jobs.some(job => job.status === 'running') && content === this.lastContent) return;",
+    "to": "    // mutation: always rewrite idle snapshot",
+    "expect": "idle snapshots skip unchanged writes and still expire terminal jobs",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs audit] snapshot errors flood stderr",
+    "file": "src/core/live-jobs.ts",
+    "from": "if (message !== this.lastError) console.error",
+    "to": "console.error",
+    "expect": "write errors deduplicate and log recovery once",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs audit] reader omits transient retry",
+    "file": "src/core/live-jobs.ts",
+    "from": "attempt < 2",
+    "to": "attempt < 1",
+    "expect": "reader retries transient file errors without writes",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs audit] OSC titles leak into summary",
+    "file": "src/core/live-jobs.ts",
+    "from": "value.replace(/\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)/g, '')",
+    "to": "value",
+    "expect": "OSC titles are removed with BEL and ST terminators",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs audit] non TTY watch clears screen",
+    "file": "src/app/jobs.ts",
+    "from": "watch && deps.isTTY()",
+    "to": "watch",
+    "expect": "non TTY watch appends plain frames",
+    "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "[jobs audit] publication rejection remains unhandled",
+    "file": "src/core/process-service.ts",
+    "from": "    }).catch(() => { this.publishing = undefined; });",
+    "to": "    });",
+    "expect": "MCP publication rejection resets promise and retries",
+    "script": "verify-jobs.mjs"
   }
 ]

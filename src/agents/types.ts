@@ -26,6 +26,8 @@ export interface BuiltCommand {
   agent: AgentId;
   prompt: string;
   resolvedModel: string;
+  /** core 附加的最終 reasoning 選值，供監看摘要使用。 */
+  reasoningEffort?: string;
   sessionId?: string;
   /** 若為字串，prompt 透過 stdin（positional `-`）送入，而非當作 arg。 */
   stdinPrompt?: string;

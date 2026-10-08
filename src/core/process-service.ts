@@ -15,7 +15,7 @@ import type { AgentId } from '../agents/types.js';
 import { getAgent } from '../agents/registry.js';
 import { buildCliCommand, type BuildCliCommandOptions } from './command-builder.js';
 import { buildProcessResult } from './process-result.js';
-import { buildLiveness, emptyOutputStats, listProcessTiming, type ProcessOutputStats } from './liveness.js';
+import { buildLiveness, emptyOutputStats, elapsedSeconds, listProcessTiming, type ProcessOutputStats } from './liveness.js';
 import {
   LivenessEventExtractor,
   PeekEventExtractor,
@@ -30,6 +30,7 @@ import {
 } from './peek.js';
 import { spawnPty, type PtyChild } from './pty-runner.js';
 import { CircuitBreaker } from './circuit-breaker.js';
+import { currentDispatcher, processJobPublisher, shortText, taskSummary, type LiveJobPublisher, type JobDispatcher, type LiveJob } from './live-jobs.js';
 
 export type CliPaths = Record<Exclude<AgentId, 'direct-api'>, string>;
 
@@ -86,6 +87,8 @@ interface ProcessEntry extends ProcessOutputStats {
   workFolder: string;
   model?: string;
   toolType: AgentId;
+  resolvedModel?: string;
+  reasoning_effort?: string;
   startTime: string;
   endTime?: string;
   closed: boolean;
@@ -100,6 +103,31 @@ export class ProcessService {
   private cliPaths: CliPaths;
   private breaker: CircuitBreaker;
   private directPidSequence = 0;
+  private publisher?: LiveJobPublisher;
+  private publishing?: Promise<void>;
+  private dispatcher: JobDispatcher = { pid: process.pid, parentPid: process.ppid };
+
+  private publishJobs(): void {
+    if (this.publisher) { this.publisher.publish(true); return; }
+    this.publishing ??= Promise.all([processJobPublisher(), currentDispatcher()]).then(([publisher, dispatcher]) => {
+      this.dispatcher = dispatcher;
+      this.publisher = publisher;
+      publisher?.setSource(this, () => this.jobSummaries());
+      if (!publisher) this.publishing = undefined;
+    }).catch(() => { this.publishing = undefined; });
+  }
+
+  private jobSummaries(): LiveJob[] {
+    return [...this.processManager.values()].map(entry => ({
+      pid: entry.pid, agent: entry.toolType, model: entry.resolvedModel || entry.model || null, reasoning_effort: entry.reasoning_effort ?? null,
+      task: taskSummary(entry.prompt), workFolder: entry.workFolder, status: entry.status,
+      startTime: entry.startTime, endTime: entry.endTime,
+      elapsedSec: elapsedSeconds(entry.startTime, entry.endTime ?? Date.now()),
+      sinceLastOutputSec: entry.lastOutputAt ? Math.max(0, ((entry.endTime ? Date.parse(entry.endTime) : Date.now()) - Date.parse(entry.lastOutputAt)) / 1000) : null,
+      lastEvent: entry.lastEvent === null ? null : shortText(entry.lastEvent, 80),
+      dispatcher: this.dispatcher, source: 'mcp',
+    }));
+  }
 
   constructor(options: { cliPaths: CliPaths; breaker?: CircuitBreaker }) {
     this.cliPaths = options.cliPaths;
@@ -162,7 +190,9 @@ export class ProcessService {
       const entry = childProcess.pid ? this.processManager.get(childProcess.pid) : undefined;
       if (entry) {
         entry.status = 'failed';
+        entry.endTime = new Date().toISOString();
         entry.stderr += `\nProcess error: ${error.message}`;
+        this.publishJobs();
       }
     });
 
@@ -189,6 +219,8 @@ export class ProcessService {
       prompt: cmd.prompt,
       workFolder: cmd.cwd,
       model: options.model,
+      resolvedModel: cmd.resolvedModel,
+      reasoning_effort: cmd.reasoningEffort || undefined,
       toolType: cmd.agent,
       startTime: new Date().toISOString(),
       stdout: '',
@@ -218,6 +250,7 @@ export class ProcessService {
 
   /** pipe、PTY（合併為 stdout）與 direct-api 都經過同一個 chunk 記帳入口。 */
   private observeOutput(entry: ProcessEntry): void {
+    this.publishJobs();
     const extractors = {
       stdout: new LivenessEventExtractor(entry.toolType),
       stderr: new LivenessEventExtractor(entry.toolType),
@@ -239,6 +272,8 @@ export class ProcessService {
       entry.endTime = new Date().toISOString();
       recordEvents(extractors.stdout.flush());
       recordEvents(extractors.stderr.flush());
+      // pipe 的 status listener 比 observeOutput 晚註冊，等本輪 close listeners 完成。
+      queueMicrotask(() => this.publishJobs());
     });
   }
 
@@ -260,6 +295,8 @@ export class ProcessService {
       prompt: cmd.prompt,
       workFolder: cmd.cwd,
       model,
+      resolvedModel: cmd.resolvedModel,
+      reasoning_effort: cmd.reasoningEffort || undefined,
       toolType: cmd.agent,
       startTime: new Date().toISOString(),
       stdout: '',
@@ -337,6 +374,8 @@ export class ProcessService {
       prompt: cmd.prompt,
       workFolder: cmd.cwd,
       model,
+      resolvedModel: cmd.resolvedModel,
+      reasoning_effort: cmd.reasoningEffort || undefined,
       toolType: cmd.agent,
       startTime: new Date().toISOString(),
       stdout: '',
@@ -554,6 +593,7 @@ export class ProcessService {
     entry.status = 'failed';
     entry.endTime = new Date().toISOString();
     entry.stderr += '\nProcess terminated by user';
+    this.publishJobs();
     return { pid, status: 'terminated', message: 'Process terminated successfully' };
   }
 
@@ -565,6 +605,7 @@ export class ProcessService {
         this.processManager.delete(pid);
       }
     }
+    this.publishJobs();
     return {
       removed: removedPids.length,
       removedPids,

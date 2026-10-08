@@ -514,6 +514,46 @@ claude agent 的 `matchesModel` 是 registry 最後一位的 catch-all（永遠�
   注意 `forge-<model>` 不受影響——那會被讀成 direct-api 的 provider `forge` 加上 model。
 - 回歸測試：`node verify-alias-config.mjs`（65 項，已納入 `npm test`）。
 
+## 跨 session 監看 job
+
+在旁邊開一個終端機，使用同一個狀態目錄：
+
+```sh
+ai-cli jobs                  # 所有 MCP session 與 CLI job 的一次性表格
+ai-cli jobs --watch          # 每兩秒更新，Ctrl+C 結束
+ai-cli jobs --json           # JSON 陣列，含 metadata 與時間
+ai-cli jobs --running        # 只看 running，可搭配 watch/json
+ai-cli jobs --watch --json   # 每次更新印一行 JSON 陣列（NDJSON）
+```
+
+表格列出狀態（轉圈／✓／✗；lost 為 ?）、agent、解析後的 model 與 effort、
+prompt 第一個有意義行的 40 字摘要、經過時間 m:ss、最後事件及派工端（父行程名稱＋
+ai-cli PID）。窄終端機會截短欄位，避免換行。父行程可能是 shell 或 Node launcher；
+無法取得名稱時顯示 `unknown`。
+
+MCP 行程把摘要寫到 `AI_CLI_STATE_DIR/live-jobs/<pid>-<建立時間token>.json`，
+預設為 `~/.local/state/ai-cli/live-jobs/`。格式版本 1，最外層為 `owner`、
+`updatedAt`、`jobs`；每筆 job 有 `pid`、`agent`、`model`、`reasoning_effort`、
+`task`、`workFolder`、`status`、`startTime`、`endTime`、`elapsedSec`、
+`sinceLastOutputSec`、`lastEvent`、`dispatcher`、`source`，不複製完整 prompt 或完整輸出 log。
+`lastEvent` 只存最後事件的 80 字摘要，可能包含模型回覆片段。
+開始與狀態變更立即寫入；執行中 liveness 每兩秒最多更新一次，先寫暫存檔再 rename。
+正常退出會刪除自己的快照；讀端核對 OS 的 PID＋建立時間，略過已退出或 PID 重用的
+殘檔，不刪檔。完成／失敗摘要十分鐘後移出快照；MCP server 退出或明確 cleanup 時
+會更早消失。
+建立 publisher 時由寫端回收超過十分鐘且已確認 owner 死亡或建立時間不同的殘檔。
+閒置且內容未變時不重寫快照；執行中刷新容許 50 ms 的計時器誤差。
+
+CLI detached job 沿用 `cwds/*/*/meta.json`、`exit-status.json` 與輸出檔，啟動端
+退出後仍能查看；新版 meta 附被追蹤行程的建立時間及派工端，舊版沒有這些資訊，
+沿用 PID 存活判讀並顯示未知派工端。`jobs` 全程唯讀，`AI_CLI_WORKER=1` 下也能執行。
+CLI job 的 PID 仍活著但無法取得建立身分時，仍顯示 `running`，JSON 附
+`identityVerified: false`，表格派工端標示 `[unverified]`；此退化行為無法排除 PID 重用。
+spawn 後以一次查詢合併 job 與派工端身分，派工端在 service instance 快取；
+`run` 先輸出 PID，CLI 退出前再等待 metadata 補寫完成。
+要聚合的所有 session 必須共用 `AI_CLI_STATE_DIR`。Windows 用 CIM、Linux 用 `/proc`、
+macOS 用 `ps` 查身分；無法查證快照 owner 時先略過，下次更新重試。
+
 ## 等待端怎麼知道 AI 還活著
 
 `wait` 逾時只代表這次觀察時間用完，程序會繼續跑。以前兩條路徑都丟

@@ -52,7 +52,7 @@
     "cli": "node dist/bin/ai-cli.js",
     "typecheck": "tsc --noEmit",
     "pretest": "npm run build",
-    "test": "node tests/verify-breaker.mjs && node tests/verify-rate.mjs && node tests/verify-direct-api.mjs && node tests/verify-extra-body.mjs && node --import ./tools/stubs/catalog-test-env.mjs tests/verify-alias-config.mjs && node tests/verify-catalog-source.mjs && node tests/verify-agy-parse.mjs && node tests/verify-usage-parse.mjs && node tests/verify-job-usage.mjs && node tests/verify-exec-contract.mjs && node tests/verify-mcp-capabilities.mjs && node tests/verify-mcp-system-prompt.mjs && node tests/verify-mcp.mjs && node tests/verify-liveness.mjs && node tests/verify-update.mjs && node tests/verify-worker-identity.mjs && node tests/verify-worker-guards.mjs && node tests/verify-mutation-manifest.mjs",
+    "test": "node tests/verify-breaker.mjs && node tests/verify-rate.mjs && node tests/verify-direct-api.mjs && node tests/verify-extra-body.mjs && node --import ./tools/stubs/catalog-test-env.mjs tests/verify-alias-config.mjs && node tests/verify-catalog-source.mjs && node tests/verify-agy-parse.mjs && node tests/verify-usage-parse.mjs && node tests/verify-job-usage.mjs && node tests/verify-exec-contract.mjs && node tests/verify-mcp-capabilities.mjs && node tests/verify-mcp-system-prompt.mjs && node tests/verify-mcp.mjs && node tests/verify-liveness.mjs && node tests/verify-update.mjs && node tests/verify-worker-identity.mjs && node tests/verify-worker-guards.mjs && node tests/verify-jobs.mjs && node tests/verify-mutation-manifest.mjs",
     "verify:worker-identity": "node tools/acceptance/worker-identity.mjs",
     "verify:strict-behaviour": "node tests/verify-strict-behaviour.mjs",
     "release:check": "node tools/verify-release.mjs",

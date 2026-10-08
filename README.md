@@ -74,12 +74,62 @@ src/
 The split is the point: `agents/` is data about each CLI, `core/` is the machinery.
 A new backend never requires editing the machinery.
 
-Job state lives in memory for the MCP server and in files for the CLI, so a CLI job
+Job state lives in memory for the MCP server, with short shared monitoring snapshots, and in files for the CLI, so a CLI job
 can be observed by a later command. Pipe-based CLI jobs run through a detached
 wrapper and outlive the command that started them. The PTY path — used for CLIs that
 only produce output on a real TTY — is not detached, and `direct-api` starts no
 subprocess at all: on the CLI it runs in-process and blocks until the request
 finishes, while the MCP server still returns a PID immediately.
+
+## Watching jobs across sessions
+
+Open another terminal using the same state directory:
+
+```sh
+ai-cli jobs                  # One table across MCP sessions and CLI jobs
+ai-cli jobs --watch          # Refresh every 2 seconds; Ctrl+C exits
+ai-cli jobs --json           # JSON array with metadata and timing
+ai-cli jobs --running        # Only running jobs; combines with watch/json
+ai-cli jobs --watch --json   # One compact JSON array per refresh (NDJSON)
+```
+
+The table shows status (spinner / ✓ / ✗ / ? for lost), agent, resolved model and
+reasoning effort, a 40-character task summary, elapsed m:ss, the last short event,
+and the dispatching process's parent name plus the ai-cli PID. Narrow terminals
+truncate columns without wrapping. Parent names can be shells or Node launchers;
+if the OS cannot provide a name, the table shows `unknown`.
+
+MCP processes publish `AI_CLI_STATE_DIR/live-jobs/<pid>-<creation-token>.json`
+(default `~/.local/state/ai-cli/live-jobs/`). Version 1 snapshots contain `owner`,
+`updatedAt`, and `jobs`; each job contains `pid`, `agent`, `model`,
+`reasoning_effort`, `task`, `workFolder`, `status`, `startTime`, `endTime`,
+`elapsedSec`, `sinceLastOutputSec`, `lastEvent`, `dispatcher`, and `source`.
+Full prompts and full output logs are never copied into these snapshots.
+`lastEvent` stores only an 80-character summary of the last event and may contain
+a model response excerpt.
+Starts and status changes publish immediately; running liveness is throttled
+to at most one write per two seconds. Writes use a temporary file plus rename.
+Normal process exit removes its snapshot. Readers compare the owner's PID and
+OS creation token, ignoring dead owners and reused PIDs without deleting files.
+When a publisher is created, the writer collects snapshots older than ten minutes
+only after confirming that their owner is dead or has a different creation token.
+Unchanged idle snapshots are not rewritten; running refreshes allow 50 ms of timer tolerance.
+Completed/failed summaries expire after ten minutes, or earlier when their MCP
+server exits or explicit cleanup removes them.
+
+CLI detached jobs reuse existing `cwds/*/*/meta.json`, `exit-status.json`, and
+output logs, so they remain visible after the launching CLI exits. New metadata
+records the tracked process's creation token and dispatcher; legacy metadata
+has no creation token or dispatcher and keeps its older PID-only interpretation.
+CLI jobs with a live PID but unavailable creation identity remain `running` with
+`identityVerified: false` in JSON and `[unverified]` in the dispatcher column.
+This fallback cannot rule out PID reuse. Identity capture runs after spawn in one
+batch with the dispatcher, cached per service instance; `run` emits its PID before
+waiting for metadata persistence at CLI exit.
+`jobs` reads these files without updating them and works in `AI_CLI_WORKER=1`.
+All sessions must share `AI_CLI_STATE_DIR` to appear in one view. OS process
+identity lookup uses CIM on Windows, `/proc` on Linux and `ps` on macOS; snapshots
+whose owner identity cannot be verified are omitted until a later refresh.
 
 ## Adding an AI agent
 

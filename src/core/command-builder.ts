@@ -253,8 +253,8 @@ export function buildCliCommand(options: BuildCliCommandOptions): BuiltCommand &
           '退回一般模式會帶著權限旁路執行，而呼叫端以為有限制——不做這件事。'
       );
     }
-    return { ...strict(input, options.capabilities), ...warningFields };
+    return { ...strict(input, options.capabilities), reasoningEffort, ...warningFields };
   }
 
-  return { ...agent.buildCommand(input), ...warningFields };
+  return { ...agent.buildCommand(input), reasoningEffort, ...warningFields };
 }

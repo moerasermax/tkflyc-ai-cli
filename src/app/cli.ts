@@ -1,6 +1,6 @@
 /**
  * `ai-cli` 指令列介面。對應 dist/app/cli.js。
- * 子指令：run, wait, peek, ps, result, kill, cleanup, doctor, models, mcp, update, usage, help。
+ * 子指令：run, wait, peek, ps, jobs, result, kill, cleanup, doctor, models, mcp, update, usage, help。
  *
  * usage 改為透過環境變數 AI_CLI_USAGE_PLUGIN_BIN 設定外部 plugin（見 plugins/usage.ts）。
  */
@@ -15,6 +15,7 @@ import { validatePeekPids, validatePeekTimeSec } from '../core/peek.js';
 import { runUsagePlugin } from '../plugins/usage.js';
 import { runUpdateCli } from '../core/updater.js';
 import { assertCanStartJob } from '../core/worker-env.js';
+import { runJobs } from './jobs.js';
 
 export const CLI_HELP_TEXT = `Usage: ai-cli <command> [options]
 
@@ -23,6 +24,7 @@ Commands:
   wait      Wait for pids; timeout returns JSON + liveness (exit 3)
   peek      Observe new agent events for a short window
   ps        List tracked processes with elapsed time and running liveness
+  jobs      List all sessions' jobs (jobs [--watch] [--json] [--running])
   result    Get the current result and running liveness for a pid
   kill      Terminate a tracked pid
   cleanup   Remove completed and failed tracked processes
@@ -308,6 +310,7 @@ export async function runCli(argv: string[], deps: Partial<CliDeps> = {}): Promi
   }
 
   if (command === 'update') return runUpdateCli(argv.slice(1), { stdout });
+  if (command === 'jobs') return runJobs(argv.slice(1), { stdout, stderr });
 
   if (command === 'usage') {
     const { flags } = parseArgs(argv.slice(1));

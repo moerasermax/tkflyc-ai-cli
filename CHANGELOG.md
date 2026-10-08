@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 新增（跨 session job 監看）
+
+- 新增唯讀 `ai-cli jobs [--watch] [--json] [--running]`，聚合所有 session 的 MCP job 摘要與 CLI detached 狀態；MCP 以每行程的原子快照及兩秒節流發佈，只存短任務摘要、模型／effort、事件與派工端資訊，依 OS 的 PID＋建立時間排除殘檔與 PID 重用，完成紀錄保留十分鐘。依獨立稽核修正 macOS ps 非零退出保留有效結果、寫端安全回收過期殘檔、CLI 未驗證身分仍顯示及合併非同步身分查詢／快取派工端；補強刷新容差、閒置省寫、錯誤去重與恢復提示、讀檔重試、OSC 過濾、非 TTY watch、發佈 rejection 收尾，並釐清 lastEvent 可能含模型回覆片段。加入 stub 回歸與關鍵突變驗證，中英文 README 與 help 同步補充。（Codex）
+
 ### 修正（worker 驗收判定）
 
 - worker 驗收把單純逾時改列能力／穩定性失敗，不擋 commit，仍保留監控、停止、收尾、遞迴與未受 F2 阻擋派工的安全性判定；hook 比對僅正規化 CRLF 為 LF，避免 Windows autocrlf 導致內容相同卻誤報，報告註明忽略換行差異。同步分類文件，新增 stub 回歸測試及兩筆突變驗證。（Codex）

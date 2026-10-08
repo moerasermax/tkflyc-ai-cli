@@ -12,6 +12,7 @@
 
 import { spawn } from 'node:child_process';
 import { buildWorkerEnv } from './worker-env.js';
+import { lookupIdentities, retainedJob, shortText, taskSummary, type IdentityLookup, type JobDispatcher, type LiveJob } from './live-jobs.js';
 import {
   appendFileSync,
   chmodSync,
@@ -53,6 +54,9 @@ import {
 } from './peek.js';
 
 const SIGTERM_EXIT_CODE = 143;
+const pendingJobIdentities = new Set<Promise<void>>();
+/** CLI 已送出 PID 後，退出前等 metadata 補寫完成，避免強制退出截斷查詢。 */
+export async function flushJobIdentities(): Promise<void> { await Promise.all([...pendingJobIdentities]); }
 
 const patchRequire = createRequire(import.meta.url);
 let ptyModule: any = null;
@@ -91,6 +95,10 @@ interface StoredProcess extends ProcessOutputStats {
   workFolder: string;
   cwdKey: string;
   model?: string;
+  reasoning_effort?: string;
+  dispatcher?: JobDispatcher;
+  processStarted?: string;
+  resolvedModel?: string;
   toolType: AgentId;
   startTime: string;
   endTime?: string;
@@ -130,7 +138,11 @@ export class FileProcessService {
   private ptyManagedPids = new Set<number>();
   private breaker: CircuitBreaker;
   private directPidSequence = 0;
+  private dispatcher: JobDispatcher = { pid: process.pid, parentPid: process.ppid };
+  private dispatcherReady?: Promise<JobDispatcher>;
+  private identityLookup: IdentityLookup;
   private outputEvents = new Map<string, {
+    startTime: string;
     offset: number;
     extractor: LivenessEventExtractor;
     lastEvent: string | null;
@@ -139,12 +151,13 @@ export class FileProcessService {
   }>();
 
   constructor(
-    options: { stateDir?: string; cliPaths?: Partial<Record<AgentId, string>>; breaker?: CircuitBreaker } = {}
+    options: { stateDir?: string; cliPaths?: Partial<Record<AgentId, string>>; breaker?: CircuitBreaker; readOnly?: boolean; identityLookup?: IdentityLookup } = {}
   ) {
     this.stateDir = options.stateDir || resolveDefaultStateDir();
     this.cliPaths = options.cliPaths || resolveAllCliPaths();
     this.breaker = options.breaker ?? new CircuitBreaker();
-    mkdirSync(this.stateDir, { recursive: true });
+    this.identityLookup = options.identityLookup ?? lookupIdentities;
+    if (!options.readOnly) mkdirSync(this.stateDir, { recursive: true });
   }
 
   async startProcess(options: FileStartOptions) {
@@ -191,6 +204,7 @@ export class FileProcessService {
     if (!pid) {
       throw new Error(`Failed to start ${cmd.agent} CLI process`);
     }
+    const startTime = new Date().toISOString();
     const processDir = this.resolveProcessDir(cmd.cwd, pid);
     mkdirSync(processDir, { recursive: true });
     const stdoutPath = this.resolveStdoutPath(processDir);
@@ -204,13 +218,17 @@ export class FileProcessService {
       workFolder: cmd.cwd,
       cwdKey,
       model,
+      resolvedModel: cmd.resolvedModel,
+      reasoning_effort: cmd.reasoningEffort || undefined,
+      dispatcher: this.dispatcher,
       toolType: cmd.agent,
-      startTime: new Date().toISOString(),
+      startTime,
       stdoutPath,
       stderrPath,
       status: 'running',
     };
     this.writeProcess(stored);
+    this.trackJobIdentity(stored);
     return { pid, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully` };
   }
 
@@ -228,6 +246,7 @@ export class FileProcessService {
     }
     const cwdKey = this.resolveCwdKey(cmd.cwd);
     const pid = this.allocateDirectPid();
+    const startTime = new Date().toISOString();
     const processDir = this.resolveProcessDir(cmd.cwd, pid);
     mkdirSync(processDir, { recursive: true });
     const stdoutPath = this.resolveStdoutPath(processDir);
@@ -241,13 +260,17 @@ export class FileProcessService {
       workFolder: cmd.cwd,
       cwdKey,
       model,
+      resolvedModel: cmd.resolvedModel,
+      reasoning_effort: cmd.reasoningEffort || undefined,
+      dispatcher: this.dispatcher,
       toolType: cmd.agent,
-      startTime: new Date().toISOString(),
+      startTime,
       stdoutPath,
       stderrPath,
       status: 'running',
     };
     this.writeProcess(stored);
+    this.trackJobIdentity(stored);
 
     try {
       await agent.runDirect(cmd, {
@@ -278,11 +301,11 @@ export class FileProcessService {
    * Windows detached spawn：用 Node 腳本當 wrapper（避開 batch 引號地獄）。
    * Node 子程序可取得自己的 PID，對齊 FileProcessService 的 PID→目錄映射。
    */
-  private startDetachedWin32(
+  private async startDetachedWin32(
     cmd: ReturnType<typeof buildCliCommand>,
     cwdKey: string,
     model?: string
-  ): { pid: number; status: string; agent: AgentId; message: string } {
+  ): Promise<{ pid: number; status: string; agent: AgentId; message: string }> {
     const wrapperPath = this.ensureDetachedWrapperNodeWin32();
     const hasStdinPrompt = typeof cmd.stdinPrompt === 'string';
 
@@ -310,6 +333,7 @@ export class FileProcessService {
     if (!pid) {
       throw new Error(`Failed to start ${cmd.agent} CLI process`);
     }
+    const startTime = new Date().toISOString();
     const processDir = this.resolveProcessDir(cmd.cwd, pid);
     mkdirSync(processDir, { recursive: true });
     const stdoutPath = this.resolveStdoutPath(processDir);
@@ -323,13 +347,17 @@ export class FileProcessService {
       workFolder: cmd.cwd,
       cwdKey,
       model,
+      resolvedModel: cmd.resolvedModel,
+      reasoning_effort: cmd.reasoningEffort || undefined,
+      dispatcher: this.dispatcher,
       toolType: cmd.agent,
-      startTime: new Date().toISOString(),
+      startTime,
       stdoutPath,
       stderrPath,
       status: 'running',
     };
     this.writeProcess(stored);
+    this.trackJobIdentity(stored);
     return { pid, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully` };
   }
 
@@ -347,6 +375,7 @@ export class FileProcessService {
     if (!pid) {
       throw new Error(`Failed to start ${cmd.agent} CLI process (pty.spawn returned no pid)`);
     }
+    const startTime = new Date().toISOString();
     const processDir = this.resolveProcessDir(cmd.cwd, pid);
     mkdirSync(processDir, { recursive: true });
     const stdoutPath = this.resolveStdoutPath(processDir);
@@ -381,13 +410,17 @@ export class FileProcessService {
       workFolder: cmd.cwd,
       cwdKey,
       model,
+      resolvedModel: cmd.resolvedModel,
+      reasoning_effort: cmd.reasoningEffort || undefined,
+      dispatcher: this.dispatcher,
       toolType: cmd.agent,
-      startTime: new Date().toISOString(),
+      startTime,
       stdoutPath,
       stderrPath,
       status: 'running',
     };
     this.writeProcess(stored);
+    this.trackJobIdentity(stored);
     return {
       pid,
       status: 'started',
@@ -407,6 +440,67 @@ export class FileProcessService {
         ...listProcessTiming(proc.startTime, proc.endTime, liveness),
       };
     });
+  }
+
+  private trackJobIdentity(stored: StoredProcess): void {
+    const pid = stored.toolType === 'direct-api' ? process.pid : stored.pid;
+    // 第一個 job 同批取得 dispatcher 與 child；之後只查 child，dispatcher 在 instance 共用。
+    const ids = this.identityLookup(this.dispatcherReady ? [pid] : [pid, process.pid, process.ppid]);
+    this.dispatcherReady ??= ids.then(identities => {
+      this.dispatcher = { pid: process.pid, started: identities.get(process.pid)?.started,
+        parentPid: process.ppid, parentName: identities.get(process.ppid)?.name };
+      return this.dispatcher;
+    }).catch(() => this.dispatcher);
+    const pending = Promise.all([ids, this.dispatcherReady]).then(([identities, dispatcher]) => {
+      stored.processStarted = identities.get(pid)?.started;
+      stored.dispatcher = dispatcher;
+      // cleanup／狀態更新可能先發生；只補身分，不能重建或覆寫較新的狀態。
+      const path = this.resolveMetaPath(this.resolveStoredProcessDir(stored));
+      const current = this.parseProcessFile(path);
+      if (current.startTime !== stored.startTime) return;
+      current.processStarted = stored.processStarted;
+      current.dispatcher = dispatcher;
+      this.writeProcess(current);
+    }).catch(() => {}).finally(() => pendingJobIdentities.delete(pending));
+    pendingJobIdentities.add(pending);
+  }
+
+  /** jobs 專用唯讀投影：不呼叫 refreshStatus，不改 meta／stderr，也不建立目錄。 */
+  async listJobSummaries(lookup: IdentityLookup = lookupIdentities, now = Date.now()): Promise<LiveJob[]> {
+    const processes = this.readAllProcesses();
+    const identities = await lookup(processes.filter(proc => proc.status === 'running').map(proc =>
+      proc.toolType === 'direct-api' && proc.dispatcher ? proc.dispatcher.pid : proc.pid));
+    const jobs: LiveJob[] = [];
+    for (const proc of processes) {
+      try {
+        let identityVerified: boolean | undefined;
+        const exit = this.readExitStatus(proc);
+        if (exit) { proc.status = exit.status; proc.endTime = exit.endTime; }
+        if (proc.status === 'running') {
+          const pid = proc.toolType === 'direct-api' && proc.dispatcher ? proc.dispatcher.pid : proc.pid;
+          const started = proc.toolType === 'direct-api' ? proc.dispatcher?.started : proc.processStarted;
+          const identity = identities.get(pid);
+          identityVerified = !!identity && started !== undefined && identity.started === started;
+          // 缺建立時間／查詢暫時失敗但 PID 仍在，顯示 running 並標示未驗證。
+          if ((!identity && !isProcessRunning(pid)) || (identity && started !== undefined && identity.started !== started)) {
+            proc.status = 'lost';
+            proc.endTime = statSync(this.resolveMetaPath(this.resolveStoredProcessDir(proc))).mtime.toISOString();
+          }
+        }
+        const liveness = this.processLiveness(proc);
+        const job: LiveJob = {
+          pid: proc.pid, agent: proc.toolType, model: proc.resolvedModel || proc.model || null, reasoning_effort: proc.reasoning_effort ?? null,
+          task: taskSummary(proc.prompt), workFolder: proc.workFolder, status: proc.status,
+          startTime: proc.startTime, endTime: proc.endTime,
+          elapsedSec: Math.max(0, ((proc.endTime ? Date.parse(proc.endTime) : now) - Date.parse(proc.startTime)) / 1000),
+          sinceLastOutputSec: liveness.sinceLastOutputSec,
+          lastEvent: proc.lastEvent === null ? null : shortText(proc.lastEvent, 80),
+          dispatcher: proc.dispatcher ?? { pid: 0, parentPid: 0 }, source: 'cli', identityVerified,
+        };
+        if (retainedJob(job, now)) jobs.push(job);
+      } catch { /* 單個 job 正被 cleanup 移除或檔案損壞，略過它。 */ }
+    }
+    return jobs;
   }
 
   async getProcessResult(pid: number, verbose = false) {
@@ -589,9 +683,11 @@ export class FileProcessService {
     const processes: StoredProcess[] = [];
     for (const cwdEntry of readdirSync(cwdsDir)) {
       const cwdDir = join(cwdsDir, cwdEntry);
-      for (const pidEntry of readdirSync(cwdDir)) {
+      let pidEntries: string[];
+      try { pidEntries = readdirSync(cwdDir); } catch { continue; }
+      for (const pidEntry of pidEntries) {
         const metaPath = join(cwdDir, pidEntry, 'meta.json');
-        if (existsSync(metaPath)) processes.push(this.parseProcessFile(metaPath));
+        if (existsSync(metaPath)) { try { processes.push(this.parseProcessFile(metaPath)); } catch {} }
       }
     }
     return processes;
@@ -612,7 +708,10 @@ export class FileProcessService {
   private writeProcess(proc: StoredProcess): void {
     const processDir = this.resolveStoredProcessDir(proc);
     mkdirSync(processDir, { recursive: true });
-    writeFileSync(this.resolveMetaPath(processDir), JSON.stringify(proc, null, 2));
+    const metaPath = this.resolveMetaPath(processDir);
+    const temporary = `${metaPath}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify(proc, null, 2));
+    renameSync(temporary, metaPath);
   }
 
   private refreshStatus(proc: StoredProcess): StoredProcess {
@@ -700,8 +799,8 @@ export class FileProcessService {
       const stat = existsSync(filePath) ? statSync(filePath) : null;
       const size = stat?.size ?? 0;
       let cached = this.outputEvents.get(filePath);
-      if (!cached || size < cached.offset) {
-        cached = { offset: 0, extractor: new LivenessEventExtractor(proc.toolType),
+      if (!cached || cached.startTime !== proc.startTime || size < cached.offset) {
+        cached = { startTime: proc.startTime, offset: 0, extractor: new LivenessEventExtractor(proc.toolType),
           lastEvent: null, eventCount: 0, lastEventAt: 0 };
         this.outputEvents.set(filePath, cached);
       }

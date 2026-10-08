@@ -37,8 +37,12 @@ function exitAfterFlush(code: number): void {
   const guard = setTimeout(finish, 2000);
   guard.unref?.();
   // 空寫入的 callback 排在既有寫入之後，它被呼叫代表前面的資料已交給 OS。
-  process.stdout.write('', () => {
+  process.stdout.write('', async () => {
     clearTimeout(guard);
+    if (process.argv[2] === 'run') {
+      const { flushJobIdentities } = await import('../core/file-process-service.js');
+      await flushJobIdentities();
+    }
     finish();
   });
 }
@@ -48,7 +52,8 @@ async function main(): Promise<number> {
   if (process.argv[2] === 'update') return runUpdateCli(process.argv.slice(3));
   const { runCli } = await import('../app/cli.js');
   // MCP 在 transport 連線後自行處理，不能把 git 放到 handshake 前面。
-  if (process.argv[2] !== 'mcp') {
+  // jobs 是唯讀監看，連「已更新」notice 都不在這個入口清掉。
+  if (process.argv[2] !== 'mcp' && process.argv[2] !== 'jobs') {
     const state = await clearNoticeOnStartup();
     if (state.reason?.startsWith('ai-cli 已是最新版')) process.stderr.write(`${state.reason}\n`);
   }
