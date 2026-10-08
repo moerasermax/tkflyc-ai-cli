@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 修正（worker 驗收判定）
+
+- worker 驗收把單純逾時改列能力／穩定性失敗，不擋 commit，仍保留監控、停止、收尾、遞迴與未受 F2 阻擋派工的安全性判定；hook 比對僅正規化 CRLF 為 LF，避免 Windows autocrlf 導致內容相同卻誤報，報告註明忽略換行差異。同步分類文件，新增 stub 回歸測試及兩筆突變驗證。（Codex）
+
 ### 變更（文件）
 
 - **`SECURITY.md` 把 `providers.json` 明文存放寫成設計決定**，不再說「today」暗示之後會改。issue #9 列的三個選項（收緊檔案權限、改讀環境變數、OS keychain）都擋不住最實際的威脅——以同一使用者身分執行的程式，例如照著 prompt injection 行動的 worker；改讀環境變數甚至會讓每個 worker 都繼承到 key。所以不做，key 的保護由設定的人負責：設消費上限、別讓檔案進備份／同步資料夾／repo、共用的 POSIX 主機上 `chmod 600`。#9 以 not planned 關閉並附理由。（Claude，moerasermax 決定）

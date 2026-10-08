@@ -1594,5 +1594,21 @@
     "to": "process.env.AI_CLI_ALLOW_NESTED === '0' ?",
     "expect": "F2 codex 主導者明示 AI_CLI_ALLOW_NESTED=1 時一併轉交給 MCP server",
     "script": "verify-worker-guards.mjs"
+  },
+  {
+    "name": "[worker-identity] 逾時又被列入安全性失敗",
+    "file": "tools/acceptance/worker-identity-logic.mjs",
+    "from": "    ...(r.cleanupBlocked ? ['收尾未確認乾淨'] : []),",
+    "to": "    ...(r.timedOut ? ['run 超時'] : []),\n    ...(r.cleanupBlocked ? ['收尾未確認乾淨'] : []),",
+    "expect": "逾時獨立歸能力類且摘要不計安全性失敗",
+    "script": "verify-worker-identity.mjs"
+  },
+  {
+    "name": "[worker-identity] hook 恢復原始位元組比對而誤報 CRLF",
+    "file": "tools/acceptance/worker-identity-runtime.mjs",
+    "from": "    const same = normalize(installed).equals(normalize(canonical));",
+    "to": "    const same = Buffer.from(installed).equals(Buffer.from(canonical));",
+    "expect": "hook stub 忽略 CRLF/LF 差異但保留其他每個位元組",
+    "script": "verify-worker-identity.mjs"
   }
 ]

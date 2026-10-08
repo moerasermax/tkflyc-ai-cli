@@ -58,8 +58,12 @@ export async function staticChecks(options, deps = {}) {
   const add = (name, status, detail) => checks.push({ name, status, detail });
   try {
     const [installed, canonical] = await Promise.all([read(options.hook), read(options.canonicalHook)]);
-    add('hook 逐位元組比對', Buffer.from(installed).equals(Buffer.from(canonical)) ? 'PASS' : 'FAIL', `${options.hook} ↔ ${options.canonicalHook}`);
-  } catch (e) { add('hook 逐位元組比對', 'FAIL', e.message); }
+    // latin1 一對一保留所有位元組，僅移除 CRLF 中的 CR；不可用 UTF-8 解碼吃掉非法位元組差異。
+    const normalize = value => Buffer.from(Buffer.from(value).toString('latin1').replace(/\r\n/g, '\n'), 'latin1');
+    const same = normalize(installed).equals(normalize(canonical));
+    const eolNote = same && !Buffer.from(installed).equals(Buffer.from(canonical)) ? '；兩邊換行格式不同，正規化後內容相同' : '';
+    add('hook 逐位元組比對（忽略換行差異）', same ? 'PASS' : 'FAIL', `${options.hook} ↔ ${options.canonicalHook}${eolNote}`);
+  } catch (e) { add('hook 逐位元組比對（忽略換行差異）', 'FAIL', e.message); }
   for (const [worker, title] of [[false, LEADER_TITLE], [true, WORKER_TITLE]]) {
     const env = { ...process.env, PYTHONIOENCODING: 'utf-8' };
     delete env.AI_CLI_WORKER;
