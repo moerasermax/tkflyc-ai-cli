@@ -126,11 +126,11 @@ export class LiveJobPublisher {
   private lastError?: string;
   readonly ready: Promise<void>;
   private onExit = () => this.dispose();
-  constructor(private dir: string, private owner: ProcessIdentity, private now = Date.now, lookup: IdentityLookup = lookupIdentities) {
+  constructor(private dir: string, private owner: ProcessIdentity, private now = Date.now, lookup: IdentityLookup = lookupIdentities, alive = ownerMayBeAlive) {
     // ISO、Linux boot token、POSIX lstart 都可能含不能當檔名的字元。
     this.filePath = join(dir, 'live-jobs', `${owner.pid}-${owner.started.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`);
     process.once('exit', this.onExit);
-    this.ready = collectStaleSnapshots(dir, lookup, now()).catch(() => {});
+    this.ready = collectStaleSnapshots(dir, lookup, now(), alive).catch(() => {});
   }
   setSource(key: object, source: () => LiveJob[]): void {
     if (this.stopped) return;

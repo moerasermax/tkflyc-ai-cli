@@ -129,18 +129,31 @@ try {
   await check('publisher GC removes only expired proven stale owners', async () => {
     const state = join(dir, 'gc'), folder = join(state, 'live-jobs'); mkdirSync(folder, { recursive: true });
     const owners = new Map([[10, { pid: 10, started: 'alive', name: 'node' }], [11, { pid: 11, started: 'new', name: 'node' }]]);
+    const alive = pid => pid === 10 || pid === 11 || pid === process.pid;
     const put = (name, pid, started, age) => writeFileSync(join(folder, name + '.json'), JSON.stringify({ version: 1, owner: { pid, started }, updatedAt: new Date(instant - age).toISOString(), jobs: [] }));
     put('alive', 10, 'alive', JOB_RETENTION_MS + 1); put('reused', 11, 'old', JOB_RETENTION_MS + 1);
     put('dead', 12, 'old', JOB_RETENTION_MS + 1); put('unknown', process.pid, 'unknown', JOB_RETENTION_MS + 1);
     put('recent', 12, 'old', JOB_RETENTION_MS); put('fresh', 11, 'old', 0);
-    const p = new LiveJobPublisher(state, owner, () => instant, async () => owners);
+    const p = new LiveJobPublisher(state, owner, () => instant, async () => owners, alive);
     try {
       await p.ready;
       for (const name of ['alive', 'unknown', 'recent', 'fresh']) assert.ok(existsSync(join(folder, name + '.json')), name);
       for (const name of ['reused', 'dead']) assert.equal(existsSync(join(folder, name + '.json')), false, name);
       put('changed', 11, 'old', JOB_RETENTION_MS + 1);
-      const q = new LiveJobPublisher(state, owner, () => instant, async () => { put('changed', 11, 'old', 0); return owners; });
+      const q = new LiveJobPublisher(state, owner, () => instant, async () => { put('changed', 11, 'old', 0); return owners; }, alive);
       await q.ready; q.dispose(); assert.ok(existsSync(join(folder, 'changed.json')));
+    } finally { p.dispose(); }
+  });
+  await check('publisher GC retains expired unknown owner when alive returns true (EPERM)', async () => {
+    const state = join(dir, 'gc-eperm'), folder = join(state, 'live-jobs'); mkdirSync(folder, { recursive: true });
+    const path = join(folder, 'unknown.json'), calls = [];
+    writeFileSync(path, JSON.stringify({ version: 1, owner: { pid: 12, started: 'unknown' }, updatedAt: new Date(instant - JOB_RETENTION_MS - 1).toISOString(), jobs: [] }));
+    // 模擬 EPERM 的保守存活結果，不依賴真實系統上的 PID。
+    const p = new LiveJobPublisher(state, owner, () => instant, async () => new Map(), pid => { calls.push(pid); return true; });
+    try {
+      await p.ready;
+      assert.deepEqual(calls, [12]);
+      assert.equal(existsSync(path), true, 'possibly alive owner must be retained');
     } finally { p.dispose(); }
   });
   await check('idle snapshots skip unchanged writes and still expire terminal jobs', async () => {
