@@ -27,13 +27,13 @@ Peter Steinberger 的 claude-code-mcp（MIT）。分歧點在架構：上游把�
 | --- | --- |
 | GitHub | `moerasermax/tkflyc-ai-cli` — **2026-09-09 改名**，舊名是 `ai-cli-mcp` |
 | npm | `@tkflyc/ai-cli-mcp` — **已公開發佈** |
-| 版本 | `6.7.0` — 2026-10-09 發佈（跨 session job 監看 `ai-cli jobs [--watch|--json|--running]`，含驗收工具判定修正）。GitHub Release 已補到 v6.7.0（中英並存）。**npm 上沒有 `6.2.0`**：那版只 bump 了 `package.json` 與 CHANGELOG，沒打 tag、沒發佈，內容僅透過 git 自動更新進各機器 |
+| 版本 | `6.8.0` — 2026-10-09 發佈（持久化 job：MCP 重啟後接回、絕不重跑、30 分鐘回收；新增 Grok CLI agent；`verify:restart-recovery`）。GitHub Release 已補到 v6.8.0（中英並存）。**npm 上沒有 `6.2.0`**：那版只 bump 了 `package.json` 與 CHANGELOG，沒打 tag、沒發佈，內容僅透過 git 自動更新進各機器 |
 | 授權 | **Apache-2.0** — 2026-09-09 從 MIT 改的，附 `NOTICE` |
 | 主分支 | `master`（push 到 master 等同部署，所有機器會自動拉） |
 | CI | Windows / Linux / macOS × Node 20.19、22 — **三個平台都是閘門** |
 | 本機路徑 | `C:\Users\Moera\ai-cli-mcp-source`（目錄名還是舊的，不影響任何東西） |
 
-規模：`src/` 37 個 `.ts`、11,112 行；驗證腳本都在 `tests/`（21 支），其中 19 支進 `npm test`
+規模：`src/` 41 個 `.ts`、11,949 行；驗證腳本都在 `tests/`（27 支），其中 25 支進 `npm test`
 （`verify-e2e.mjs` 會真的燒額度、`verify-strict-behaviour.mjs` 屬手動輔助，兩者刻意不進）。
 
 ---
