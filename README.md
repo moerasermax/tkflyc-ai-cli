@@ -131,6 +131,31 @@ All sessions must share `AI_CLI_STATE_DIR` to appear in one view. OS process
 identity lookup uses CIM on Windows, `/proc` on Linux and `ps` on macOS; snapshots
 whose owner identity cannot be verified are omitted until a later refresh.
 
+## Claude Code job panel（optional plugin）
+
+The `ai-cli-jobs` plugin shows a job list above the input box and a one-line
+summary in the hint line below it. Each job shows its status, agent, model and
+reasoning effort, task summary, elapsed time, and last event.
+
+Install from the prompt in a Claude Code terminal session:
+
+```text
+/plugin install ai-cli-jobs --marketplace moerasermax/tkflyc-ai-cli
+```
+
+When asked whether to add the marketplace, press `y`, then select the install
+scope. The ai-cli MCP server must be configured with the name `ai-cli`.
+
+The panel only shows jobs dispatched by that session. It polls `list_processes`
+every 3 seconds while jobs are running, without consuming model tokens. To watch
+jobs across all sessions, use `ai-cli jobs --watch` in another terminal.
+
+Uninstall from the Claude Code prompt:
+
+```text
+/plugin uninstall ai-cli-jobs@tkflyc-ai-cli
+```
+
 ## Adding an AI agent
 
 1. Copy `src/agents/codex.ts` to `src/agents/<name>.ts` and implement

@@ -16,3 +16,4 @@ e2e-out.txt
 # 派工時把 workFolder 指到本 repo 就會出現，而檔案裡是完整對話內容——
 # 不該有機會被 commit 進來。
 .tmp/
+plugins/*/.claude-plugin/types/

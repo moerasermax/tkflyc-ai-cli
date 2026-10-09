@@ -1,0 +1,14 @@
+{
+  "name": "tkflyc-ai-cli",
+  "owner": { "name": "YC (moerasermax)" },
+  "metadata": {
+    "description": "Optional Claude Code plugins for monitoring ai-cli background jobs."
+  },
+  "plugins": [
+    {
+      "name": "ai-cli-jobs",
+      "source": "./plugins/ai-cli-jobs",
+      "description": "Show this Claude Code session's ai-cli jobs above the prompt and a one-line summary below it, polling MCP every 3 seconds without model tokens."
+    }
+  ]
+}

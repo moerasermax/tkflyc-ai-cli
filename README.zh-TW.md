@@ -554,6 +554,30 @@ spawn 後以一次查詢合併 job 與派工端身分，派工端在 service ins
 要聚合的所有 session 必須共用 `AI_CLI_STATE_DIR`。Windows 用 CIM、Linux 用 `/proc`、
 macOS 用 `ps` 查身分；無法查證快照 owner 時先略過，下次更新重試。
 
+## Claude Code 派工面板（選用外掛）
+
+`ai-cli-jobs` 外掛會在輸入框上方顯示 job 列表，並在下方提示行顯示一行摘要。
+每筆 job 顯示狀態、agent、model 與 effort、任務摘要、經過時間及最後事件。
+
+在 Claude Code 終端機 session 的輸入框執行：
+
+```text
+/plugin install ai-cli-jobs --marketplace moerasermax/tkflyc-ai-cli
+```
+
+它會先詢問是否加入 marketplace，按 `y`，再選擇安裝 scope。
+前提是 ai-cli 的 MCP server 名稱設定為 `ai-cli`。
+
+面板只顯示「該 session 派出的 job」；有 job 執行中時，每 3 秒輪詢一次
+`list_processes`，不花模型 token。要看所有 session，請在另一個終端機使用
+`ai-cli jobs --watch`。
+
+在 Claude Code 輸入框解除安裝：
+
+```text
+/plugin uninstall ai-cli-jobs@tkflyc-ai-cli
+```
+
 ## 等待端怎麼知道 AI 還活著
 
 `wait` 逾時只代表這次觀察時間用完，程序會繼續跑。以前兩條路徑都丟

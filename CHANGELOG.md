@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 收錄 `ai-cli-jobs` 0.1.0 選用 Claude Code 外掛與 `tkflyc-ai-cli` marketplace，可由 GitHub 安裝；在輸入框上方列出該 session 派出的 job、下方提示行顯示摘要，每 3 秒透過 MCP 輪詢且不花模型 token，補上中英文安裝／解除安裝與跨 session 監看說明，外掛不納入 npm 打包。（Codex）
+
 ## [6.7.0] - 2026-10-08
 
 > 跨 session 的 job 監看：每個 ai-cli 行程把自己追蹤的 job 發佈到共用狀態目錄，`ai-cli jobs [--watch|--json|--running]`
