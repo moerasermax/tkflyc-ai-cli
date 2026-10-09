@@ -229,8 +229,13 @@ When asked whether to add the marketplace, press `y`, then select the install
 scope. The ai-cli MCP server must be configured with the name `ai-cli`.
 
 The panel only shows jobs dispatched by that session. It polls `list_processes`
-every 3 seconds while jobs are running, without consuming model tokens. To watch
+every 0.5 seconds while jobs are running, without consuming model tokens. To watch
 jobs across all sessions, use `ai-cli jobs --watch` in another terminal.
+
+If Claude Code runs in `auto` permission mode, add `mcp__ai-cli__list_processes`
+to `permissions.allow` in `~/.claude/settings.json`. The panel polls in the
+background, where there is no auto-mode classifier to ask, so Claude Code denies
+the call (fail closed): the row keeps spinning and shows `輪詢失敗：… refused`.
 
 Uninstall from the Claude Code prompt:
 

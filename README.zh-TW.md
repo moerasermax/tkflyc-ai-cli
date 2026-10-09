@@ -646,9 +646,14 @@ macOS 用 `ps` 查身分；拿不到身分資料時不得據此接回或殺行�
 它會先詢問是否加入 marketplace，按 `y`，再選擇安裝 scope。
 前提是 ai-cli 的 MCP server 名稱設定為 `ai-cli`。
 
-面板只顯示「該 session 派出的 job」；有 job 執行中時，每 3 秒輪詢一次
+面板只顯示「該 session 派出的 job」；有 job 執行中時，每 0.5 秒輪詢一次
 `list_processes`，不花模型 token。要看所有 session，請在另一個終端機使用
 `ai-cli jobs --watch`。
+
+如果 Claude Code 使用 `auto` 權限模式，請在 `~/.claude/settings.json` 的
+`permissions.allow` 加入 `mcp__ai-cli__list_processes`。面板是在背景輪詢，
+沒有 auto 模式的分類器可以問，Claude Code 會直接拒絕這個呼叫（fail closed），
+該列會一直轉圈並顯示「輪詢失敗：… refused」。
 
 在 Claude Code 輸入框解除安裝：
 

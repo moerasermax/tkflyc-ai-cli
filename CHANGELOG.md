@@ -8,6 +8,23 @@
 
 ## [Unreleased]
 
+### 修正（ai-cli-jobs 面板）
+
+- Grok job 在面板上被標成 `direct-api`：`inferAgent` 沒有 `grok-*` 規則，`grok-4.7` 落到 `<provider>-<model>` 那條。
+  補上 `grok-*` → `grok`。（Claude）
+- 輪詢失敗不再靜默吞掉：逾時、`isError`、格式無法解析、例外都會在該列 `lastEvent` 顯示「輪詢失敗：<原因>」，狀態維持執行中。
+  原本 `catch {}` 把錯誤全部吞掉，面板只會一直轉圈，看不出任何原因。（Claude）
+- `list_processes` 呼叫加 10 秒逾時，避免一次沒回應的呼叫讓 `busy` 永遠鎖住、之後每輪都被跳過。
+  實測這不是本次轉圈的原因（見下方文件段），留著當保險。（Claude）
+- 輪詢間隔由 3 秒改為 0.5 秒；`POLL_MS` 改為 export，測試改用常數而不是寫死 3000。（Claude）
+
+### 文件
+
+- README（中英）補充：`auto` 權限模式下要把 `mcp__ai-cli__list_processes` 加進 `permissions.allow`。
+  這才是「job 結束後面板一直轉圈」的根因：plugin 的背景 `$.mcp.call` 一樣要走權限檢查，auto 模式在背景沒有分類器可用，
+  debug log 記為 `Auto mode classifier unavailable, denying with retry guidance (fail closed)`。2026-10-10 實測：
+  加規則前 199 次輪詢全數被拒，設定重新載入後的下一次輪詢就成功、面板轉為完成。上面的錯誤顯示讓它第一次被看見。（Claude）
+
 ## [6.8.0] - 2026-10-09
 
 > 持久化 job 與 Grok CLI：MCP server 重啟（例如 `/mcp` 重連）後，同一個主導者派出的 Claude／Codex／Grok job 會自動接回，
