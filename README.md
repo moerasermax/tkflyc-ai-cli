@@ -4,7 +4,7 @@
 [![npm](https://img.shields.io/npm/v/%40tkflyc%2Fai-cli-mcp)](https://www.npmjs.com/package/@tkflyc/ai-cli-mcp)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-Run local AI CLIs — Claude, Codex, Antigravity (`agy`) — and **any third-party
+Run local AI CLIs — Claude, Codex, Grok, Antigravity (`agy`) — and **any third-party
 OpenAI-compatible API** as MCP tools, with background jobs. Self-maintained from
 source, built on a registry architecture: adding an agent means adding one file.
 
@@ -13,6 +13,46 @@ Requires Node `^20.19.0 || >=22.12.0`.
 > 完整中文文件（環境變數、設定檔、每個工具的細節）見 **[README.zh-TW.md](README.zh-TW.md)**.
 > The Chinese document is the exhaustive reference; this page covers the design and
 > the parts you need to get running.
+
+## Grok CLI
+
+Grok is a separate xAI CLI backend for coding and text work. Select `grok-4.7`,
+`grok-4.7-build-fast`, `grok-4.6`, or `grok-4.5`; `models` and `ai-cli models`
+query `grok models` with a 15-second timeout and retain successful cache values or
+label the builtin fallback on failure (including an unauthenticated CLI).
+`GROK_CLI_NAME` overrides the binary; otherwise PATH wins, with
+`~/.grok/bin/grok.exe` (Windows) or `~/.grok/bin/grok` as fallback. Doctor lists Grok.
+
+Prompts use `--prompt-file` to preserve long Windows prompts. Native Windows
+execution bypasses cmd.exe; `--rules` receives the shared `WORKER_CONTEXT` first,
+then an optional `run.system_prompt`, separated by a blank line. Every resume
+reinjects the lock with `--resume`; `--no-subagents` is always set. Normal mode
+uses `--always-approve`. `reasoning_effort` accepts only `low`, `medium`, `high`, `xhigh` (live verified: grok 1.0.50).
+
+Strict `capabilities: ["fs/read", "analysis/produce"]` uses
+`--tools Read,Glob,Grep`, a write/shell/delegation deny list including Grok native
+`search_tool,use_tool` (MCP bridges), `--disable-web-search`,
+and `--permission-mode dontAsk`, without `--always-approve`. Empty capabilities
+and `analysis/produce` alone are refused until the CLI's zero-tool semantics are
+confirmed; unsupported capabilities are also refused. The native MCP deny names
+were verified on Grok 1.0.50; live acceptance should recheck shell/write bypasses;
+if the installed CLI cannot enforce them, do not use strict mode until its builder
+is changed to reject that CLI. Stub tests verify the contract, not vendor enforcement.
+
+Grok results with `subtype: error_during_execution` or `stop_reason: cancelled`
+fail even with exit 0; the error includes both fields.
+
+Grok uses the same durable JobStore/runner, restart recovery and 30-minute finished
+job retention as Claude/Codex. Messages JSON result usage includes cache tokens in
+normalized input and exposes `cost_usd_nominal` (vendor estimate, not a billing statement).
+
+The Grok process receives `AI_CLI_WORKER=1`. **Live F2 verification:** Grok imports
+Claude's MCP configuration; confirm its inherited ai-cli MCP server also receives
+that environment and refuses `run` with `AI_CLI_NESTED_DISPATCH_BLOCKED:`. Run
+`npm run verify:worker-identity -- --family grok` from a leader session: the probe
+must report `A=沒有`, `B=有`; T6 must produce the tested add.py with worker peak ≤ 1.
+The tested Grok 1.0.50 did not receive the Claude SessionStart identity hook, which
+is why this backend supplies the lock through `--rules`. Real-model tests remain opt-in.
 
 ## Quick start
 
@@ -48,7 +88,7 @@ in `update.supported`.
 Each supported CLI becomes a tool you can call from an MCP client. Jobs run in the
 background: `run` returns a PID immediately, and `list_processes`, `peek`, `wait` and
 `get_result` observe it while it works. Two surfaces expose this — the MCP server and
-the `ai-cli` command line — and they differ in where job state lives.
+the `ai-cli` command line — sharing durable state for Claude, Codex and Grok.
 
 ## Architecture
 
@@ -57,11 +97,12 @@ src/
 ├─ agents/                one file per AI — this is the extension point
 │   ├─ types.ts               AgentDefinition, the core contract
 │   ├─ registry.ts            central registry
-│   └─ claude.ts · codex.ts · antigravity.ts · direct-api.ts
+│   └─ claude.ts · codex.ts · grok.ts · antigravity.ts · direct-api.ts
 ├─ core/                  the framework; untouched when adding an agent
 │   ├─ command-builder.ts     model routing and command assembly
-│   ├─ process-service.ts     in-memory job management (MCP)
+│   ├─ process-service.ts     MCP job management
 │   ├─ file-process-service.ts file-backed job management (CLI)
+│   ├─ job-store.ts · job-runner.ts shared durable store and detached runner
 │   ├─ pty-runner.ts          ConPTY, for CLIs that need a real TTY
 │   ├─ circuit-breaker.ts     start-rate and duplicate-prompt breaker
 │   ├─ updater.ts             background check, subprocess apply, rollback
@@ -74,12 +115,24 @@ src/
 The split is the point: `agents/` is data about each CLI, `core/` is the machinery.
 A new backend never requires editing the machinery.
 
-Job state lives in memory for the MCP server, with short shared monitoring snapshots, and in files for the CLI, so a CLI job
-can be observed by a later command. Pipe-based CLI jobs run through a detached
-wrapper and outlive the command that started them. The PTY path — used for CLIs that
-only produce output on a real TTY — is not detached, and `direct-api` starts no
+Claude, Codex and Grok jobs run under a detached runner and outlive their MCP server or
+CLI launcher. A restarted MCP server recovers only jobs dispatched by the same
+principal process, verified by PID plus OS creation time; recovered results include
+`recovered: true`. Recovery observes existing work and never reruns or retries it.
+A recorded exit determines completion; a live verified runner stays running; if
+both runner and worker are gone without an exit record, the job becomes `lost`
+and its output remains available. The public PID identifies the runner.
+Antigravity (including ConPTY) and `direct-api` remain unrecoverable across MCP
+restarts. The PTY path is not detached, and `direct-api` starts no
 subprocess at all: on the CLI it runs in-process and blocks until the request
 finishes, while the MCP server still returns a PID immediately.
+
+The principal is the first ancestor outside the package launcher chain. Command-line
+inspection skips `npx-cli.js`, `npm-cli.js exec`/`x`, and the `cmd.exe` or POSIX `sh`
+wrappers invoking npx/npm exec. It retains a Node process running Claude Code itself.
+This supports both direct Node registration and the npx registration shown above.
+Unavailable server/principal identity is reported on stderr and retried on later checks.
+Command lines are used for identification only and are never saved in job metadata.
 
 ## Watching jobs across sessions
 
@@ -99,37 +152,60 @@ and the dispatching process's parent name plus the ai-cli PID. Narrow terminals
 truncate columns without wrapping. Parent names can be shells or Node launchers;
 if the OS cannot provide a name, the table shows `unknown`.
 
-MCP processes publish `AI_CLI_STATE_DIR/live-jobs/<pid>-<creation-token>.json`
-(default `~/.local/state/ai-cli/live-jobs/`). Version 1 snapshots contain `owner`,
-`updatedAt`, and `jobs`; each job contains `pid`, `agent`, `model`,
-`reasoning_effort`, `task`, `workFolder`, `status`, `startTime`, `endTime`,
-`elapsedSec`, `sinceLastOutputSec`, `lastEvent`, `dispatcher`, and `source`.
-Full prompts and full output logs are never copied into these snapshots.
-`lastEvent` stores only an 80-character summary of the last event and may contain
-a model response excerpt.
-Starts and status changes publish immediately; running liveness is throttled
-to at most one write per two seconds. Writes use a temporary file plus rename.
-Normal process exit removes its snapshot. Readers compare the owner's PID and
-OS creation token, ignoring dead owners and reused PIDs without deleting files.
-When a publisher is created, the writer collects snapshots older than ten minutes
-only after confirming that their owner is dead or has a different creation token.
-Unchanged idle snapshots are not rewritten; running refreshes allow 50 ms of timer tolerance.
-Completed/failed summaries expire after ten minutes, or earlier when their MCP
-server exits or explicit cleanup removes them.
+Claude/Codex/Grok use `AI_CLI_STATE_DIR/jobs/<UUID>/` (default
+`~/.local/state/ai-cli/jobs/`). `meta.json` records the agent, model, effort,
+40-character task summary, work folder, session and principal/server/runner/worker
+identities. It contains no full prompt. The runner writes metadata and `exit.json`
+atomically once each; the exit record includes code, signal, end time, timeout and
+kill flags. For lost jobs, the writer records the first confirmed loss in
+`lost.json` so a long-silent job's output still gets 30 minutes of retention.
+Worker stdout/stderr go directly to open `stdout.log`/`stderr.log` file descriptors.
+A temporary stdin file carries the prompt independently of the server
+and is removed on completion. Logs can contain prompts or model response excerpts.
+`bootstrap.json` contains only startup metadata and the runner PID, so a failed meta
+write does not make the job invisible. Runner identity lookup retries three times with
+250/500 ms backoff; failure records a failed exit, removes stdin, and starts no worker.
+A job still missing meta after 30 seconds is reported as lost. If meta cannot be saved
+after spawning, the runner stops its newly spawned worker and attempts an error exit.
+Grok's prompt file moves into this job directory and follows job retention; unclaimed
+staging files have exit/timer cleanup and are swept by GC after six hours.
 
-CLI detached jobs reuse existing `cwds/*/*/meta.json`, `exit-status.json`, and
-output logs, so they remain visible after the launching CLI exits. New metadata
-records the tracked process's creation token and dispatcher; legacy metadata
-has no creation token or dispatcher and keeps its older PID-only interpretation.
-CLI jobs with a live PID but unavailable creation identity remain `running` with
-`identityVerified: false` in JSON and `[unverified]` in the dispatcher column.
-This fallback cannot rule out PID reuse. Identity capture runs after spawn in one
-batch with the dispatcher, cached per service instance; `run` emits its PID before
-waiting for metadata persistence at CLI exit.
-`jobs` reads these files without updating them and works in `AI_CLI_WORKER=1`.
-All sessions must share `AI_CLI_STATE_DIR` to appear in one view. OS process
-identity lookup uses CIM on Windows, `/proc` on Linux and `ps` on macOS; snapshots
-whose owner identity cannot be verified are omitted until a later refresh.
+Readers retain byte offsets, parser progress and a 4 KiB tail per stream. They read
+only appended bytes; verbose results read at most 8 MiB per stream on demand and return
+`stdoutTruncated`/`stderrTruncated` byte counts when capped. Oversized parsed replies
+also carry `agentOutputTruncated`. Read the disk logs for larger output. `ai-cli run`,
+`ps`, `result`, `wait` and `jobs` use this same store, so durable jobs need no second
+monitoring snapshot. CLI `run` waits up to 15 seconds for the metadata handshake;
+timeout still returns PID/jobId, a warning and exit 0. Track that job; do not dispatch again.
+`jobs` is read-only and also works with `AI_CLI_WORKER=1`.
+
+Finished and lost jobs are retained for 30 minutes. Writers collect at startup and
+every 60 seconds on an unref timer, removing the oldest finished jobs when the shared store exceeds
+100 finished jobs or 500 MiB. Running jobs are preserved. `cleanup_processes`
+removes finished jobs immediately, including files. Antigravity/direct-api memory
+entries also expire after 30 minutes. Killing a durable job verifies its runner
+identity and requests tree termination; the runner records `killed: true` and exits.
+Identity lookup failure leaves termination retryable, with kill/timeout flags set only
+after a successful termination request. GC renames directories to `<UUID>.deleting`
+before deleting; locked deletions are retried, and stale orphan directories are swept
+only after the startup grace period and when their runner is absent. Two-second checks
+track this server's active jobs; OS identities are cached for up to 60 seconds and shared
+with GC, with `kill(pid, 0)` used first for liveness. Kill always rechecks creation identity.
+
+Quota queries stop automatic keys only for interactive update menus (an available-update
+heading plus menu choices/cursor, or “Press Enter to update”). Passive npm-to-native
+installer hints and update progress do not block queries. Codex can fall back to a recent
+session rate-limit record if an update menu blocks its TUI, including a refresh query.
+
+The `live-jobs/` snapshots remain for unrecoverable Antigravity/direct-api and
+6.7.0 compatibility; legacy CLI `cwds/` files can still be read. Their summaries
+expire after 30 minutes, and snapshots require a verified live owner. All sessions
+must share `AI_CLI_STATE_DIR`. Identity lookup uses CIM on Windows, `/proc` on Linux
+and `ps` on macOS; unavailable identity data cannot authorize recovery or killing.
+Monitoring summaries keep an 80-character `lastEvent` excerpt that can include a
+model response. Legacy CLI jobs with a live PID but unavailable creation identity
+remain running with `identityVerified: false` and `[unverified]` in the dispatcher
+column; this legacy fallback cannot rule out PID reuse.
 
 ## Claude Code job panel（optional plugin）
 
@@ -210,8 +286,8 @@ Running items from `get_result`, `wait` and `list_processes` all carry the same
 This matters because Codex and Claude emit nothing at all while reasoning. Without
 `liveness`, silence is indistinguishable from death.
 
-The file-backed path keeps a `lost` state: the PID is gone and no completion was
-recorded, so the outcome is genuinely unknown — which is not the same as failed.
+Durable MCP/CLI jobs become `lost` when both tracked processes disappear without
+a completion record. The output remains available and the outcome is unknown.
 
 ## Auto-update
 
@@ -449,3 +525,21 @@ This project is a derivative work of software originally released under the
 MIT License. The original copyright notices and the retained MIT terms are in
 [NOTICE](NOTICE), which ships with every copy — it is in the repo and
 listed in `package.json`'s `files`, so it travels with the npm package too.
+
+## Recovery acceptance and monitoring fixes
+
+Durable jobs are keyed by UUID `jobId`; reusing an OS PID keeps all retained jobs.
+PID-based wait/result/peek/kill selects the latest job and returns its `jobId`.
+Use MCP `get_result` with both `pid` and `jobId` to read an older retained result.
+TTY `jobs --watch` uses the alternate screen and restores the cursor/screen on exit;
+non-TTY and JSON watch output remains append-only.
+
+`query_usage` launches Codex with `-c check_for_update_on_startup=false`, including
+its fallback without `--no-daemon`. Codex and Claude update prompts stop automated
+keys and return an error. This does not alter the user's global configuration.
+
+Run the opt-in live recovery acceptance with
+`npm run verify:restart-recovery -- --family claude,codex,grok` or `--models ...`.
+Every family explicitly receives medium effort. Reports include recovered/running,
+completed output, session, usage and UUID counts. It consumes model quota;
+see [acceptance usage](tools/acceptance/README.md). `npm test` uses stubs only.

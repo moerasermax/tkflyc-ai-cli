@@ -79,6 +79,7 @@ export interface CatalogV2 {
 const VENDOR_LABEL: Record<AgentId, string> = {
   claude: 'Anthropic',
   codex: 'OpenAI',
+  grok: 'xAI',
   antigravity: 'Antigravity',
   'direct-api': 'DirectAPI',
 };

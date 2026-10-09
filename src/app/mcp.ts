@@ -59,6 +59,7 @@ export class AiCliMcpServer {
     const cliPaths = resolveAllCliPaths();
     console.error(`[Setup] Claude CLI: ${cliPaths.claude}`);
     console.error(`[Setup] Codex CLI: ${cliPaths.codex}`);
+    console.error(`[Setup] Grok CLI: ${cliPaths.grok}`);
     console.error(`[Setup] Antigravity CLI (agy): ${cliPaths.antigravity}`);
     console.error('[Setup] Direct API: ~/.local/share/ai-cli/providers.json');
 
@@ -102,7 +103,7 @@ export class AiCliMcpServer {
       tools: [
         {
           name: 'run',
-          description: `AI Agent Runner: Starts a Claude, Codex, Antigravity, or direct API agent job in the background and returns a PID immediately. Use list_processes and get_result to monitor progress.
+          description: `AI Agent Runner: Starts a Claude, Codex, Grok, Antigravity, or direct API agent job in the background and returns a PID immediately. Use list_processes and get_result to monitor progress.
 
 • File ops: Create, read, (fuzzy) edit, move, copy, delete, list files, analyze/ocr images, file content analysis
 • Code: Generate / analyse / refactor / fix
@@ -148,23 +149,23 @@ ${getSupportedModelsDescription()}
               reasoning_effort: {
                 type: 'string',
                 description:
-                  'Reasoning control for Claude and Codex. Claude uses --effort with "low", "medium", "high", "xhigh", "max". Codex uses model_reasoning_effort with "low", "medium", "high", "xhigh", "max", "ultra" — "max" and "ultra" are only offered by the newer models (gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-5.6-sol, gpt-5.6-terra; gpt-6-luna and gpt-5.6-luna stop at "max", gpt-5.5 stops at "xhigh", per the vendor model catalog as of 2026-10-03). Note the CLI-side default effort differs per model: gpt-6.1-sol and gpt-5.6-sol default to "low", the rest to "medium", so omitting this field is not the same across models. An unsupported combination is not reliably rejected: gpt-5.5 + "max" fails with HTTP 400 from the API, while gpt-6-luna + "ultra" exited 0 in a 2026-09-26 run — so a clean exit does not prove the level took effect. Antigravity and direct-api do not support reasoning_effort in this integration.',
+                  'Reasoning control for Claude, Codex and Grok. Grok uses --reasoning-effort with low, medium, high, xhigh (live verified: grok 1.0.50). Claude uses --effort with "low", "medium", "high", "xhigh", "max". Codex uses model_reasoning_effort with "low", "medium", "high", "xhigh", "max", "ultra" — "max" and "ultra" are only offered by the newer models (gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-5.6-sol, gpt-5.6-terra; gpt-6-luna and gpt-5.6-luna stop at "max", gpt-5.5 stops at "xhigh", per the vendor model catalog as of 2026-10-03). Note the CLI-side default effort differs per model: gpt-6.1-sol and gpt-5.6-sol default to "low", the rest to "medium", so omitting this field is not the same across models. An unsupported combination is not reliably rejected: gpt-5.5 + "max" fails with HTTP 400 from the API, while gpt-6-luna + "ultra" exited 0 in a 2026-09-26 run — so a clean exit does not prove the level took effect. Antigravity and direct-api do not support reasoning_effort in this integration.',
               },
               session_id: {
                 type: 'string',
                 description:
-                  'Optional session ID to resume a previous session. Supported for Claude, Codex, Antigravity, and direct-api. direct-api stores sessions under workFolder/.tmp/api_sessions.',
+                  'Optional session ID to resume a previous session. Supported for Claude, Codex, Grok, Antigravity, and direct-api. direct-api stores sessions under workFolder/.tmp/api_sessions.',
               },
               capabilities: {
                 type: 'array',
                 items: { type: 'string' },
                 description:
-                  'Restrict what the agent may do. Give it and the agent starts through its STRICT builder instead of the normal one: claude gets --allowedTools Read,Glob,Grep with no --dangerously-skip-permissions, codex gets --sandbox read-only. A read-only turn is ["fs/read", "analysis/produce"]. OMITTING this field keeps the long-standing behaviour: unrestricted, with the vendor permission bypasses on. An EMPTY array is NOT the same as omitting it — empty means "no capabilities at all" and still goes through the strict builder. If the selected agent has no strict builder the call is REFUSED rather than quietly falling back to the permissive one.',
+                  'Restrict what the agent may do. Give it and the agent starts through its STRICT builder instead of the normal one: claude gets --allowedTools Read,Glob,Grep with no --dangerously-skip-permissions, codex gets --sandbox read-only; grok gets --tools Read,Glob,Grep, --disallowed-tools, --disable-web-search and --permission-mode dontAsk. A read-only turn is ["fs/read", "analysis/produce"]. OMITTING this field keeps the long-standing behaviour: unrestricted, with the vendor permission bypasses on. An EMPTY array is NOT the same as omitting it — empty means "no capabilities at all" and still goes through the strict builder. If the selected agent has no strict builder the call is REFUSED rather than quietly falling back to the permissive one.',
               },
               system_prompt: {
                 type: 'string',
                 description:
-                  "A system prompt for this run, appended after the vendor default (claude: --append-system-prompt-file). Use it for operator-side framing that must NOT look like user input — for example a protocol marker or a transcript replay that the caller injects. Text placed in the prompt body sits where the user's own words go, and a well-aligned model can legitimately read it as prompt injection and refuse. REFUSED (not ignored) when the selected agent has no system-prompt channel, so the caller never believes the framing was delivered when it was not.",
+                  "A system prompt for this run, appended after the vendor default (claude: --append-system-prompt-file; grok: --rules after WORKER_CONTEXT). Use it for operator-side framing that must NOT look like user input — for example a protocol marker or a transcript replay that the caller injects. Text placed in the prompt body sits where the user's own words go, and a well-aligned model can legitimately read it as prompt injection and refuse. REFUSED (not ignored) when the selected agent has no system-prompt channel, so the caller never believes the framing was delivered when it was not.",
               },
             },
             required: ['workFolder'],
@@ -179,11 +180,12 @@ ${getSupportedModelsDescription()}
         {
           name: 'get_result',
           description:
-            'Get the current output and status of an AI agent process by PID. Running results include liveness: alive, elapsedSec, sinceLastOutputSec, stdoutBytes, stderrBytes, lastEvent, eventCount and an English hint. Codex/Claude can emit nothing while reasoning; while liveness.alive is true, keep waiting or use peek for live events. Terminal results have no liveness. Defaults to a compact result shape; set verbose to true for full metadata and detailed parsed output. Compact results omit raw stdout/stderr while a job is running (use liveness, or peek for live events); a finished job without a parsed reply returns only the last 4096 characters, marked by stdoutTruncated/stderrTruncated. With verbose, a job without a parsed reply returns the full raw output.',
+            'Get the current output and status of an AI agent process by PID. Running results include liveness: alive, elapsedSec, sinceLastOutputSec, stdoutBytes, stderrBytes, lastEvent, eventCount and an English hint. Codex/Claude can emit nothing while reasoning; while liveness.alive is true, keep waiting or use peek for live events. Terminal results have no liveness. Defaults to a compact result shape; set verbose to true for full metadata and detailed parsed output. Compact results omit raw stdout/stderr while a job is running (use liveness, or peek for live events); a finished job without a parsed reply returns only the last 4096 characters, marked by stdoutTruncated/stderrTruncated. With verbose, durable job logs are capped at 8 MiB per stream and carry stdoutTruncated/stderrTruncated byte counts; oversized parsed replies carry agentOutputTruncated. Read disk logs for larger output.',
           inputSchema: {
             type: 'object',
             properties: {
-              pid: { type: 'number', description: 'The process ID returned by run tool.' },
+              pid: { type: 'number', description: 'The process ID returned by run tool; resolves to its latest job when reused.' },
+              jobId: { type: 'string', description: 'Optional durable job UUID from list_processes, to retrieve an older job after PID reuse.' },
               verbose: {
                 type: 'boolean',
                 description:
@@ -196,7 +198,7 @@ ${getSupportedModelsDescription()}
         {
           name: 'wait',
           description:
-            'Wait for AI agent processes and return an array of current results. Timeout is NOT an error: still-running items include timedOut: true and liveness (alive, elapsedSec, sinceLastOutputSec, stdoutBytes, stderrBytes, lastEvent, eventCount, hint). Use timeout <= 90 seconds and call repeatedly; do not abandon a PID while liveness.alive is true. Codex/Claude emit nothing while reasoning. Use peek to observe live messages and tool events. Terminal items have neither liveness nor timedOut. Unknown PIDs still cause an error. Defaults to compact result items; set verbose to true for full metadata and detailed parsed output. Compact results omit raw stdout/stderr while a job is running (use liveness, or peek for live events); a finished job without a parsed reply returns only the last 4096 characters, marked by stdoutTruncated/stderrTruncated. With verbose, a job without a parsed reply returns the full raw output.',
+            'Wait for AI agent processes and return an array of current results. Timeout is NOT an error: still-running items include timedOut: true and liveness (alive, elapsedSec, sinceLastOutputSec, stdoutBytes, stderrBytes, lastEvent, eventCount, hint). Use timeout <= 90 seconds and call repeatedly; do not abandon a PID while liveness.alive is true. Codex/Claude emit nothing while reasoning. Use peek to observe live messages and tool events. Terminal items have neither liveness nor timedOut. Unknown PIDs still cause an error. Defaults to compact result items; set verbose to true for full metadata and detailed parsed output. Compact results omit raw stdout/stderr while a job is running (use liveness, or peek for live events); a finished job without a parsed reply returns only the last 4096 characters, marked by stdoutTruncated/stderrTruncated. With verbose, durable job logs are capped at 8 MiB per stream and carry stdoutTruncated/stderrTruncated byte counts; oversized parsed replies carry agentOutputTruncated. Read disk logs for larger output.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -221,7 +223,7 @@ ${getSupportedModelsDescription()}
         {
           name: 'peek',
           description:
-            'One-shot short observation window for running child agents. Returns only natural-language message events, and optionally normalized tool_call events, observed during this call; not a history API, not gapless streaming, and not stdout/stderr tailing. Message extraction is supported for Codex, Claude, direct-api, and Antigravity. Tool calls exclude raw tool output.',
+            'One-shot short observation window for running child agents. Returns only natural-language message events, and optionally normalized tool_call events, observed during this call; not a history API, not gapless streaming, and not stdout/stderr tailing. Message extraction is supported for Codex, Claude, Grok, direct-api, and Antigravity. Tool calls exclude raw tool output.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -335,6 +337,7 @@ Note: antigravity (agy) does accept model selection — the resolved name is nor
       debugLog('[Debug] Handling CallToolRequest:', args);
       const toolName = args.params.name;
       const toolArguments = (args.params.arguments || {}) as Record<string, unknown>;
+      if (['run', 'list_processes', 'get_result', 'wait', 'peek', 'kill_process', 'cleanup_processes'].includes(toolName)) await this.processService.ready;
       switch (toolName) {
         case 'run':
           return this.handleRun(toolArguments);
@@ -566,7 +569,7 @@ Note: antigravity (agy) does accept model selection — the resolved name is nor
     }
     try {
       return this.jsonResult(
-        this.processService.getProcessResult(toolArguments.pid, !!toolArguments.verbose)
+        this.processService.getProcessResult(toolArguments.pid, !!toolArguments.verbose, typeof toolArguments.jobId === 'string' ? toolArguments.jobId : undefined)
       );
     } catch (error) {
       const message = (error as Error).message;
@@ -625,12 +628,12 @@ Note: antigravity (agy) does accept model selection — the resolved name is nor
     }
   }
 
-  private handleKillProcess(toolArguments: Record<string, unknown>): ServerResult {
+  private async handleKillProcess(toolArguments: Record<string, unknown>): Promise<ServerResult> {
     if (!toolArguments.pid || typeof toolArguments.pid !== 'number') {
       throw new McpError(ErrorCode.InvalidParams, 'Missing or invalid required parameter: pid');
     }
     try {
-      return this.jsonResult(this.processService.killProcess(toolArguments.pid));
+      return this.jsonResult(await this.processService.killProcess(toolArguments.pid));
     } catch (error) {
       const message = (error as Error).message;
       const code = /not found/.test(message) ? ErrorCode.InvalidParams : ErrorCode.InternalError;
@@ -686,6 +689,7 @@ Note: antigravity (agy) does accept model selection — the resolved name is nor
 
   async cleanup(): Promise<void> {
     this.stopUpdates?.();
+    this.processService.dispose();
     if (this.sigintHandler) {
       process.removeListener('SIGINT', this.sigintHandler);
     }

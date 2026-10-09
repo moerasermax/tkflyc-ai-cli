@@ -110,6 +110,7 @@ async function checkEntry(entry) {
   const modelsPayload = JSON.parse(models.content[0].text);
   log(`models agents = ${Object.keys(modelsPayload).filter((k) => Array.isArray(modelsPayload[k])).join(', ')}`);
   if (!modelsPayload.antigravity) throw new Error('antigravity missing!');
+  check(modelsPayload.grok?.includes('grok-4.7'), 'models MCP payload includes Grok family');
   check(modelsPayload.catalogV2.agents.find((a) => a.agent === 'antigravity')?.source === 'vendor-cli',
     `${entry.name} models 等待 refresh 後回 vendor-cli`);
   await client.callTool({ name: 'models', arguments: {} });

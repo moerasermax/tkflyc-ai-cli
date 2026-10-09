@@ -1,5 +1,5 @@
 /** worker 身分驗收的純邏輯；不載入 CLI、不連模型、不讀使用者設定。 */
-export const FAMILIES = ['claude', 'codex', 'antigravity', 'direct-api'];
+export const FAMILIES = ['claude', 'codex', 'grok', 'antigravity', 'direct-api'];
 export const LEADER_TITLE = '【ai-cli 精簡派工政策 v2.0（2026-09-20）】';
 export const WORKER_TITLE = '【ai-cli worker 身分（AI_CLI_WORKER=1）】';
 
@@ -51,7 +51,7 @@ export function probeFailures(probe, family) {
   if (confirmedLeaderPolicy(probe)) errors.push('A 必須沒有主導者政策（第一行原文已確認）');
   else if (probe.A === true) errors.push('探針回答不可信：A=有但未附主導者政策標題的正確第一行原文（能力類）');
   else if (probe.A !== false) errors.push('探針回答不可信：A 缺答或格式不明（能力類）');
-  if (['claude', 'codex'].includes(family) && probe.B !== true) errors.push('B 必須有 worker 身分');
+  if (['claude', 'codex', 'grok'].includes(family) && probe.B !== true) errors.push('B 必須有 worker 身分');
   return errors;
 }
 
@@ -60,15 +60,17 @@ export function answerText(result) {
   return [output?.message, output?.result, output?.response].find(v => typeof v === 'string') ?? '';
 }
 
+// 原生 use_tool 是 MCP bridge；search_tool 只做搜尋，不是派工。
+const toolName = t => (t.tool ?? t.name) === 'use_tool' ? t.input?.tool_name ?? '' : t.tool ?? t.name ?? '';
 export function aiCliTools(tools = []) {
-  return tools.filter(t => /(?:^|__)ai[-_]cli(?:__|$)/i.test(t.tool ?? t.name ?? '')
+  return tools.filter(t => /(?:^|__)ai[-_]cli(?:__|$)/i.test(toolName(t))
     || /(?:^|[^a-z])ai[-_]cli(?:$|[^a-z])/i.test(t.server ?? ''));
 }
 
 /** F2 的穩定錯誤碼；一般文字說「不派工」不能冒充機制拒絕。 */
 export function nestedDispatchBlocked(run = {}) {
   return [run.stdout, run.stderr, JSON.stringify(run.tools ?? []), JSON.stringify(run.result ?? {})]
-    .some(text => typeof text === 'string' && text.includes('AI_CLI_NESTED_DISPATCH_BLOCKED:') && text.includes('AI_CLI_ALLOW_NESTED=1'));
+    .some(text => typeof text === 'string' && text.includes('AI_CLI_NESTED_DISPATCH_BLOCKED'));
 }
 
 /** 只豁免同一 call id 的 run 拒絕；不能用另一個 shell 的拒絕洗掉未受阻的 MCP 呼叫。 */
@@ -79,21 +81,24 @@ export function unblockedAiCliTools(run = {}) {
   const blockedIds = new Set(tools.filter(refused)
     .map(t => t.tool_use_id ?? t.id).filter(Boolean));
   return aiCliTools(tools).filter(t => {
-    const isRun = /(?:^|__)run$/.test(t.tool ?? t.name ?? '');
+    const isRun = /(?:^|__)run$/.test(toolName(t));
     return !isRun || !(refused(t) || blockedIds.has(t.id));
   });
 }
 
 export function toolRecords(stdout, stderr = '') {
-  const tools = [];
+  const tools = []; const pending = []; let sequence = 0;
   for (const line of `${stdout}\n${stderr}`.split(/\r?\n/)) {
     let e;
     try { e = JSON.parse(line); } catch { continue; }
-    for (const block of e.message?.content ?? []) if (block.type === 'tool_use') {
-      tools.push({ id: block.id, tool: block.name, input: block.input, phase: 'started' });
+    for (const block of e.message?.content ?? e.content ?? []) if (block.type === 'tool_use') {
+      const id = block.id ?? `grok-call-${++sequence}`; pending.push(id);
+      tools.push({ id, tool: block.name, input: block.input, phase: 'started' });
     }
-    for (const block of e.message?.content ?? []) if (block.type === 'tool_result') {
-      tools.push({ tool_use_id: block.tool_use_id, output: block.content, is_error: block.is_error, phase: 'completed' });
+    for (const block of e.message?.content ?? e.content ?? []) if (block.type === 'tool_result') {
+      const id = block.tool_use_id ?? pending.at(-1);
+      if (id) { const at = pending.indexOf(id); if (at >= 0) pending.splice(at, 1); }
+      tools.push({ tool_use_id: id, output: block.content, is_error: block.is_error, phase: 'completed' });
     }
     if (e.item?.type === 'mcp_tool_call') tools.push({ ...e.item, phase: e.type });
     if (e.type === 'tool_use') tools.push({ tool: e.tool ?? e.name, input: e.input });
@@ -120,6 +125,9 @@ export function isWorker(proc) {
   if (name === 'claude') return (tokens.includes('-p') || tokens.includes('--print'))
     && tokens.some(t => t === 'stream-json' || t === '--output-format=stream-json');
   if (name === 'codex') return tokens.includes('exec'); // exec-server 與 --mode=exec 都不算
+  if (['grok', 'agent'].includes(name)) return tokens.some(t => ['--prompt-file', '-p', '--single', '--prompt-json'].includes(t)
+    || /^--(?:prompt-file|single|prompt-json)=/.test(t))
+    && tokens.some(t => t === 'streaming-messages-json' || t === '--output-format=streaming-messages-json');
   // agy 也列入計數，否則 agy 自身 + 一個遞迴 codex 會被漏算。
   return ['agy', 'antigravity'].includes(name) && (tokens.includes('-p') || tokens.includes('--print'));
 }

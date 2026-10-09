@@ -14,10 +14,18 @@ const cp = createRequire(import.meta.url)('node:child_process');
 const originalSpawn = cp.spawn;
 let nextPid = 100000;
 let spawnCount = 0;
-cp.spawn = () => {
+cp.spawn = (_command, args = []) => {
   spawnCount++;
+  const pid = nextPid++;
+  if (args[0]?.endsWith('job-runner.js')) {
+    // runner 現在有 meta handshake；假 spawn 同步模擬握手，仍不啟動 vendor。
+    const dir = args[1], spec = JSON.parse(readFileSync(join(dir, 'launch.tmp'), 'utf8'));
+    writeFileSync(join(dir, 'meta.json'), JSON.stringify({ ...spec.meta, pid, runner: { pid, started: 'stub', name: 'stub' }, worker: null }));
+    writeFileSync(join(dir, 'stdout.log'), ''); writeFileSync(join(dir, 'stderr.log'), '');
+    writeFileSync(join(dir, 'exit.json'), JSON.stringify({ exitCode: 0, signal: null, endTime: new Date().toISOString(), killed: false, timedOut: false }));
+  }
   return Object.assign(new EventEmitter(), {
-    pid: nextPid++, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), unref() {},
+    pid, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), unref() {},
   });
 };
 syncBuiltinESMExports();

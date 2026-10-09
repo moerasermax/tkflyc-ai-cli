@@ -6,9 +6,48 @@
 [![npm](https://img.shields.io/npm/v/%40tkflyc%2Fai-cli-mcp)](https://www.npmjs.com/package/@tkflyc/ai-cli-mcp)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-把 Claude / Codex / Antigravity(agy) 等本機 AI CLI，
+把 Claude / Codex / Grok / Antigravity(agy) 等本機 AI CLI，
 以及**任何第三方 OpenAI-compatible API**（透過 direct-api，自己接）包成 MCP 工具，支援背景 job。這是**從原始碼自行維護**的版本，採用 registry-based
 架構，新增 AI agent 只需新增一個檔案。
+
+## Grok CLI
+
+Grok 是供程式碼／文字工作使用的獨立 xAI CLI 後端，使用 CLI 自己的登入。
+模型候選為 `grok-4.7`、`grok-4.7-build-fast`、`grok-4.6`、`grok-4.5`；
+`models` 工具與 `ai-cli models` 以 `grok models` 探查，15 秒逾時，失敗／未登入時
+保留成功快取或標示 `builtin-fallback`，不把靜態清單冒充 vendor 回覆。
+`GROK_CLI_NAME` 可覆寫指令或絕對路徑；預設先找 PATH，再退回
+`~/.grok/bin/grok.exe`（Windows）或 `~/.grok/bin/grok`。doctor 會列出 grok。
+
+長 prompt 走 UTF-8 `--prompt-file`，Windows native executable 不經 cmd.exe。
+`--rules` 每次送出共用 `WORKER_CONTEXT`，接著空一行附上 `run.system_prompt`；
+resume 也會重新補鎖，以 `--resume <session_id>` 續接，不使用 `--system-prompt-override`。
+一律帶 `--no-subagents`，一般模式加 `--always-approve`。
+`reasoning_effort` 支援 `low/medium/high/xhigh`，已實測（grok 1.0.50）。
+
+唯讀 `capabilities: ["fs/read", "analysis/produce"]` 送
+`--tools Read,Glob,Grep`、`--disallowed-tools` 寫入／shell／派工／動態工具拒絕清單
+（含 Grok 原生 MCP bridge `search_tool,use_tool`）、
+`--disable-web-search` 與 `--permission-mode dontAsk`，不帶 `--always-approve`。
+空 capabilities／只有 analysis/produce 時，因未確認 CLI 零工具模式的語意而直接拒絕；
+未知能力也直接拒絕。原生 MCP 拒絕名稱已在 grok 1.0.50 實測；實機仍須驗證
+shell／寫檔不能繞過；若該 CLI 版本無法強制限制，須把 builder 改成拒絕
+該版本後才可使用唯讀模式。stub 全綠只證明組裝契約，不能代替 vendor 行為驗證。
+
+Grok result 的 `subtype: error_during_execution` 或 `stop_reason: cancelled`
+即使 exit 0 也判 failed；錯誤訊息帶出這兩個欄位。
+
+Grok 的 MCP／CLI job 使用既有 JobStore／runner，可接回且適用結束後 30 分鐘回收。
+Messages NDJSON 的 result 會正規化 input/output/cache tokens 與 `cost_usd_nominal`
+（vendor 名目美元估值，不是帳單）；完整解析（verbose）的原始 usage 保存在 `raw_usage`。
+
+**F2 實機驗證點：** Grok 子行程已帶 `AI_CLI_WORKER=1`，但 Grok 會讀 Claude 的 MCP
+設定，必須確認它啟動的 ai-cli MCP server 也收到這個環境變數。由主導者執行
+`npm run verify:worker-identity -- --family grok`，探針期望 `A=沒有、B=有`，T6 正常產出
+通過自測的 add.py、worker 峰值 ≤ 1；若嘗試再派工，須看到
+`AI_CLI_NESTED_DISPATCH_BLOCKED:` 而且不產生第二個 worker。
+Grok 1.0.50 實測未收到 Claude SessionStart 身分 hook，因此此 agent 用 `--rules` 補鎖。
+真模型驗收由主導者執行，不加入 `npm test`。
 
 ## 快速開始
 
@@ -114,10 +153,12 @@ src/
 ├─ agents/                # ★ 每個 AI 一個檔，新增 AI 就加一個檔
 │   ├─ types.ts               # AgentDefinition 介面（可擴充的核心契約）
 │   ├─ registry.ts            # 中央註冊表（新增 agent 在此 import + 列入陣列）
-│   ├─ claude.ts / codex.ts / antigravity.ts / direct-api.ts
+│   ├─ claude.ts / codex.ts / grok.ts / antigravity.ts / direct-api.ts
 ├─ core/                  # 框架本體，新增 agent 時「不用動」
 │   ├─ command-builder.ts     # model routing + 指令組裝協調
-│   ├─ process-service.ts     # 記憶體版 job 管理（MCP 用）
+│   ├─ process-service.ts     # MCP job 管理
+│   ├─ job-store.ts           # MCP／CLI 共用持久化 job、增量讀取與回收
+│   ├─ job-runner.ts          # detached worker 父行程、fd 直寫輸出與 exit 記錄
 │   ├─ file-process-service.ts# 檔案版 job 管理（`ai-cli` CLI 用；pipe 子程序走 detached，
 │   │                         #   PTY 不 detach，direct-api 沒有子程序、同步跑完才返回）
 │   ├─ pty-runner.ts          # ConPTY（agy 等需要真實 TTY 的 CLI）
@@ -166,13 +207,13 @@ npm run typecheck  # 只型別檢查
 | 變數 | 用途 |
 |------|------|
 | `MCP_CLAUDE_DEBUG=true` | 開啟 debug 日誌到 stderr |
-| `AI_CLI_STATE_DIR` | CLI detached job 與更新狀態目錄（預設 `~/.local/state/ai-cli`） |
+| `AI_CLI_STATE_DIR` | MCP／CLI 共用持久化 job 與更新狀態目錄（預設 `~/.local/state/ai-cli`） |
 | `AI_CLI_CONFIG_DIR` | 使用者設定目錄（預設 `~/.local/share/ai-cli`）；測試以此隔離 config.json |
 | `AI_CLI_AUTO_UPDATE` | `on`（預設）／`check`／`off`，見「自動更新」 |
 | `AI_CLI_UPDATE_CHECK_INTERVAL_SEC` | 更新檢查間隔秒數，預設 `3600`；無效值使用預設 |
 | `AI_CLI_UPDATE_BRANCH` | 覆寫更新分支；未設時依 upstream 或 master |
 | `AI_CLI_USAGE_PLUGIN_BIN` | `ai-cli usage` 外掛的 .mjs 絕對路徑 |
-| `CLAUDE_CLI_NAME` / `CODEX_CLI_NAME` / `AGY_CLI_NAME` | 覆寫各 CLI 的指令名稱或絕對路徑 |
+| `CLAUDE_CLI_NAME` / `CODEX_CLI_NAME` / `GROK_CLI_NAME` / `AGY_CLI_NAME` | 覆寫各 CLI 的指令名稱或絕對路徑 |
 | `AI_CLI_DISCOVER_TIMEOUT_MS` | 模型查詢逾時毫秒，預設 `15000`；測試可縮短，非正整數或超出計時器範圍則用預設值 |
 | `AI_CLI_CATALOG_CACHE_PATH` | 模型磁碟快取路徑，預設 `~/.local/share/ai-cli/catalog-cache.json`；測試一律指向暫存目錄 |
 | `AI_CLI_PROVIDERS_PATH` | direct-api providers.json 路徑（預設 `~/.local/share/ai-cli/providers.json`） |
@@ -531,28 +572,63 @@ prompt 第一個有意義行的 40 字摘要、經過時間 m:ss、最後事件�
 ai-cli PID）。窄終端機會截短欄位，避免換行。父行程可能是 shell 或 Node launcher；
 無法取得名稱時顯示 `unknown`。
 
-MCP 行程把摘要寫到 `AI_CLI_STATE_DIR/live-jobs/<pid>-<建立時間token>.json`，
-預設為 `~/.local/state/ai-cli/live-jobs/`。格式版本 1，最外層為 `owner`、
-`updatedAt`、`jobs`；每筆 job 有 `pid`、`agent`、`model`、`reasoning_effort`、
-`task`、`workFolder`、`status`、`startTime`、`endTime`、`elapsedSec`、
-`sinceLastOutputSec`、`lastEvent`、`dispatcher`、`source`，不複製完整 prompt 或完整輸出 log。
-`lastEvent` 只存最後事件的 80 字摘要，可能包含模型回覆片段。
-開始與狀態變更立即寫入；執行中 liveness 每兩秒最多更新一次，先寫暫存檔再 rename。
-正常退出會刪除自己的快照；讀端核對 OS 的 PID＋建立時間，略過已退出或 PID 重用的
-殘檔，不刪檔。完成／失敗摘要十分鐘後移出快照；MCP server 退出或明確 cleanup 時
-會更早消失。
-建立 publisher 時由寫端回收超過十分鐘且已確認 owner 死亡或建立時間不同的殘檔。
-閒置且內容未變時不重寫快照；執行中刷新容許 50 ms 的計時器誤差。
+Claude／Codex／Grok 的 MCP 與 CLI job 共用 `AI_CLI_STATE_DIR/jobs/<UUID>/`，
+預設為 `~/.local/state/ai-cli/jobs/`。每個 job 都由 detached runner 當 worker 的父行程，
+MCP server 或 CLI 啟動端退出後仍可繼續。對外 PID 為 runner PID；目錄 UUID 才是 job 身分。
+MCP 重啟只接回同一主導者（排除套件啟動器後的祖先 PID＋OS 建立時間）派的 job，結果附
+`recovered: true`，接回絕不重跑、重試或重派。有 `exit.json` 就還原完成／失敗；
+runner 身分相符且活著則繼續追蹤；runner 與 worker 都消失且無 exit 時標為 `lost`，保留輸出。
+agy（含 ConPTY）與 direct-api 維持現有執行方式，無法在 MCP 重啟後接回。
 
-CLI detached job 沿用 `cwds/*/*/meta.json`、`exit-status.json` 與輸出檔，啟動端
-退出後仍能查看；新版 meta 附被追蹤行程的建立時間及派工端，舊版沒有這些資訊，
-沿用 PID 存活判讀並顯示未知派工端。`jobs` 全程唯讀，`AI_CLI_WORKER=1` 下也能執行。
-CLI job 的 PID 仍活著但無法取得建立身分時，仍顯示 `running`，JSON 附
-`identityVerified: false`，表格派工端標示 `[unverified]`；此退化行為無法排除 PID 重用。
-spawn 後以一次查詢合併 job 與派工端身分，派工端在 service instance 快取；
-`run` 先輸出 PID，CLI 退出前再等待 metadata 補寫完成。
-要聚合的所有 session 必須共用 `AI_CLI_STATE_DIR`。Windows 用 CIM、Linux 用 `/proc`、
-macOS 用 `ps` 查身分；無法查證快照 owner 時先略過，下次更新重試。
+主導者取第一個不是套件啟動器的祖先：以命令列精準跳過 `npx-cli.js`、
+`npm-cli.js exec`／`x`，以及執行 npx／npm exec 的 `cmd.exe`、POSIX `sh` 包裝。
+Claude Code 本身以 Node 執行時仍保留它，因此直接 node 與上方 npx 註冊方式都支援接回。
+server／主導者身分查不到會寫 stderr，後續 check 重試；命令列只用於辨識，不存入 metadata。
+
+`meta.json` 保存 agent、model、effort、40 字任務摘要、workFolder、session 欄位，
+及主導者／server／runner／worker 的 PID＋建立時間＋名稱，不存完整 prompt。
+runner 各以原子 rename 寫一次 meta 與 `exit.json`；exit 含 exitCode、signal、
+endTime、timedOut、killed。寫端以 `lost.json` 記錄首次確認失聯時間，讓沉默很久後
+才失聯的 job 也能保留 30 分鐘輸出。worker 的 stdout／stderr 由 OS 直接寫入已開好的
+`stdout.log`／`stderr.log` fd，不逐塊經過 ai-cli。prompt 經暫存 stdin 檔傳入，
+worker 不依賴 server，完成後刪除；log 可能包含 prompt 或模型回覆內容。
+`bootstrap.json` 只保存啟動摘要與 runner PID，meta 寫入失敗仍可找到 job。
+runner 身分查詢最多三次，間隔退避 250／500 ms；仍失敗就寫 failed 結果、
+刪除 stdin，完全不啟動 worker。30 秒後仍無 meta 的 job 顯示 lost。
+worker 已啟動卻寫不進 meta 時，runner 終止剛啟動的 worker，並盡力寫錯誤 exit。
+Grok prompt 檔移入 job 目錄隨 job 回收；未接管的 staging 檔有退出／計時清理，
+GC 也會清掉超過六小時的 staging 檔，不必等下次 Grok 派工。
+
+讀端只留各檔 byte offset、解析進度與每個 stream 的最後 4 KiB；輪詢只讀新增 bytes，
+verbose result 按需讀取，每個 stream 最多 8 MiB；超出時附
+`stdoutTruncated`／`stderrTruncated` 的原始與顯示 byte 數，過大的解析回覆另附
+`agentOutputTruncated`。更大輸出可直接讀磁碟 log。
+`ai-cli run / ps / result / wait / jobs` 都用同一份 store，持久化 job 不再重複寫監看快照。
+CLI `run` 最多等 15 秒握手；逾時仍以 exit 0 回 PID＋jobId 和 warning，應追蹤這筆 job，勿重派。
+`jobs` 全程唯讀，`AI_CLI_WORKER=1` 下也能執行。
+
+結束／lost 的 job 保留 30 分鐘；寫端啟動時及 unref timer 每 60 秒回收，超過 100 個
+已結束 job 或共 500 MiB 時由最舊開始刪除，活著的 job 不刪。
+`cleanup_processes` 立即清除已結束 job 的記憶體與磁碟；agy／direct-api 記憶體項目
+也套用 30 分鐘回收。kill 先核對 runner 身分，再請 runner 終止 worker 整棵樹，
+寫入 `killed: true` 後 runner 自己退出。
+身分查詢失敗時終止可重試，成功送出終止才設 killed／timedOut。
+GC 先 rename 成 `<UUID>.deleting` 再刪；檔案被鎖時保留待下輪重試，
+無 meta 的孤兒須超過 30 秒啟動寬限且 runner 不在才清除。
+每兩秒 check 只追蹤自己 server 的執行中 job；先用 `kill(pid, 0)` 看存活，
+OS 身分快取最多 60 秒並與 GC 共用，kill 仍會即時重查建立時間。
+
+額度查詢只對互動更新選單停止自動按鍵（更新可用標題加選項／游標，或
+「Press Enter to update」）。npm→native installer 的被動提示及更新進度不算。
+Codex 被更新選單擋住時，可退回近期 session rate-limit 紀錄，refresh 查詢也適用。
+
+`live-jobs/` 保留給不可接回的 agy／direct-api 與 6.7.0 相容讀取，舊 CLI `cwds/`
+也仍可讀；摘要 30 分鐘後到期，快照須能查證 owner 仍活著。
+要聚合的 session 必須共用 `AI_CLI_STATE_DIR`。Windows 用 CIM、Linux 用 `/proc`、
+macOS 用 `ps` 查身分；拿不到身分資料時不得據此接回或殺行程。
+監看摘要的 `lastEvent` 最多 80 字，可能包含模型回覆片段。
+舊 CLI job 的 PID 仍在但建立時間無法查證時，沿用 running 並附
+`identityVerified: false`，表格派工端標示 `[unverified]`；此舊版退化行為無法排除 PID 重用。
 
 ## Claude Code 派工面板（選用外掛）
 
@@ -589,7 +665,7 @@ macOS 用 `ps` 查身分；無法查證快照 owner 時先略過，下次更新�
 
 | 欄位 | 型別 | 意義 |
 |------|------|------|
-| `alive` | boolean | MCP：尚未收到 close；file：OS PID 存在且沒有 exit-status。它表示程序存活，不能保證模型正在產生答案 |
+| `alive` | boolean | 持久化 job：尚無 exit，且 runner／worker 未被確認消失；不可接回的 MCP job：尚未收到 close；舊 file job：PID 存在且無 exit-status。它表示程序存活，不能保證模型正在產生答案 |
 | `elapsedSec` | number | 從啟動到現在的秒數，可含小數 |
 | `sinceLastOutputSec` | number / null | 距最後 stdout / stderr chunk 的秒數；從未輸出是 null |
 | `stdoutBytes` | number | 收到的 stdout 位元組數；PTY 合併的輸出也計入 stdout |
@@ -737,3 +813,19 @@ Apache-2.0，見 [LICENSE](LICENSE)。
 
 本專案是衍生作品，原始程式最初以 MIT 授權釋出。原始的著作權聲明與保留的 MIT 條款在
 [NOTICE](NOTICE)，它隨每一份副本散布（已列入 `package.json` 的 `files`）。
+
+## 接回驗收與監看修正
+
+持久化 job 以 UUID `jobId` 為主鍵；OS 重用 PID 時仍保留全部未過期 job。
+以 PID 呼叫 wait/result/peek/kill 時選最新 job，回傳包含 `jobId`。
+MCP `get_result` 可同時給 `pid` 與 `jobId`，讀取較舊的保留結果。
+TTY `jobs --watch` 使用替代畫面，離開時還原游標與畫面；非 TTY／JSON 仍逐次輸出。
+
+`query_usage` 啟動 Codex 時帶 `-c check_for_update_on_startup=false`，
+拿掉 `--no-daemon` 的退路也保留這個設定。Codex／Claude 出現更新提示時，
+自動按鍵即停止並回錯誤；不修改使用者的全域設定。
+
+真模型接回驗收使用
+`npm run verify:restart-recovery -- --family claude,codex,grok` 或 `--models ...`。
+每家明確送 medium；報告檢查 recovered/running、完整結果、session、usage 與 UUID 數。
+此命令會消耗模型額度；詳見[驗收用法](tools/acceptance/README.md)。`npm test` 只用 stub。

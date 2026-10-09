@@ -8,8 +8,22 @@
 
 ## [Unreleased]
 
+### 修正
+
+- Worker 驗收先等待 ProcessService.ready，避免首筆 launch.tmp 快照尚未初始化的 principal:null；raw tap 容忍 runner 身分重試期間尚未建立的 stdout／stderr log，結束後缺檔仍判監控失敗。principal 補 npm run／test 的 npm-cli 與直屬 script shell 啟動器，停在第一個非啟動器（含 Git Bash snapshot shell），查不到身分仍保留 null／stderr／下輪重試。補延遲初始化／log、啟動鏈與查詢失敗 stub 回歸及 raw tap 突變。（Codex）
+- 6.8.0 第四部分依另一家模型的獨立稽核修正 H1／H2、M1–M7、L1–L4：runner 身分三次退避失敗先落 failed／清 prompt、不啟動 worker；bootstrap 與 30 秒寬限避免無 meta 永遠 running，meta 寫失敗終止自己的 worker；終止核對失敗可重試、成功送出才標 killed／timedOut。GC rename 為 .deleting 後刪並掃孤兒，verbose 每 stream 限 8 MiB 附截短標記；server／principal 缺身分重試並寫 stderr，精準跳過 npx／npm exec／shell 啟動器而保留 Node 主導者。更新提示只認互動選單、Codex 可退回 session 額度；CLI 握手逾時仍回 PID＋jobId＋warning／exit 0 防重派。Grok 共用所有非 success 的 failed 判定、補相容 deny 名稱、prompt 納入 job 回收與 staging 清理；兩秒 check 只追自己的 job、GC 每 60 秒並共用身分快取（穩態每分鐘 PowerShell 由 60N 降至約 N，不含派工／kill／監看讀端）。新增 stub 故障回歸及 H1／H2／M5／M6 四筆手動突變；未新增任何 worker 重跑或 prompt 重送路徑，中英文 README／工具描述同步。（Codex）
+- Grok strict 同時禁止 Claude 相容名稱與原生 MCP bridge `search_tool/use_tool`、shell、寫入及派工等工具，避免 dontAsk 拒絕 MCP 時整個 job 被取消；`error_during_execution`／`cancelled` 強制判 failed，錯誤帶 subtype／stop_reason。（Codex）
+- Grok effort 加入 xhigh，help、catalog 與中英文 README 改為 low／medium／high／xhigh 已實測（grok 1.0.50）。（Codex）
+- Worker 驗收辨識 Grok `use_tool.input.tool_name` 的 ai-cli MCP 呼叫，依同呼叫 tool_result 的 F2 錯誤碼豁免受阻 run；無 id 的序列結果也可配對，search_tool 不算派工。持久化 raw tap 讀完整 log，避免尾端截斷漏掉間接呼叫。（Codex）
+- 持久化 store 與 MCP 索引改以 UUID jobId 保留所有 job；PID 查詢選最新，run／list／result／peek／kill 回 jobId，get_result 可用 pid＋jobId 讀舊結果。以相同 PID 的兩份合法 metadata 重現舊版磁碟 2 筆、list 1 筆；自然重跑前三次未出現 PID 重用，修後 memory 五連跑的第 1 次捕捉到 PID 23784 對應不同 UUID（50 jobs／49 PIDs），修後仍列出全部 50 筆。補碰撞與 GC 回歸、50-job UUID 對照；獨立 core 稽核留給主導者。（Codex）
+- query_usage 的 Codex 每次啟動帶 `-c check_for_update_on_startup=false`，舊版移除 no-daemon 的退路仍保留該設定；Codex／Claude 偵測更新提示即中止並回明確錯誤，首次按鍵及延遲 Enter 皆有防護，補 PTY stub 測試。（Codex）
+- `ai-cli jobs --watch` 的 TTY 表格使用替代畫面、隱藏游標與逐行清尾重畫，結束／訊號／例外恢復原畫面與游標；非 TTY 與 JSON 維持逐次輸出，避免 Windows Terminal 捲動緩衝區洗版。（Codex）
+
 ### 新增
 
+- 收錄 `tools/acceptance/restart-recovery.mjs` 與 `verify:restart-recovery`，獨立 state、family/models 篩選、三家明確 medium、Markdown／JSON 報告，驗 recovered/running、完整訊息／session／usage 與 store UUID 數量；收尾逐 PID 核對建立時間、名稱與命令，無整批 node 或未核對非 node 終止，真模型入口不執行於 npm test，流程及 MCP transport 用 stub 驗證。（Codex）
+- 新增 Grok CLI pipe agent（四個 grok 模型、grok models 有界探查／快取後備、doctor、Messages NDJSON usage／成本）；長 prompt 走檔案，WORKER_CONTEXT 與 system_prompt 依序走 --rules，子行程帶 AI_CLI_WORKER=1、一律關子 agent，接入既有持久化 runner／接回／30 分鐘回收。補唯讀工具允許／拒絕清單與未知能力 fail-closed、grok worker 驗收家族（A=沒有、B=有與 T6）、stub 與關鍵突變；主導者已實測 Grok 1.0.50 effort 四值、worker 身分 4/4、MCP 環境繼承 F2、長 prompt 與 resume；新增原生 deny 修正後的完整實機驗收仍待重跑。（Codex）
+- Claude／Codex 的 MCP 與 CLI job 統一使用 UUID 持久化 store 與 detached runner，stdout／stderr 由 OS fd 直寫；同主導者 PID＋建立時間可在 MCP 重啟後接回（含離線完成與 lost），絕不重跑／重試。結束 job 保留 30 分鐘，另以 100 個／500 MiB 由舊到新回收，cleanup 立即清除，agy／direct-api 仍不可接回但套用 30 分鐘回收。補重啟、身分隔離、整棵樹 kill、CLI 共用 store、假時鐘回收及 50×1 MiB stub 驗證；接手檢查修正 POSIX 孫行程逃過終止、啟動失敗回報、失聯輸出收尾／首次失聯起算保留時間、resume session 欄位、UTF-8／截短標記與 V8 摘要切片保留大原文（修後 heap 增加 169,648 bytes；52,434,450 bytes 輸出對應 52,509,926 bytes 邏輯檔案寫入）。中英文 README 更新；獨立稽核與真 CLI 實機驗收留給主導者。（Codex）
 - 收錄 `ai-cli-jobs` 0.1.0 選用 Claude Code 外掛與 `tkflyc-ai-cli` marketplace，可由 GitHub 安裝；在輸入框上方列出該 session 派出的 job、下方提示行顯示摘要，每 3 秒透過 MCP 輪詢且不花模型 token，補上中英文安裝／解除安裝與跨 session 監看說明，外掛不納入 npm 打包。（Codex）
 
 ## [6.7.0] - 2026-10-08

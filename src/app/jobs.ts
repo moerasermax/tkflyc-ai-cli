@@ -58,7 +58,8 @@ export async function listJobs(): Promise<LiveJob[]> {
   let file = fileReaders.get(stateDir);
   if (!file) { file = new FileProcessService({ stateDir, cliPaths: {}, readOnly: true }); fileReaders.set(stateDir, file); }
   const [mcp, cli] = await Promise.all([readLiveJobs(stateDir), file.listJobSummaries()]);
-  return [...mcp, ...cli].sort((a, b) => a.startTime.localeCompare(b.startTime) || a.pid - b.pid);
+  const unique = new Map([...mcp, ...cli].map(job => [job.jobId ?? `${job.pid}:${job.startTime}`, job]));
+  return [...unique.values()].sort((a, b) => a.startTime.localeCompare(b.startTime) || a.pid - b.pid);
 }
 export interface JobsDeps {
   stdout: (text: string) => void; stderr: (text: string) => void;
@@ -71,11 +72,13 @@ export async function runJobs(args: string[], overrides: Partial<JobsDeps> = {})
   if (args.some(arg => !['--watch', '--json', '--running'].includes(arg))) { deps.stderr('Unknown jobs option\n'); return 1; }
   const watch = args.includes('--watch');
   const json = args.includes('--json');
+  const alternate = watch && !json && deps.isTTY();
   let stopped = false;
   let wake: (() => void) | undefined;
   const onStop = () => { stopped = true; wake?.(); };
   if (watch) { process.on('SIGINT', onStop); process.on('SIGTERM', onStop); }
   try {
+    if (alternate) deps.stdout('\x1b[?1049h\x1b[?25l');
     let frame = 0;
     do {
       const refreshStarted = Date.now();
@@ -83,7 +86,10 @@ export async function runJobs(args: string[], overrides: Partial<JobsDeps> = {})
       if (stopped) break;
       if (args.includes('--running')) jobs = jobs.filter(job => job.status === 'running');
       if (json) deps.stdout(JSON.stringify(jobs, null, watch ? undefined : 2) + '\n');
-      else deps.stdout((watch && deps.isTTY() ? '\x1b[2J\x1b[H' : '') + formatJobsTable(jobs, deps.columns(), frame++));
+      else {
+        const table = formatJobsTable(jobs, deps.columns(), frame++);
+        deps.stdout(alternate ? '\x1b[H' + table.replace(/\n/g, '\x1b[K\r\n') + '\x1b[J' : table);
+      }
       if (!watch || stopped) break;
       await new Promise<void>(resolve => {
         const timer = setTimeout(() => { wake = undefined; resolve(); }, Math.max(0, JOB_REFRESH_MS - (Date.now() - refreshStarted)));
@@ -92,5 +98,8 @@ export async function runJobs(args: string[], overrides: Partial<JobsDeps> = {})
     } while (!stopped);
     return 0;
   } catch (error) { deps.stderr(`jobs: ${(error as Error).message}\n`); return 1; }
-  finally { if (watch) { process.off('SIGINT', onStop); process.off('SIGTERM', onStop); } }
+  finally {
+    try { if (alternate) deps.stdout('\x1b[?25h\x1b[?1049l'); }
+    finally { if (watch) { process.off('SIGINT', onStop); process.off('SIGTERM', onStop); } }
+  }
 }

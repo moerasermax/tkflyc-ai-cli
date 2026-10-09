@@ -1,4 +1,5 @@
 /** 唯讀靜態檢查、跨平台行程監控與安全收尾；模型啟動由 MCP 的 ProcessService 負責。 */
+import { readFileSync, existsSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { readFile, lstat, readdir, copyFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -170,15 +171,27 @@ export async function terminateTrees(snapshot, roots, protectedPids, run = comma
 /** 與 MCP run 相同的 service；raw tap 只讀，避免 verbose 解析結果隱藏 stderr/未完成的工具事件。 */
 export function serviceAdapter(service) {
   return {
+    ready: service.ready,
     start: options => service.startProcess(options),
     read: pid => {
-      const entry = service.processManager?.get(pid);
+      const entry = service.findProcess?.(pid) ?? service.processManager?.get(pid);
       if (!entry || typeof entry.stdout !== 'string' || typeof entry.stderr !== 'string') {
         throw new Error('ProcessService raw tap 結構已改變，停止驗收（不能假設沒有工具紀錄）');
       }
       const result = service.getProcessResult(pid, true);
-      return { result, stdout: entry.stdout, stderr: entry.stderr,
-        tools: [...toolRecords(entry.stdout, entry.stderr), ...(result.agentOutput?.tools ?? [])] };
+      const readLog = stream => {
+        try { return readFileSync(join(entry.directory, `${stream}.log`), 'utf8'); }
+        catch (error) {
+          // runner 的身分重試先於開檔；meta bootstrap 也可能已存在，只有 terminal 才要求 log。
+          if (error.code === 'ENOENT' && result.status === 'running' && !existsSync(join(entry.directory, 'exit.json'))) return '';
+          throw error;
+        }
+      };
+      const stdout = entry.directory ? readLog('stdout') : entry.stdout;
+      const stderr = entry.directory ? readLog('stderr') : entry.stderr;
+      const records = toolRecords(stdout, stderr);
+      return { result, stdout, stderr,
+        tools: entry.toolType === 'grok' && records.length ? records : [...records, ...(result.agentOutput?.tools ?? [])] };
     },
     abortDirect: pid => service.killProcess(pid),
   };
@@ -262,6 +275,8 @@ export async function runMonitored(options, deps) {
     return workers;
   };
   try {
+    // 首筆 job 的 launch.tmp 必須等 server/principal 初始化完成，不能快照尚未解析的 null。
+    await adapter.ready;
     if (control.stopped) throw new Error(`已中斷：${control.stopped}`);
     active = adapter.start(options.start);
     state.pid = active.pid;

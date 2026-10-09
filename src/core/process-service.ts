@@ -1,14 +1,15 @@
 /**
- * 記憶體版 process 管理服務（MCP 路徑使用）。
- * 對應 dist/process-service.js，但 spawn 決策改由 agent 定義驅動：
+ * MCP process 管理：pipe agent 交給持久化 runner，PTY/direct 保持行程內管理。
+ * spawn 決策由 agent 定義驅動：
  *   - agent.win32SpawnMode === 'pty' 且 win32 → ConPTY（agy）
- *   - 否則一般 pipe spawn；win32 的 shell 由 agent.win32DirectExec 決定
+ *   - claude/codex → JobStore；agy 的 POSIX pipe 維持舊路徑
  *
  * parser 改呼叫 agent.parseOutput；preserveRawOnFailure 由 process-result 處理。
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { buildWorkerEnv } from './worker-env.js';
+import { JobStore, jobResult, type StoredJob } from './job-store.js';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { AgentId } from '../agents/types.js';
@@ -32,7 +33,7 @@ import { spawnPty, type PtyChild } from './pty-runner.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { currentDispatcher, processJobPublisher, shortText, taskSummary, type LiveJobPublisher, type JobDispatcher, type LiveJob } from './live-jobs.js';
 
-export type CliPaths = Record<Exclude<AgentId, 'direct-api'>, string>;
+export type CliPaths = Record<Exclude<AgentId, 'direct-api' | 'grok'>, string> & { grok?: string };
 
 export interface StartProcessOptions {
   prompt?: string;
@@ -46,6 +47,7 @@ export interface StartProcessOptions {
    * 不傳 = 沒有意見 = 一般模式；傳空陣列 = 什麼都不給，仍走 strict。
    */
   capabilities?: readonly string[];
+  system_prompt?: string;
 }
 
 class DirectManagedProcess extends EventEmitter {
@@ -94,15 +96,21 @@ interface ProcessEntry extends ProcessOutputStats {
   closed: boolean;
   stdout: string;
   stderr: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'lost';
+  recovered?: true;
+  directory?: string;
   exitCode?: number;
 }
 
 export class ProcessService {
-  private processManager = new Map<number, ProcessEntry>();
+  private processManager = new Map<number | string, ProcessEntry>();
   private cliPaths: CliPaths;
   private breaker: CircuitBreaker;
   private directPidSequence = 0;
+  private store = new JobStore(undefined, 'mcp');
+  readonly ready: Promise<void>;
+  private poll: NodeJS.Timeout;
+  private gc: NodeJS.Timeout;
   private publisher?: LiveJobPublisher;
   private publishing?: Promise<void>;
   private dispatcher: JobDispatcher = { pid: process.pid, parentPid: process.ppid };
@@ -118,7 +126,7 @@ export class ProcessService {
   }
 
   private jobSummaries(): LiveJob[] {
-    return [...this.processManager.values()].map(entry => ({
+    return [...this.processManager.values()].filter(entry => !entry.directory).map(entry => ({
       pid: entry.pid, agent: entry.toolType, model: entry.resolvedModel || entry.model || null, reasoning_effort: entry.reasoning_effort ?? null,
       task: taskSummary(entry.prompt), workFolder: entry.workFolder, status: entry.status,
       startTime: entry.startTime, endTime: entry.endTime,
@@ -132,10 +140,20 @@ export class ProcessService {
   constructor(options: { cliPaths: CliPaths; breaker?: CircuitBreaker }) {
     this.cliPaths = options.cliPaths;
     this.breaker = options.breaker ?? new CircuitBreaker();
+    this.ready = this.store.ready.then(() => {
+      for (const [jobId, job] of this.store.jobs) this.processManager.set(jobId, job as unknown as ProcessEntry);
+    });
+    this.poll = setInterval(() => {
+      this.store.refresh();
+      for (const [pid, entry] of this.processManager) if (entry.directory && !this.store.jobs.has(String(pid))) this.processManager.delete(pid);
+    }, 100);
+    this.gc = setInterval(() => this.collectExpired(), 60000); this.gc.unref();
+    this.poll.unref();
   }
 
   startProcess(options: StartProcessOptions): {
     pid: number;
+    jobId?: string;
     status: string;
     agent: AgentId;
     message: string;
@@ -145,6 +163,8 @@ export class ProcessService {
       ...options,
       cliPaths: this.cliPaths,
     } as BuildCliCommandOptions);
+    // agent builder 只把 resume session 放進 argv；store 另需保留原始 session 欄位。
+    cmd.sessionId = options.session_id;
 
     // 熔斷器：偵測框架迴圈造成的爆量/重複啟動，啟動前先攔截。
     this.breaker.check(cmd.agent, cmd.prompt);
@@ -162,89 +182,31 @@ export class ProcessService {
     }
 
     // 一般 pipe spawn
-    const useStdinPrompt = typeof cmd.stdinPrompt === 'string';
-    const needsShell = isWin && !agent.win32DirectExec;
-    // Windows: 不用 shell:true（Node v24 DEP0190 + 沙盒 EFTYPE），
-    // 改走明確 cmd.exe /c，跟 cross-spawn 相同策略。
-    let spawnCmd: string;
-    let spawnArgs: string[];
-    if (needsShell) {
-      const comSpec = process.env.ComSpec || process.env.COMSPEC || 'cmd.exe';
-      spawnCmd = comSpec;
-      spawnArgs = ['/d', '/s', '/c', `""${cmd.cliPath}" ${cmd.args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')}"`];
-    } else {
-      spawnCmd = cmd.cliPath;
-      spawnArgs = cmd.args;
+    if (cmd.agent !== 'antigravity') {
+      const job = this.store.start(cmd, options.model);
+      this.processManager.set(job.meta.jobId, job as unknown as ProcessEntry);
+      return { pid: job.pid, jobId: job.meta.jobId, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully`, ...(cmd.warnings ? { warnings: cmd.warnings } : {}) };
     }
-    const childProcess = spawn(spawnCmd, spawnArgs, {
-      cwd: cmd.cwd,
-      stdio: [useStdinPrompt ? 'pipe' : 'ignore', 'pipe', 'pipe'],
-      detached: false,
-      shell: false,
-      windowsVerbatimArguments: needsShell,
-      env: buildWorkerEnv(),
-    });
+    return this.startLegacyPipe(cmd, options.model);
+  }
 
-    // 立即掛 error listener，避免 async spawn error 變成 uncaughtException 殺掉 MCP server
-    childProcess.on('error', (error) => {
-      const entry = childProcess.pid ? this.processManager.get(childProcess.pid) : undefined;
-      if (entry) {
-        entry.status = 'failed';
-        entry.endTime = new Date().toISOString();
-        entry.stderr += `\nProcess error: ${error.message}`;
-        this.publishJobs();
-      }
-    });
-
-    if (useStdinPrompt && childProcess.stdin) {
-      childProcess.stdin.on('error', () => {});
-      try {
-        childProcess.stdin.write(cmd.stdinPrompt as string);
-        childProcess.stdin.end();
-      } catch {
-        /* child 可能已死；error/close handler 會處理 */
-      }
-    }
-
-    const pid = childProcess.pid;
-    if (!pid) {
-      throw new Error(`Failed to start ${cmd.agent} CLI process`);
-    }
-
-    const entry: ProcessEntry = {
-      ...emptyOutputStats(),
-      closed: false,
-      pid,
-      process: childProcess,
-      prompt: cmd.prompt,
-      workFolder: cmd.cwd,
-      model: options.model,
-      resolvedModel: cmd.resolvedModel,
-      reasoning_effort: cmd.reasoningEffort || undefined,
-      toolType: cmd.agent,
-      startTime: new Date().toISOString(),
-      stdout: '',
-      stderr: '',
-      status: 'running',
-    };
-    this.processManager.set(pid, entry);
-    this.observeOutput(entry);
-    childProcess.on('close', (code) => {
-      const e = this.processManager.get(pid);
-      if (e) {
-        e.status = code === 0 ? 'completed' : 'failed';
-        e.exitCode = code !== null ? code : undefined;
-      }
-    });
-
-    return { pid, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully`, ...(cmd.warnings ? { warnings: cmd.warnings } : {}) };
+  private startLegacyPipe(cmd: ReturnType<typeof buildCliCommand>, model?: string) {
+    const child = spawn(cmd.cliPath, cmd.args, { cwd: cmd.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: buildWorkerEnv(), detached: false });
+    child.on('error', error => { const entry = child.pid ? this.processManager.get(child.pid) : undefined; if (entry) { entry.status = 'failed'; entry.stderr += error.message; } });
+    if (!child.pid) throw new Error(`Failed to start ${cmd.agent} CLI process`);
+    if (cmd.stdinPrompt !== undefined) { child.stdin?.on('error', () => {}); child.stdin?.end(cmd.stdinPrompt); } else child.stdin?.end();
+    const entry: ProcessEntry = { ...emptyOutputStats(), pid: child.pid, process: child, prompt: cmd.prompt, workFolder: cmd.cwd, model, resolvedModel: cmd.resolvedModel,
+      reasoning_effort: cmd.reasoningEffort, toolType: cmd.agent, startTime: new Date().toISOString(), closed: false, stdout: '', stderr: '', status: 'running' };
+    this.processManager.set(entry.pid, entry); this.observeOutput(entry);
+    child.on('close', code => { entry.exitCode = code ?? undefined; entry.status = code === 0 ? 'completed' : 'failed'; });
+    return { pid: entry.pid, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully`, ...(cmd.warnings ? { warnings: cmd.warnings } : {}) };
   }
 
   private allocateDirectPid(): number {
     let pid: number;
     do {
       pid = process.pid * 100000 + ++this.directPidSequence;
-    } while (this.processManager.has(pid));
+    } while (!!this.findProcess(pid));
     return pid;
   }
 
@@ -319,7 +281,7 @@ export class ProcessService {
       signal: directProcess.signal,
     }).then(
       () => {
-        const e = this.processManager.get(pid);
+        const e = this.findProcess(pid);
         if (e) {
           e.status = directProcess.signal.aborted ? 'failed' : 'completed';
           e.exitCode = directProcess.signal.aborted ? 143 : 0;
@@ -327,7 +289,7 @@ export class ProcessService {
         directProcess.close(directProcess.signal.aborted ? 143 : 0);
       },
       (error: unknown) => {
-        const e = this.processManager.get(pid);
+        const e = this.findProcess(pid);
         const aborted = directProcess.signal.aborted;
         if (e) {
           e.status = 'failed';
@@ -355,7 +317,7 @@ export class ProcessService {
     model?: string
   ): { pid: number; status: string; agent: AgentId; message: string } {
     const { pid, child } = spawnPty(cmd.cliPath, cmd.args, cmd.cwd, (code, killedByUser) => {
-      const entryRef = this.processManager.get(pid);
+      const entryRef = this.findProcess(pid);
       if (entryRef) {
         // 在 emit('close') 前同步更新狀態，避免 waitForProcesses 漏接
         entryRef.status = killedByUser ? 'failed' : code === 0 ? 'completed' : 'failed';
@@ -394,21 +356,33 @@ export class ProcessService {
     };
   }
 
+  private findProcess(pid: number): ProcessEntry | undefined {
+    return (this.store.find(pid) as unknown as ProcessEntry | undefined) ?? this.processManager.get(pid);
+  }
+  private pruneStored(): void {
+    for (const [key, entry] of this.processManager) if (entry.directory && !this.store.jobs.has(String(key))) this.processManager.delete(key);
+  }
+
   listProcesses() {
+    this.store.refresh(); this.collectExpired(); this.pruneStored();
     return [...this.processManager.values()].map((proc) => ({
       pid: proc.pid,
+      ...(proc.directory ? { jobId: (proc as unknown as StoredJob).meta.jobId } : {}),
       agent: proc.toolType,
       status: proc.status,
+      ...(proc.recovered ? { recovered: true } : {}),
       ...listProcessTiming(proc.startTime, proc.endTime,
         proc.status === 'running' ? buildLiveness(proc, proc.startTime, !proc.closed) : undefined),
     }));
   }
 
-  getProcessResult(pid: number, verbose = false): Record<string, unknown> {
-    const proc = this.processManager.get(pid);
+  getProcessResult(pid: number, verbose = false, jobId?: string): Record<string, unknown> {
+    if (jobId) return jobResult(this.store.get(pid, jobId), verbose);
+    const proc = this.findProcess(pid);
     if (!proc) {
       throw new Error(`Process with PID ${pid} not found`);
     }
+    if (proc.directory) return jobResult(proc as unknown as StoredJob, verbose);
     const agent = getAgent(proc.toolType);
     const agentOutput = agent.parseOutput(proc.stdout, proc.stderr, proc.exitCode, {
       workFolder: proc.workFolder,
@@ -439,14 +413,16 @@ export class ProcessService {
     timeoutSeconds = 180,
     verbose = false
   ): Promise<Array<Record<string, unknown>>> {
+    await this.ready; this.store.refresh();
     for (const pid of pids) {
-      if (!this.processManager.has(pid)) {
+      if (!this.findProcess(pid)) {
         throw new Error(`Process with PID ${pid} not found`);
       }
     }
+    const polling = setInterval(() => this.store.refresh(), 50);
     const listeners: Array<() => void> = [];
     const waitPromises = [...new Set(pids)].map((pid) => {
-      const entry = this.processManager.get(pid)!;
+      const entry = this.findProcess(pid)!;
       if (entry.status !== 'running') {
         return Promise.resolve();
       }
@@ -480,6 +456,7 @@ export class ProcessService {
         return result;
       });
     } finally {
+      clearInterval(polling);
       if (timeoutHandle) clearTimeout(timeoutHandle);
       // 呼叫端會反覆短等候；逾時的 listener 不可一直留到 child close 才清。
       for (const removeListeners of listeners) removeListeners();
@@ -491,6 +468,7 @@ export class ProcessService {
     peekTimeSec = 10,
     includeToolCalls = false
   ): Promise<{ peek_started_at: string; observed_duration_sec: number; processes: PeekProcessResult[] }> {
+    await this.ready; this.store.refresh();
     const targetPids = validatePeekPids(pids);
     const targetPeekTimeSec = validatePeekTimeSec(peekTimeSec);
     const processes: PeekProcessResult[] = [];
@@ -504,13 +482,14 @@ export class ProcessService {
     }> = [];
 
     for (const pid of targetPids) {
-      const entry = this.processManager.get(pid);
+      const entry = this.findProcess(pid);
       if (!entry) {
         processes.push(buildNotFoundPeekProcess(pid));
         continue;
       }
       const result: PeekProcessResult = {
         pid,
+        ...(entry.directory ? { jobId: (entry as unknown as StoredJob).meta.jobId } : {}),
         agent: entry.toolType,
         status: entry.status,
         events: [],
@@ -533,6 +512,7 @@ export class ProcessService {
       observers.push({ entry, result, stdoutExtractor, stderrExtractor, onStdout, onStderr });
     }
 
+    const polling = setInterval(() => this.store.refresh(), 50);
     const startedAt = new Date();
     const startedAtMs = Date.now();
     const runningObservers = observers.filter((o) => o.entry.status === 'running');
@@ -549,6 +529,7 @@ export class ProcessService {
       await Promise.race([terminalPromise, timeoutPromise]);
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle);
+      clearInterval(polling);
       const flushTs = new Date().toISOString();
       for (const o of observers) {
         o.entry.process.stdout?.off('data', o.onStdout);
@@ -581,8 +562,10 @@ export class ProcessService {
     });
   }
 
-  killProcess(pid: number): { pid: number; status: string; message: string } {
-    const entry = this.processManager.get(pid);
+  async killProcess(pid: number): Promise<{ pid: number; status: string; message: string }> {
+    await this.ready;
+    if (this.store.hasPid(pid)) return this.store.kill(pid);
+    const entry = this.findProcess(pid);
     if (!entry) {
       throw new Error(`Process with PID ${pid} not found`);
     }
@@ -597,11 +580,19 @@ export class ProcessService {
     return { pid, status: 'terminated', message: 'Process terminated successfully' };
   }
 
+  private collectExpired(now = Date.now()): void {
+    this.store.collect(now); this.pruneStored();
+    for (const [pid, entry] of this.processManager) if (!entry.directory && entry.status !== 'running' && entry.endTime && now - Date.parse(entry.endTime) >= 30 * 60 * 1000) this.processManager.delete(pid);
+  }
+
+  dispose(): void { clearInterval(this.gc); clearInterval(this.poll); this.store.dispose(); }
+
   cleanupProcesses(): { removed: number; removedPids: number[]; message: string } {
-    const removedPids: number[] = [];
+    const removedPids: number[] = this.store.collect(Date.now(), true);
+    this.pruneStored();
     for (const [pid, proc] of this.processManager.entries()) {
-      if (proc.status === 'completed' || proc.status === 'failed') {
-        removedPids.push(pid);
+      if (proc.status !== 'running') {
+        removedPids.push(proc.pid);
         this.processManager.delete(pid);
       }
     }

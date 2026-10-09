@@ -790,15 +790,15 @@
   {
     "name": "查額度的 TUI 不帶 --no-daemon（管理員權限下 daemon 拒絕啟動，額度讀不到）",
     "file": "src/plugins/usage-service.ts",
-    "from": "const CODEX_USAGE_ARGS = ['--no-daemon'];",
-    "to": "const CODEX_USAGE_ARGS: string[] = [];",
+    "from": "const CODEX_USAGE_ARGS = ['--no-daemon', ...CODEX_UPDATE_ARGS];",
+    "to": "const CODEX_USAGE_ARGS = [...CODEX_UPDATE_ARGS];",
     "expect": "第一次啟動帶 --no-daemon",
     "script": "verify-usage-parse.mjs"
   },
   {
     "name": "舊版 codex 不認得 --no-daemon 時沒有退路（直接拿 clap 錯誤當結果）",
     "file": "src/plugins/usage-service.ts",
-    "from": "    if (isCodexNoDaemonUnsupported(result.output)) result = await this._run([]);",
+    "from": "    if (isCodexNoDaemonUnsupported(result.output)) result = await this._run(CODEX_UPDATE_ARGS);",
     "to": "",
     "expect": "舊版 codex 不認得 --no-daemon 時拿掉參數重跑一次",
     "script": "verify-usage-parse.mjs"
@@ -935,8 +935,8 @@
     "name": "MCP started 回傳丟掉警告",
     "file": "src/core/process-service.ts",
     "script": "verify-job-usage.mjs",
-    "from": "return { pid, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully`, ...(cmd.warnings ? { warnings: cmd.warnings } : {}) };",
-    "to": "return { pid, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully` };",
+    "from": "return { pid: job.pid, jobId: job.meta.jobId, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully`, ...(cmd.warnings ? { warnings: cmd.warnings } : {}) };",
+    "to": "return { pid: job.pid, jobId: job.meta.jobId, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully` };",
     "expect": "MCP start response forwards warning"
   },
   {
@@ -1126,7 +1126,7 @@
   {
     "name": "CLI run 丟掉高成本警告",
     "file": "src/core/file-process-service.ts",
-    "from": "return { ...result, ...(cmd.warnings ? { warnings: cmd.warnings } : {}) };",
+    "from": "    return { ...result, ...((cmd.warnings || 'warnings' in result) ? { warnings: [...('warnings' in result ? result.warnings as string[] : []), ...(cmd.warnings ?? [])] } : {}) };",
     "to": "return { ...result };",
     "expect": "CLI run forwards ultra warnings",
     "script": "verify-job-usage.mjs"
@@ -1534,7 +1534,7 @@
   {
     "name": "[worker-guards] T6 沒有辨識 F2 機制拒絕",
     "file": "tools/acceptance/worker-identity-logic.mjs",
-    "from": "  return [run.stdout, run.stderr, JSON.stringify(run.tools ?? []), JSON.stringify(run.result ?? {})]\n    .some(text => typeof text === 'string' && text.includes('AI_CLI_NESTED_DISPATCH_BLOCKED:') && text.includes('AI_CLI_ALLOW_NESTED=1'));",
+    "from": "  return [run.stdout, run.stderr, JSON.stringify(run.tools ?? []), JSON.stringify(run.result ?? {})]\n    .some(text => typeof text === 'string' && text.includes('AI_CLI_NESTED_DISPATCH_BLOCKED'));",
     "to": "  return false;",
     "expect": "T6 F2 拒絕可標註",
     "script": "verify-worker-guards.mjs"
@@ -1648,7 +1648,7 @@
     "file": "src/core/live-jobs.ts",
     "from": "return job.status === 'running' || (!!job.endTime && now - Date.parse(job.endTime) < JOB_RETENTION_MS);",
     "to": "return true;",
-    "expect": "terminal retention expires after ten minutes",
+    "expect": "terminal retention expires after thirty minutes",
     "script": "verify-jobs.mjs"
   },
   {
@@ -1854,8 +1854,8 @@
   {
     "name": "[jobs audit] non TTY watch clears screen",
     "file": "src/app/jobs.ts",
-    "from": "watch && deps.isTTY()",
-    "to": "watch",
+    "from": "const alternate = watch && !json && deps.isTTY();",
+    "to": "const alternate = watch && !json;",
     "expect": "non TTY watch appends plain frames",
     "script": "verify-jobs.mjs"
   },
@@ -1866,5 +1866,168 @@
     "to": "    });",
     "expect": "MCP publication rejection resets promise and retries",
     "script": "verify-jobs.mjs"
+  },
+  {
+    "name": "Durable: PID identity creation time",
+    "file": "src/core/job-store.ts",
+    "script": "verify-durable-jobs.mjs",
+    "section": "gc",
+    "from": "return !!a && !!b && !!a.started && a.pid === b.pid && a.started === b.started;",
+    "to": "return !!a && !!b && a.pid === b.pid;",
+    "expect": "PID reuse refuses kill and marks dead identities lost"
+  },
+  {
+    "name": "Durable: thirty minute GC",
+    "file": "src/core/job-store.ts",
+    "script": "verify-durable-jobs.mjs",
+    "section": "gc",
+    "from": "export const RETENTION_MS = 30 * 60 * 1000;",
+    "to": "export const RETENTION_MS = 60 * 60 * 1000;",
+    "expect": "GC fake clock thirty minute boundary preserves running job"
+  },
+  {
+    "name": "Durable: finished job count limit",
+    "file": "src/core/job-store.ts",
+    "script": "verify-durable-jobs.mjs",
+    "section": "gc",
+    "from": "export const MAX_FINISHED_JOBS = 100;",
+    "to": "export const MAX_FINISHED_JOBS = 101;",
+    "expect": "GC 100 finished jobs deletes oldest first"
+  },
+  {
+    "name": "Durable: runner killed record",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-durable-jobs.mjs",
+    "section": "kill",
+    "from": "      if (await requestTermination?.()) { timedOut = byTimeout; killed = !byTimeout; }",
+    "to": "      if (await requestTermination?.()) { timedOut = byTimeout; killed = false; }",
+    "expect": "kill terminates runner worker and SIGTERM ignoring grandchild"
+  },
+  {
+    "name": "Grok: rules 丟掉 worker lock",
+    "file": "src/agents/grok.ts",
+    "from": "'--rules', input.systemPrompt ? `${WORKER_CONTEXT}\\n\\n${input.systemPrompt}` : WORKER_CONTEXT];",
+    "to": "'--rules', input.systemPrompt ?? ''];",
+    "expect": "Grok rules worker lock precedes system prompt",
+    "script": "verify-grok.mjs",
+    "section": "command"
+  },
+  {
+    "name": "Grok: strict 允許 shell",
+    "file": "src/agents/grok.ts",
+    "from": "'fs/read': ['Read', 'Glob', 'Grep'],",
+    "to": "'fs/read': ['Read', 'Glob', 'Grep', 'Bash'],",
+    "expect": "Grok strict permits only read tools",
+    "script": "verify-grok.mjs",
+    "section": "command"
+  },
+  {
+    "name": "Grok: usage 漏掉 cached input",
+    "file": "src/agents/grok.ts",
+    "from": "input_tokens: raw.input_tokens + (raw.cache_read_input_tokens ?? 0) + (raw.cache_creation_input_tokens ?? 0),",
+    "to": "input_tokens: raw.input_tokens,",
+    "expect": "Grok result fixture normalizes usage costs",
+    "script": "verify-grok.mjs",
+    "section": "parse"
+  },
+  {
+    "name": "Grok: native Windows 退回 shell",
+    "file": "src/agents/grok.ts",
+    "from": "supportsSystemPrompt: true, spawnMode: 'pipe', win32DirectExec: true,",
+    "to": "supportsSystemPrompt: true, spawnMode: 'pipe', win32DirectExec: false,",
+    "expect": "Grok normal native argv",
+    "script": "verify-grok.mjs",
+    "section": "command"
+  },
+  {
+    "name": "Grok: result is_error 不判失敗",
+    "file": "src/core/job-store.ts",
+    "from": "if (job.toolType === 'grok' && raw.type === 'result') { job.terminalRef = ref; job.outputFailed = grokResultFailed(raw);\n    job.parsed.subtype = raw.subtype; job.parsed.stop_reason = raw.stop_reason;\n    if (parsed?.error) job.parsed.error = parsed.error; }",
+    "to": "if (job.toolType === 'grok' && raw.type === 'result') { job.terminalRef = ref; job.outputFailed = false; }",
+    "expect": "Grok result failure exit zero remains failed",
+    "script": "verify-grok.mjs",
+    "section": "jobs"
+  },
+  {
+    "name": "6.8 review: native MCP deny omitted",
+    "file": "src/agents/grok.ts",
+    "from": "'search_tool', 'use_tool', 'run_terminal_command'",
+    "to": "'run_terminal_command'",
+    "script": "verify-grok.mjs",
+    "expect": "Grok strict permits only read tools",
+    "section": "command"
+  },
+  {
+    "name": "6.8 review: PID collision drops older UUID",
+    "file": "src/core/job-store.ts",
+    "from": "if (this.jobs.has(meta.jobId)) continue;",
+    "to": "if (this.hasPid(meta.pid)) continue;",
+    "script": "verify-durable-jobs.mjs",
+    "expect": "PID collision retains UUID jobs",
+    "section": "gc"
+  },
+  {
+    "name": "6.8 review: quota startup update flag missing",
+    "file": "src/plugins/usage-service.ts",
+    "from": "const CODEX_UPDATE_ARGS = ['-c', 'check_for_update_on_startup=false'];",
+    "to": "const CODEX_UPDATE_ARGS: string[] = [];",
+    "script": "verify-usage-update.mjs",
+    "expect": "PTY update prompt blocks Codex keys"
+  },
+  {
+    "name": "6.8 review: watch fails to restore terminal",
+    "file": "src/app/jobs.ts",
+    "from": "if (alternate) deps.stdout('\\x1b[?25h\\x1b[?1049l');",
+    "to": "if (alternate) deps.stdout('');",
+    "script": "verify-jobs.mjs",
+    "expect": "watch repeats then Ctrl+C removes handlers"
+  },
+  {
+    "name": "6.8 audit: H1 unidentified runner starts worker",
+    "file": "src/core/job-runner.ts",
+    "from": "  if (!runner.started) { fail('Cannot identify runner after 3 attempts; worker was not started'); if (failureFd !== undefined) closeSync(failureFd); return; }",
+    "to": "  if (runner.started === '__mutation__') { fail('Cannot identify runner after 3 attempts; worker was not started'); if (failureFd !== undefined) closeSync(failureFd); return; }",
+    "expect": "H1 identity failure retries then fails before worker spawn",
+    "script": "verify-durable-audit.mjs"
+  },
+  {
+    "name": "6.8 audit: H2 failed identity permanently locks termination",
+    "file": "src/core/job-runner.ts",
+    "from": "    })().finally(() => { active = undefined; });",
+    "to": "    })();",
+    "expect": "H2 identity lookup failure remains retryable and does not mark killed",
+    "script": "verify-durable-audit.mjs"
+  },
+  {
+    "name": "6.8 audit: M5 npx becomes principal",
+    "file": "src/core/principal.ts",
+    "from": "    if (!isPackageLauncher(parent) && !(shimLauncher && ((serverShim && isPackageLauncher(shimLauncher)) || scriptShell))) return identityOnly(parent);",
+    "to": "    return identityOnly(parent);",
+    "expect": "M5 skips exact npx launchers and retains node principal",
+    "script": "verify-durable-audit.mjs"
+  },
+  {
+    "name": "6.8 audit: M6 passive installer matches update guard",
+    "file": "src/plugins/usage-service.ts",
+    "from": "  return /press[^\\n]{0,40}(?:enter|return)[^\\n]{0,40}(?:to\\s+)?updat/i.test(screen)\n    || (/(?:update|new\\s+version)\\s+available/i.test(screen)\n      && /(?:^|\\n)\\s*(?:[›❯>]\\s*|\\d+[.)]\\s*)(?:update\\b|upgrade\\b|skip\\b|not now\\b)/im.test(screen));",
+    "to": "  return /update\\s+available|updat(?:e|ing)\\s+(?:codex|claude)|(?:npm|brew|winget)[^\\n]{0,60}(?:install|upgrade)[^\\n]{0,60}(?:codex|claude)|press[^\\n]{0,40}(?:enter|return)[^\\n]{0,40}updat/i.test(screen);",
+    "expect": "M6 passive installer and update progress are not interactive prompts",
+    "script": "verify-usage-update.mjs"
+  },
+  {
+    "name": "6.8 smallfix: raw tap rejects startup ENOENT",
+    "file": "tools/acceptance/worker-identity-runtime.mjs",
+    "to": "          if (false) return '';",
+    "expect": "raw tap tolerates delayed runner logs until terminal",
+    "script": "verify-worker-identity.mjs",
+    "from": "          if (error.code === 'ENOENT' && result.status === 'running' && !existsSync(join(entry.directory, 'exit.json'))) return '';"
+  },
+  {
+    "name": "6.8 smallfix: raw tap hides terminal missing logs",
+    "file": "tools/acceptance/worker-identity-runtime.mjs",
+    "to": "          if (error.code === 'ENOENT') return '';",
+    "expect": "raw tap tolerates delayed runner logs until terminal",
+    "script": "verify-worker-identity.mjs",
+    "from": "          if (error.code === 'ENOENT' && result.status === 'running' && !existsSync(join(entry.directory, 'exit.json'))) return '';"
   }
 ]

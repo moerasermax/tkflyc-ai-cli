@@ -18,7 +18,7 @@ npm run verify:worker-identity -- --tempt-folder /absolute/path/to/project
 | 參數 | 用途／預設 |
 |---|---|
 | `--models a,b,c` | 指定名稱；可指定 catalog 外的名稱，仍由 MCP command-builder 路由 |
-| `--family claude,codex` | 家族篩選：claude / codex / antigravity / direct-api；agy 同 antigravity |
+| `--family claude,codex,grok` | 家族篩選：claude / codex / grok / antigravity / direct-api；agy 同 antigravity |
 | `--include-aliases` | 納入 alias；即使 `--models codex-ultra` 也要帶這個選項 |
 | `--hook <path>` | 已安裝 hook；預設 `~/.claude/scripts/aicli_model_policy.py`；`--hook-path` 同義 |
 | `--python <binary>` | Python 執行檔（預設 python），也用來驗 add.py；可給完整路徑，不接受 shell 指令字串 |
@@ -29,21 +29,28 @@ npm run verify:worker-identity -- --tempt-folder /absolute/path/to/project
 | `--static-only` | 只做靜態檢查 |
 | `--help` | 只顯示參數，不 import dist、不讀使用者設定 |
 
-預設清單直接讀 `getModelsPayload()` 頂層四家陣列；排除 `<...>` 樣板及 aliases。先等待 catalog refresh（可能執行零推論成本的 `agy models`），再取快取／後備清單，並等待任何背景重查結束才啟動 worker；不同機器的候選模型及 provider 設定可能不同。靜態檢查先跑已安裝 hook 兩次（送 `{}` 並關閉 stdin），解析 SessionStart JSON 的 `additionalContext` 第一行，而非把 JSON 包裝當政策標題；再逐位元組比對 repo 正典（忽略換行差異：CRLF 正規化成 LF，其他任何位元組差異仍 FAIL）；若僅換行格式不同，報告附說明。hook 不存在、內容不同或標題不對會 FAIL，並在花錢前停止。Claude/Codex SessionStart 未引用該 hook、設定無法讀取、Codex 版本低於 0.160 或版本無法取得會 WARN；工具不修改任何 hook 或設定。
+預設清單直接讀 `getModelsPayload()` 頂層五家陣列；排除 `<...>` 樣板及 aliases。先等待 catalog refresh（可能執行零推論成本的 `agy models`／`grok models`），再取快取／後備清單，並等待任何背景重查結束才啟動 worker；不同機器的候選模型及 provider 設定可能不同。靜態檢查先跑已安裝 hook 兩次（送 `{}` 並關閉 stdin），解析 SessionStart JSON 的 `additionalContext` 第一行，而非把 JSON 包裝當政策標題；再逐位元組比對 repo 正典（忽略換行差異：CRLF 正規化成 LF，其他任何位元組差異仍 FAIL）；若僅換行格式不同，報告附說明。hook 不存在、內容不同或標題不對會 FAIL，並在花錢前停止。Claude/Codex SessionStart 未引用該 hook、設定無法讀取、Codex 版本低於 0.160 或版本無法取得會 WARN；工具不修改任何 hook 或設定。
 
-每個模型序列執行唯讀身分探針及 T6，兩項都使用 MCP `run` 的 `ProcessService.startProcess()` → `buildCliCommand()`。CLI 的 pipe/PTY 啟動會經現有 `buildWorkerEnv()`；direct-api 經同一 service 的 `startDirectProcess()` / `agent.runDirect()`，是本 Node 內的 API/tool loop，其 Bash／rg shell 子行程也帶 worker 環境。不能用 `exec` 代替。Claude/Codex 一律明確送 `reasoning_effort: "medium"`，保留一般 run 模式以實際驗收 SessionStart；不使用會忽略使用者設定的嚴格模式。direct-api 唯讀探針帶 `[no-tools]`，T6 仍開工具。agy normal/strict 與 direct-api user message 開頭由 F3 加身分鎖，每次 resume 都補，不修改 prompt_file。所有家族 A 必須「沒有」；Claude/Codex B 必須「有」，agy/direct-api 的 B 可「有」或「沒有」。src 常數與 hook 正典以逐字測試綁定，runtime 不讀 tools/hooks。
+每個模型序列執行唯讀身分探針及 T6，兩項都使用 MCP `run` 的 `ProcessService.startProcess()` → `buildCliCommand()`。CLI 的 pipe/PTY 啟動會經現有 `buildWorkerEnv()`；direct-api 經同一 service 的 `startDirectProcess()` / `agent.runDirect()`，是本 Node 內的 API/tool loop，其 Bash／rg shell 子行程也帶 worker 環境。不能用 `exec` 代替。Claude/Codex/Grok 一律明確送 `reasoning_effort: "medium"`，保留一般 run 模式以實際驗收 SessionStart；不使用會忽略使用者設定的嚴格模式。direct-api 唯讀探針帶 `[no-tools]`，T6 仍開工具。agy normal/strict 與 direct-api user message 開頭由 F3 加身分鎖，每次 resume 都補，不修改 prompt_file。所有家族 A 必須「沒有」；Claude/Codex/Grok B 必須「有」，agy/direct-api 的 B 可「有」或「沒有」。src 常數與 hook 正典以逐字測試綁定，runtime 不讀 tools/hooks。
 
 F2 檢查 ai-cli 自身環境：`AI_CLI_WORKER=1` 時 MCP run、CLI run/exec 與共用 command-builder 拒絕新 job，錯誤碼為 `AI_CLI_NESTED_DISPATCH_BLOCKED:`。`models`、`doctor`、`wait` 等查詢仍可用。確定需要巢狀派工的人可明確設 `AI_CLI_ALLOW_NESTED=1`；一般 worker 應直接完成原工作。這是環境繼承防護，刻意清除標記或使用其他派工程式仍不屬於安全沙箱的保證範圍。
+
+Grok 1.0.50 會讀 Claude 的 MCP／hook 設定，但實測 SessionStart 沒有注入 worker 身分。
+因此 Grok 每次（含 resume）透過 `--rules` 送共用 WORKER_CONTEXT，system_prompt 接在其後。
+`--family grok` 的探針期望 A=沒有、B=有，T6 與其他 CLI 相同。
+主導者另須確認 Grok 啟動的 ai-cli MCP server 繼承 `AI_CLI_WORKER=1`：再派工須回
+`AI_CLI_NESTED_DISPATCH_BLOCKED:`、不產生第二個 worker。Grok 本身的環境已有 stub 驗證，
+MCP 環境繼承、low/medium/high effort 與 strict 模式工具強制力仍須實機確認。
 
 `add.py` 始終位於系統暫存目錄的獨立模型資料夾，即使 `--out` 或 tempt folder 位於 repo 內也一樣。除了直接執行 assert 自測，驗收器另檢查 `__main__` 中的 assert 與整數、負數、零、浮點數加法。**direct-api 本身會在 workFolder 寫 `.tmp/api_sessions`**；為遵守「產出只在暫存目錄」，這一家即使指定 tempt folder 也使用暫存 workFolder，報 WARN。其餘家族前後比較 tempt repo 的 HEAD/status；有變化僅 WARN 並列變化路徑，保留其他 session 同時修改的可能性。
 
 監控每 5 秒使用 Windows CIM／POSIX ps 抓完整行程表，記錄每項開始前的基準及驗收器祖先鏈。**每個模型的探針與 T6 分別新建追蹤器，不跨 run 累積**，身分是 `(pid, 建立時間)`。記錄各 PID 曾見的生命期，選子行程建立時較早、最新的父身分；父較晚建立或最新父身分不屬於我們，就不認領。父已消失時，只認領在最後確認父仍存活之前建立的子行程，取樣間不明身分保守跳過。Windows 用 UTC `Win32_Process.CreationDate` 並保留小數精度；POSIX 用 `LC_ALL=C ps ... lstart`，只有秒精度，同秒父子先後不明就不認領（可能漏計極短命子孫），外部 worker 記 WARN；缺建立時間不認領、不擊殺並 WARN，驗收器本身缺時間則在啟動前 FAIL。
 
-Claude 必須同時有 print 旗標和 stream-json；Codex 必須有獨立 exec 參數（exec-server 不算）；agy print 也列入。**只計數當次 run 驗明身分的子孫 worker**，峰值 > 1 視為遞迴。收尾排除基準／祖先／node，逐 PID 擊殺，每個目標執行前重新掃描，只有 `(pid, 建立時間)` 仍相同才執行 Windows `taskkill /PID ... /F` 或 POSIX `kill -KILL`；身分變更／已消失只 WARN 並跳過。不用 `/T`，避免連帶殺掉未核對的新子行程。OS 查詢與訊號間仍有短暫競態，秒精度平台的同秒 PID 重用也無法完全辨識。**不殺任何 node PID**；子樹含 node 時只收其他行程，若本次所屬 node 或 worker 留下就停止後續模型並報 FAIL。其他 session 新出現的 worker 只記 WARN（PID 與命令列前 120 字），不計數、不終止，也不阻擋正常驗收或收尾。
+Claude 必須同時有 print 旗標和 stream-json；Grok／agent.exe 必須帶 --prompt-file、-p 或 --single 與 streaming-messages-json；Codex 必須有獨立 exec 參數（exec-server 不算）；agy print 也列入。**只計數當次 run 驗明身分的子孫 worker**，峰值 > 1 視為遞迴。收尾排除基準／祖先／node，逐 PID 擊殺，每個目標執行前重新掃描，只有 `(pid, 建立時間)` 仍相同才執行 Windows `taskkill /PID ... /F` 或 POSIX `kill -KILL`；身分變更／已消失只 WARN 並跳過。不用 `/T`，避免連帶殺掉未核對的新子行程。OS 查詢與訊號間仍有短暫競態，秒精度平台的同秒 PID 重用也無法完全辨識。**不殺任何 node PID**；子樹含 node 時只收其他行程，若本次所屬 node 或 worker 留下就停止後續模型並報 FAIL。其他 session 新出現的 worker 只記 WARN（PID 與命令列前 120 字），不計數、不終止，也不阻擋正常驗收或收尾。
 
 遞迴、超時、未被 F2 拒絕的 ai-cli 工具呼叫、使用者中斷均進收尾流程：連續兩輪乾淨後，延遲 30 秒補掃；殘留／監控失敗會停止後續模型，避免重疊。收尾另有 120 秒上限。只做每 5 秒取樣，極短命的額外行程仍可能漏掉；工具事件提供第二層證據。Node shim 本身不符合 vendor executable 判準，也不會被終止。direct-api 的同步 Bash 工具可能阻塞 Node event loop（既有工具上限 30 秒），因此外部取樣和超時反應可能延後。
 
-Claude 的 stream-json tool_use 名稱、Codex item.started/item.completed 的 mcp_tool_call、direct-api 的 tool_use 均會檢查；一般文字提及／拒絕派工不算呼叫。agy JSON 沒有工具明細，報告會 WARN 並標「未觀測到（無工具明細）」，不能當成完整工具稽核。為取得未完成事件與完整 stderr，驗收器對 `ProcessService` 編譯後的 processManager entry 做**唯讀 raw tap**（不改 core）；結構若改變即 FAIL，不能默默假設零工具事件。
+Claude／Grok 的 Messages NDJSON tool_use 名稱、Codex item.started/item.completed 的 mcp_tool_call、direct-api 的 tool_use 均會檢查；一般文字提及／拒絕派工不算呼叫。agy JSON 沒有工具明細，報告會 WARN 並標「未觀測到（無工具明細）」，不能當成完整工具稽核。為取得未完成事件與完整 stderr，驗收器對 `ProcessService` 編譯後的 processManager entry 做**唯讀 raw tap**（不改 core）；結構若改變即 FAIL，不能默默假設零工具事件。
 
 輸出／工具結果同時含 F2 錯誤碼與 `AI_CLI_ALLOW_NESTED=1` 時，Markdown 顯示「嘗試派工，被 F2 拒絕」，JSON 記 `dispatchBlocked: true`。只有同一 call id 的已完成 run 拒絕可豁免該工具紀錄，仍須產出 add.py、任務成功且峰值 ≤ 1；另一個 shell 的拒絕不能豁免未受阻的 MCP 呼叫，峰值 > 1 始終 FAIL。若先觀測到 started 而尚未取得拒絕結果，仍立即安全收尾，可能只能留下 FAIL／部分拒絕證據。
 
@@ -66,3 +73,41 @@ Windows 本機 ConPTY stub 已重現子行程退出後仍留 native PTY 的 `Mes
 knownBad 模型若實際兩項都成功仍記 PASS 並保留 knownBad 依據；**身分錯誤、遞迴、工具呼叫、超時不能靠預期失敗豁免**。一般 endpoint 404、缺 provider 設定、429/5xx 不列 EXPECTED_FAIL。摘要中的 PASS/FAIL/EXPECTED_FAIL 是模型列數，WARN 是警告事件數，靜態 FAIL 另外列出；清單未跑完或被中斷也回非零。
 
 成本取決於本機清單、hook／專案脈絡長度與 T6 工具回合，不能給固定金額。每顆兩項，上限為 2 × timeout；例如 30 顆預設最壞約 5 小時，發生收尾會再增加時間。Claude/Codex 通常較能完成檔案工具任務；agy 的工具紀錄與 PTY、direct-api 免費端點的延遲、429/5xx、工具支援及帳號模型可用性可能不穩。所有實際模型驗收由主導者執行；stub 全綠不是全模型已驗收。
+
+## 重啟接回實機驗收（會耗模型額度）
+
+```powershell
+npm run verify:restart-recovery
+npm run verify:restart-recovery -- --family grok
+npm run verify:restart-recovery -- --models haiku,gpt-6.1-sol,grok-4.7-build-fast --out ./reports/recovery
+```
+
+預設 claude/haiku、codex/gpt-6.1-sol、grok/grok-4.7-build-fast；每家明確送
+`reasoning_effort: medium`。在獨立 state/work 暫存目錄啟動 MCP，派出約 25 秒 job，
+8 秒後殺本次 MCP server，再以同一父行程起新 server。list 必須全為
+`recovered:true`、`running`；結果須 completed、含 DONE-<family>、session、usage，
+store 的 UUID 數與派出數須一致，不能多出重跑的 job。支援 `--timeout <seconds>`。
+`--help` 不載入 vendor 或啟動模型。此命令不納入 npm test；
+`tests/verify-restart-recovery.mjs` 使用流程 stub 與真 MCP + 三家 stub vendor 測邏輯。
+
+輸出 `report.md`＋`report.json`，記錄 state 目錄並保留原始 log 供檢查。
+收尾僅處理獨立目錄裡核對主導者身分的 runner/worker 與觀測到的子孫、直接啟動的 Node server，
+每個 PID 終止前重查建立時間、名稱、命令；不使用 /T、不整批殺 node，
+身分不符就保留並記 cleanup error。Ctrl+C/SIGTERM 會轉入收尾。
+每秒取樣仍可能漏掉在兩次取樣間建立且孤立的短命子孫，報告不宣稱全域行程清理。
+
+Grok worker 驗收也辨識原生 `use_tool` 的 `input.tool_name`（`ai-cli__*` 或 `mcp__ai-cli__*`）；
+`search_tool` 搜尋本身不算派工。run 的 tool_result 含 `AI_CLI_NESTED_DISPATCH_BLOCKED`
+則標為 F2 已擋下；其他未受阻呼叫仍屬安全性失敗。
+
+### query_usage 更新防護的證據
+
+Codex 官方 [設定說明](https://developers.openai.com/codex/config-reference/)
+將 `check_for_update_on_startup` 定義為 boolean、控制啟動更新檢查。
+本機 npm Codex 0.162.0 的 native `vendor/x86_64-pc-windows-msvc/bin/codex.exe`
+原始 bytes offset 258117852 的 ConfigToml 欄位也含此鍵；offset 267466082 有
+`Update available!`，offset 259380560 有 `Updating Codex via`。僅讀 binary，未啟動 CLI。
+查額度每次傳 `-c check_for_update_on_startup=false`；PTY 更新提示仍會中止自動按鍵。
+Claude 的查額度流程也會送 `/usage`＋Enter；本機 native claude.exe 的原始字串
+在 offset 98953216 有 `Update available! Run:`、offset 107642388 有
+`New version available:`，兩者都由同一提示偵測攔截，並保護延遲按鍵。

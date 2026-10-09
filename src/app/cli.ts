@@ -47,7 +47,7 @@ Options:
   --prompt-file <path>         Path to a prompt file
   --model <model>              Model name or alias (e.g. sonnet, claude-ultra, gpt-6-astra, codex-ultra, codex-ultracode, agy, or-qwen/qwen3.7-plus)
   --session-id <id>            Resume a previous session where supported, including direct-api sessions
-  --reasoning-effort <level>   Reasoning level for Claude/Codex only (low, medium, high, xhigh, max; codex also ultra); unsupported for Antigravity and direct-api
+  --reasoning-effort <level>   Claude: low/medium/high/xhigh/max; Codex also ultra; Grok: low/medium/high/xhigh (live verified: grok 1.0.50); unsupported for Antigravity and direct-api
   --help, -h                   Show this help message
 
 Compatibility aliases:
@@ -85,7 +85,7 @@ Options:
 export const PEEK_HELP_TEXT = `Usage: ai-cli peek <pid...> [options]
 
 Observe new natural-language agent messages, and optionally tool calls, for a short one-shot window.
-Message extraction is supported for Codex, Claude, direct-api, and Antigravity.
+Message extraction is supported for Codex, Claude, Grok, direct-api, and Antigravity.
 This is not a history API, gapless streaming, or stdout/stderr tailing. No --follow mode is available in v1.
 
 Options:

@@ -23,4 +23,6 @@ const stub = fileURLToPath(new URL(process.platform === 'win32'
 if (process.platform !== 'win32') fs.chmodSync(stub, 0o755);
 process.env.AI_CLI_CATALOG_CACHE_PATH = join(temp, 'catalog-cache.json');
 process.env.AGY_CLI_NAME = stub;
+// Grok 預設模擬未安裝，不引入額外背景探查；Grok 專測自行注入 native stub。
+process.env.GROK_CLI_NAME = join(temp, 'missing-grok');
 process.on('exit', () => { try { fs.rmSync(temp, { recursive: true, force: true }); } catch {} });

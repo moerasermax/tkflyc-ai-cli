@@ -212,7 +212,7 @@ function extractPeekEventsFromParsedEvent(
     }
     return [];
   }
-  if (agent === 'claude' || agent === 'direct-api') {
+  if (agent === 'claude' || agent === 'grok' || agent === 'direct-api') {
     if (agent === 'direct-api' && parsed.type === 'message' && typeof parsed.content === 'string' && parsed.content.trim()) {
       return [{ kind: 'message', ts: observedAt, text: parsed.content }];
     }
@@ -248,7 +248,7 @@ function extractPeekEventsFromParsedEvent(
       }
       return events;
     }
-    if (agent === 'claude' && includeToolCalls && parsed.type === 'user' && Array.isArray(parsed.message?.content)) {
+    if ((agent === 'claude' || agent === 'grok') && includeToolCalls && parsed.type === 'user' && Array.isArray(parsed.message?.content)) {
       const events: PeekEvent[] = [];
       for (const content of parsed.message.content) {
         if (content?.type === 'tool_result') {
@@ -338,7 +338,7 @@ export class LivenessEventExtractor {
         if (typeof item?.type === 'string') summary += ` ${oneLine(item.type)}`;
         const detail = (text(item?.command) || text(item?.text) || text(item?.message) || text(item?.tool)).slice(0, 80);
         if (detail) summary += `: ${detail}`;
-      } else if (this.agent === 'claude') {
+      } else if (this.agent === 'claude' || this.agent === 'grok') {
         const content = event.message?.content;
         const tool = Array.isArray(content) ? [...content].reverse().find((block: any) => block?.type === 'tool_use') : null;
         if (tool) summary += ` tool_use ${text(tool.name)}`;

@@ -16,7 +16,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export const HELP = `worker 身分驗收（opt-in：真實執行會消耗四家模型額度）
 用法：npm run verify:worker-identity -- [參數]
   --models a,b,c         指定模型；預設 catalog 頂層四家陣列
-  --family claude,codex  家族篩選（agy 可寫 antigravity）
+  --family claude,codex,grok  家族篩選（agy 可寫 antigravity）
   --include-aliases     納入 alias（也適用於明確 --models）
   --hook <path>         已安裝 hook，預設 ~/.claude/scripts/aicli_model_policy.py
   --python <binary>     Python 可執行檔，預設 python（不接受 shell 字串）
@@ -150,7 +150,7 @@ export async function runAcceptance(options, deps) {
       const run = async (kind, prompt) => {
         const before = await snapshotGit(`${kind} 前`);
         const start = { model: entry.model, prompt, workFolder: entry.family === 'direct-api' ? modelDir : report.workFolder,
-          ...(['claude', 'codex'].includes(entry.family) ? { reasoning_effort: 'medium' } : {}) };
+          ...(['claude', 'codex', 'grok'].includes(entry.family) ? { reasoning_effort: 'medium' } : {}) };
         const result = await deps.run({ start, timeoutMs: options.timeoutMs });
         row[kind === 'probe' ? 'probe' : 't6'] = result; // 先保留安全收尾狀態，後續證據寫檔失敗也不能啟動下一顆。
         const prefix = `${index + 1}-${kind}`;

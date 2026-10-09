@@ -6,11 +6,12 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { elapsedSeconds } from './liveness.js';
 
-export const JOB_RETENTION_MS = 10 * 60 * 1000;
+export const JOB_RETENTION_MS = 30 * 60 * 1000;
 export const JOB_REFRESH_MS = 2000;
-export interface ProcessIdentity { pid: number; started: string; name: string; ppid?: number }
+export interface ProcessIdentity { pid: number; started: string; name: string; ppid?: number; commandLine?: string }
 export interface JobDispatcher { pid: number; started?: string; parentPid: number; parentName?: string }
 export interface LiveJob {
+  jobId?: string;
   pid: number; agent: string; model: string | null; reasoning_effort: string | null;
   task: string; workFolder: string; status: 'running' | 'completed' | 'failed' | 'lost';
   startTime: string; endTime?: string; elapsedSec: number;
@@ -31,14 +32,14 @@ export function taskSummary(prompt: string): string {
 }
 
 /** 每輪批次查詢；建立時間 token 由 OS 提供，不能用檔案 mtime 或 kill(pid, 0) 代替。 */
-export const lookupIdentities: IdentityLookup = async (pids) => {
+async function lookupProcessIdentities(pids: number[], includeCommandLine = false): Promise<Map<number, ProcessIdentity>> {
   const ids = [...new Set(pids)].filter(pid => Number.isSafeInteger(pid) && pid > 0 && pid <= 0x7fffffff);
   const result = new Map<number, ProcessIdentity>();
   if (!ids.length) return result;
   try {
     if (process.platform === 'win32') {
       const filter = ids.map(pid => `ProcessId=${pid}`).join(' OR ');
-      const script = `@(Get-CimInstance Win32_Process -Filter '${filter}' | ForEach-Object { [pscustomobject]@{pid=[int]$_.ProcessId;ppid=[int]$_.ParentProcessId;started=$_.CreationDate.ToUniversalTime().ToString('o');name=$_.Name} }) | ConvertTo-Json -Compress`;
+      const script = `@(Get-CimInstance Win32_Process -Filter '${filter}' | ForEach-Object { [pscustomobject]@{pid=[int]$_.ProcessId;ppid=[int]$_.ParentProcessId;started=$_.CreationDate.ToUniversalTime().ToString('o');name=$_.Name${includeCommandLine ? ';commandLine=$_.CommandLine' : ''}} }) | ConvertTo-Json -Compress`;
       const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 5000, maxBuffer: 1024 * 1024 });
       const rows = JSON.parse(stdout || '[]');
       for (const row of Array.isArray(rows) ? rows : [rows]) if (row?.started) result.set(row.pid, row);
@@ -50,7 +51,7 @@ export const lookupIdentities: IdentityLookup = async (pids) => {
           const end = stat.lastIndexOf(')');
           const fields = stat.slice(end + 2).split(' ');
           if (fields[0] === 'Z' || fields[0] === 'X') continue;
-          result.set(pid, { pid, started: `${boot}:${fields[19]}`, name: stat.slice(stat.indexOf('(') + 1, end), ppid: Number(fields[1]) });
+          result.set(pid, { pid, started: `${boot}:${fields[19]}`, name: stat.slice(stat.indexOf('(') + 1, end), ppid: Number(fields[1]), ...(includeCommandLine ? { commandLine: readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim() } : {}) });
         } catch { /* 結束中的行程可以消失。 */ }
       }
     } else {
@@ -65,10 +66,17 @@ export const lookupIdentities: IdentityLookup = async (pids) => {
         const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.{24})\s+(.+)$/);
         if (match) result.set(Number(match[1]), { pid: Number(match[1]), ppid: Number(match[2]), started: match[3], name: match[4].split('/').pop()! });
       }
+      if (includeCommandLine && result.size) {
+        const { stdout: commands } = await exec('ps', ['-p', [...result.keys()].join(','), '-o', 'pid=,args='], { timeout: 5000 }).catch(() => ({ stdout: '' }));
+        for (const line of commands.split('\n')) { const match = line.trim().match(/^(\d+)\s+(.+)$/); if (match && result.has(Number(match[1]))) result.get(Number(match[1]))!.commandLine = match[2]; }
+      }
     }
   } catch { /* 無法查證身分時不冒充存活；下一輪再試。 */ }
   return result;
-};
+}
+export const lookupIdentities: IdentityLookup = pids => lookupProcessIdentities(pids);
+/** 命令列可能含 prompt；只有主導者祖先辨識才能請求，不供一般 worker/GC 查詢。 */
+export const lookupPrincipalIdentities: IdentityLookup = pids => lookupProcessIdentities(pids, true);
 
 export async function currentDispatcher(lookup: IdentityLookup = lookupIdentities): Promise<JobDispatcher> {
   const identities = await lookup([process.pid, process.ppid]);
@@ -127,6 +135,8 @@ export class LiveJobPublisher {
   readonly ready: Promise<void>;
   private onExit = () => this.dispose();
   constructor(private dir: string, private owner: ProcessIdentity, private now = Date.now, lookup: IdentityLookup = lookupIdentities, alive = ownerMayBeAlive) {
+    // principal 探查需要命令列，但監看快照不得保存 CLI 的 prompt 參數。
+    const { commandLine: _commandLine, ...safeOwner } = owner; this.owner = safeOwner;
     // ISO、Linux boot token、POSIX lstart 都可能含不能當檔名的字元。
     this.filePath = join(dir, 'live-jobs', `${owner.pid}-${owner.started.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`);
     process.once('exit', this.onExit);
@@ -186,9 +196,11 @@ export function processJobPublisher(dir = jobStateDir()): Promise<LiveJobPublish
 }
 
 export async function readLiveJobs(dir = jobStateDir(), lookup: IdentityLookup = lookupIdentities, now = Date.now()): Promise<LiveJob[]> {
+  // 6.7.0 快照仍供舊版與不可接回的 PTY/direct-api 使用；新 runner 不另寫快照。
+  const persistent = await readPersistentMcpJobs(dir, lookup, now);
   const snapshots: JobSnapshot[] = [];
   let files: string[];
-  try { files = readdirSync(join(dir, 'live-jobs')); } catch { return []; }
+  try { files = readdirSync(join(dir, 'live-jobs')); } catch { return persistent; }
   for (const file of files.filter(file => file.endsWith('.json'))) {
     const snapshot = readSnapshot(join(dir, 'live-jobs', file));
     if (snapshot) snapshots.push(snapshot);
@@ -202,7 +214,15 @@ export async function readLiveJobs(dir = jobStateDir(), lookup: IdentityLookup =
       sinceLastOutputSec: job.sinceLastOutputSec === null ? null : job.sinceLastOutputSec + (job.status === 'running' ? Math.max(0, now - Date.parse(snapshot.updatedAt)) / 1000 : 0),
       task: shortText(job.task, 40), lastEvent: job.lastEvent === null ? null : shortText(job.lastEvent, 80),
     }));
-  });
+  }).concat(persistent);
+}
+const storeReaders = new Map<string, import('./job-store.js').JobStore>();
+async function readPersistentMcpJobs(dir: string, lookup: IdentityLookup, now: number): Promise<LiveJob[]> {
+  const { JobStore, jobSummary } = await import('./job-store.js');
+  let store = storeReaders.get(dir);
+  if (!store) { store = new JobStore(dir, 'cli', true); storeReaders.set(dir, store); }
+  await store.ready; store.scan(); await store.check(lookup);
+  return [...store.jobs.values()].filter(job => job.meta.source === 'mcp').map(job => jobSummary(job, now)).filter(job => retainedJob(job, now));
 }
 function validJob(job: LiveJob): boolean {
   return !!job && Number.isSafeInteger(job.pid) && typeof job.agent === 'string' && typeof job.task === 'string'

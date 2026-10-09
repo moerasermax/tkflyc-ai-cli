@@ -2,16 +2,16 @@
  * 檔案版 process 管理服務（`ai-cli` CLI 的 detached 路徑使用）。
  * 對應 dist/cli-process-service.js。
  *
- * 與記憶體版的差異：process 用 detached 方式啟動，stdout/stderr 寫入檔案，
- * 狀態存在 meta.json / exit-status.json，因此可跨 CLI 行程查詢（run 後另一個
- * 行程 result/wait）。非 agy 的 detached 走 sh wrapper（POSIX；Windows 需有 sh，
- * 例如 git-bash）。agy/win32 走 ConPTY，輸出寫入檔案。
+ * claude/codex 與 MCP 共用 JobStore + detached runner，輸出由 OS fd 直寫。
+ * 舊 cwds/meta.json + exit-status.json 保留相容讀取。
+ * agy/win32 維持 ConPTY；direct-api 維持行程內 HTTP。
  *
  * spawn/parser 決策改由 registry 驅動。
  */
 
 import { spawn } from 'node:child_process';
 import { buildWorkerEnv } from './worker-env.js';
+import { JobStore, jobResult, jobSummary } from './job-store.js';
 import { lookupIdentities, retainedJob, shortText, taskSummary, type IdentityLookup, type JobDispatcher, type LiveJob } from './live-jobs.js';
 import {
   appendFileSync,
@@ -54,7 +54,7 @@ import {
 } from './peek.js';
 
 const SIGTERM_EXIT_CODE = 143;
-const pendingJobIdentities = new Set<Promise<void>>();
+const pendingJobIdentities = new Set<Promise<unknown>>();
 /** CLI 已送出 PID 後，退出前等 metadata 補寫完成，避免強制退出截斷查詢。 */
 export async function flushJobIdentities(): Promise<void> { await Promise.all([...pendingJobIdentities]); }
 
@@ -134,6 +134,8 @@ export interface FileStartOptions {
 
 export class FileProcessService {
   private stateDir: string;
+  private store: JobStore;
+  private gc?: NodeJS.Timeout;
   private cliPaths: Partial<Record<AgentId, string>>;
   private ptyManagedPids = new Set<number>();
   private breaker: CircuitBreaker;
@@ -157,6 +159,11 @@ export class FileProcessService {
     this.cliPaths = options.cliPaths || resolveAllCliPaths();
     this.breaker = options.breaker ?? new CircuitBreaker();
     this.identityLookup = options.identityLookup ?? lookupIdentities;
+    this.store = new JobStore(this.stateDir, 'cli', !!options.readOnly);
+    if (!options.readOnly) {
+      this.gc = setInterval(() => this.collectLegacy(), 60000); this.gc.unref();
+      this.collectLegacy();
+    }
     if (!options.readOnly) mkdirSync(this.stateDir, { recursive: true });
   }
 
@@ -171,10 +178,11 @@ export class FileProcessService {
       ...(options.capabilities !== undefined ? { capabilities: options.capabilities } : {}),
       cliPaths: this.cliPaths,
     } as BuildCliCommandOptions);
+    cmd.sessionId = options.session_id;
     // 熔斷器：偵測同一行程內框架迴圈造成的爆量/重複啟動。
     this.breaker.check(cmd.agent, cmd.prompt);
     const result = await this.startDetachedTracked(cmd, options.model);
-    return { ...result, ...(cmd.warnings ? { warnings: cmd.warnings } : {}) };
+    return { ...result, ...((cmd.warnings || 'warnings' in result) ? { warnings: [...('warnings' in result ? result.warnings as string[] : []), ...(cmd.warnings ?? [])] } : {}) };
   }
 
   private async startDetachedTracked(cmd: ReturnType<typeof buildCliCommand>, model?: string) {
@@ -188,48 +196,38 @@ export class FileProcessService {
       return this.startPtyTracked(cmd, model);
     }
 
+    if (cmd.agent !== 'antigravity') {
+      await this.store.ready; await this.store.identify();
+      const job = this.store.start(cmd, model);
+      const pending = this.waitForRunnerMeta(job.pid);
+      pendingJobIdentities.add(pending);
+      const warning = await pending.finally(() => pendingJobIdentities.delete(pending));
+      return { pid: job.pid, jobId: job.meta.jobId, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully`, ...(warning ? { warnings: [warning] } : {}) };
+    }
+    return this.startLegacyDetached(cmd, model);
+  }
+
+  private async waitForRunnerMeta(pid: number): Promise<string | undefined> {
+    const job = this.store.get(pid), deadline = Date.now() + 15000;
+    while (!existsSync(join(job.directory, 'meta.json'))) {
+      if (Date.now() >= deadline) return 'Runner metadata handshake timed out; job has already been launched. Track this pid/jobId; do not redispatch.';
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    this.store.get(pid);
+  }
+
+  private async startLegacyDetached(cmd: ReturnType<typeof buildCliCommand>, model?: string) {
     const cwdKey = this.resolveCwdKey(cmd.cwd);
-    if (isWin) {
-      return this.startDetachedWin32(cmd, cwdKey, model);
-    }
-    const wrapperPath = this.ensureDetachedWrapperScript();
-    const childProcess = spawn(wrapperPath, [this.stateDir, cwdKey, cmd.cliPath, ...cmd.args], {
-      env: buildWorkerEnv(),
-      cwd: cmd.cwd,
-      detached: true,
-      stdio: 'ignore',
-    });
-    const pid = childProcess.pid;
-    childProcess.unref();
-    if (!pid) {
-      throw new Error(`Failed to start ${cmd.agent} CLI process`);
-    }
-    const startTime = new Date().toISOString();
-    const processDir = this.resolveProcessDir(cmd.cwd, pid);
-    mkdirSync(processDir, { recursive: true });
-    const stdoutPath = this.resolveStdoutPath(processDir);
-    const stderrPath = this.resolveStderrPath(processDir);
-    this.touchFile(stdoutPath);
-    this.touchFile(stderrPath);
-    const stored: StoredProcess = {
-      ...emptyOutputStats(),
-      pid,
-      prompt: cmd.prompt,
-      workFolder: cmd.cwd,
-      cwdKey,
-      model,
-      resolvedModel: cmd.resolvedModel,
-      reasoning_effort: cmd.reasoningEffort || undefined,
-      dispatcher: this.dispatcher,
-      toolType: cmd.agent,
-      startTime,
-      stdoutPath,
-      stderrPath,
-      status: 'running',
-    };
-    this.writeProcess(stored);
-    this.trackJobIdentity(stored);
-    return { pid, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully` };
+    const child = spawn(this.ensureDetachedWrapperScript(), [this.stateDir, cwdKey, cmd.cliPath, ...cmd.args], { env: buildWorkerEnv(), cwd: cmd.cwd, detached: true, stdio: 'ignore' });
+    child.on('error', () => {}); child.unref();
+    if (!child.pid) throw new Error(`Failed to start ${cmd.agent} CLI process`);
+    const processDir = this.resolveProcessDir(cmd.cwd, child.pid); mkdirSync(processDir, { recursive: true });
+    const stdoutPath = this.resolveStdoutPath(processDir), stderrPath = this.resolveStderrPath(processDir);
+    this.touchFile(stdoutPath); this.touchFile(stderrPath);
+    const stored: StoredProcess = { ...emptyOutputStats(), pid: child.pid, prompt: cmd.prompt, workFolder: cmd.cwd, cwdKey, model, resolvedModel: cmd.resolvedModel,
+      reasoning_effort: cmd.reasoningEffort, dispatcher: this.dispatcher, toolType: cmd.agent, startTime: new Date().toISOString(), stdoutPath, stderrPath, status: 'running' };
+    this.writeProcess(stored); this.trackJobIdentity(stored);
+    return { pid: stored.pid, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully` };
   }
 
   private allocateDirectPid(): number {
@@ -301,66 +299,6 @@ export class FileProcessService {
    * Windows detached spawn：用 Node 腳本當 wrapper（避開 batch 引號地獄）。
    * Node 子程序可取得自己的 PID，對齊 FileProcessService 的 PID→目錄映射。
    */
-  private async startDetachedWin32(
-    cmd: ReturnType<typeof buildCliCommand>,
-    cwdKey: string,
-    model?: string
-  ): Promise<{ pid: number; status: string; agent: AgentId; message: string }> {
-    const wrapperPath = this.ensureDetachedWrapperNodeWin32();
-    const hasStdinPrompt = typeof cmd.stdinPrompt === 'string';
-
-    // 把 spawn 資訊寫入暫存 JSON，wrapper 讀這個檔即可
-    const specPath = join(this.stateDir, `spec_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.json`);
-    writeFileSync(specPath, JSON.stringify({
-      stateDir: this.stateDir,
-      cwdKey,
-      cliPath: cmd.cliPath,
-      args: cmd.args,
-      cwd: cmd.cwd,
-      stdinPrompt: hasStdinPrompt ? cmd.stdinPrompt : null,
-      needsShell: !getAgent(cmd.agent).win32DirectExec,
-    }), 'utf-8');
-
-    const childProcess = spawn(process.execPath, [wrapperPath, specPath], {
-      env: buildWorkerEnv(),
-      cwd: cmd.cwd,
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-    });
-    const pid = childProcess.pid;
-    childProcess.unref();
-    if (!pid) {
-      throw new Error(`Failed to start ${cmd.agent} CLI process`);
-    }
-    const startTime = new Date().toISOString();
-    const processDir = this.resolveProcessDir(cmd.cwd, pid);
-    mkdirSync(processDir, { recursive: true });
-    const stdoutPath = this.resolveStdoutPath(processDir);
-    const stderrPath = this.resolveStderrPath(processDir);
-    this.touchFile(stdoutPath);
-    this.touchFile(stderrPath);
-    const stored: StoredProcess = {
-      ...emptyOutputStats(),
-      pid,
-      prompt: cmd.prompt,
-      workFolder: cmd.cwd,
-      cwdKey,
-      model,
-      resolvedModel: cmd.resolvedModel,
-      reasoning_effort: cmd.reasoningEffort || undefined,
-      dispatcher: this.dispatcher,
-      toolType: cmd.agent,
-      startTime,
-      stdoutPath,
-      stderrPath,
-      status: 'running',
-    };
-    this.writeProcess(stored);
-    this.trackJobIdentity(stored);
-    return { pid, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully` };
-  }
-
   private async startPtyTracked(cmd: ReturnType<typeof buildCliCommand>, model?: string) {
     const pty = loadPtyModule();
     const cwdKey = this.resolveCwdKey(cmd.cwd);
@@ -430,7 +368,9 @@ export class FileProcessService {
   }
 
   async listProcesses() {
-    return this.readAllProcesses().map((stored) => {
+    await this.store.ready; this.store.scan(); await this.store.check();
+    if (this.gc) { this.store.collect(); this.collectLegacy(); }
+    return [...this.store.list(), ... this.readAllProcesses().map((stored) => {
       const proc = this.refreshStatus(stored);
       const liveness = proc.status === 'running' ? this.processLiveness(proc) : undefined;
       return {
@@ -439,7 +379,7 @@ export class FileProcessService {
         status: proc.status,
         ...listProcessTiming(proc.startTime, proc.endTime, liveness),
       };
-    });
+    })];
   }
 
   private trackJobIdentity(stored: StoredProcess): void {
@@ -467,10 +407,11 @@ export class FileProcessService {
 
   /** jobs 專用唯讀投影：不呼叫 refreshStatus，不改 meta／stderr，也不建立目錄。 */
   async listJobSummaries(lookup: IdentityLookup = lookupIdentities, now = Date.now()): Promise<LiveJob[]> {
+    await this.store.ready; this.store.scan(); await this.store.check(lookup);
     const processes = this.readAllProcesses();
     const identities = await lookup(processes.filter(proc => proc.status === 'running').map(proc =>
       proc.toolType === 'direct-api' && proc.dispatcher ? proc.dispatcher.pid : proc.pid));
-    const jobs: LiveJob[] = [];
+    const jobs: LiveJob[] = [...this.store.jobs.values()].map(job => jobSummary(job, now)).filter(job => retainedJob(job, now));
     for (const proc of processes) {
       try {
         let identityVerified: boolean | undefined;
@@ -503,7 +444,9 @@ export class FileProcessService {
     return jobs;
   }
 
-  async getProcessResult(pid: number, verbose = false) {
+  async getProcessResult(pid: number, verbose = false, jobId?: string) {
+    await this.store.ready; this.store.scan(); await this.store.check();
+    if (jobId || this.store.hasPid(pid)) return jobResult(this.store.get(pid, jobId), verbose);
     const stored = this.readProcess(pid);
     const refreshed = this.refreshStatus(stored);
     const stdout = this.readTextFileSafe(refreshed.stdoutPath);
@@ -533,10 +476,12 @@ export class FileProcessService {
   }
 
   async waitForProcesses(pids: number[], timeoutSeconds = 180, verbose = false) {
+    await this.store.ready; this.store.scan();
+    if (pids.every(pid => this.store.hasPid(pid))) return this.store.wait(pids, timeoutSeconds, verbose);
     const start = Date.now();
-    for (const pid of pids) this.readProcess(pid);
+    for (const pid of pids) if (!this.store.hasPid(pid)) this.readProcess(pid);
     for (;;) {
-      const statuses = pids.map((pid) => this.refreshStatus(this.readProcess(pid)).status);
+      const statuses = pids.map((pid) => this.store.hasPid(pid) ? this.store.get(pid).status : this.refreshStatus(this.readProcess(pid)).status);
       if (statuses.every((status) => status !== 'running')) {
         return Promise.all(pids.map((pid) => this.getProcessResult(pid, verbose)));
       }
@@ -551,7 +496,14 @@ export class FileProcessService {
     }
   }
 
-  async peekProcesses(pids: number[], peekTimeSec = 10, includeToolCalls = false) {
+  async peekProcesses(pids: number[], peekTimeSec = 10, includeToolCalls = false): Promise<{ peek_started_at: string; observed_duration_sec: number; processes: PeekProcessResult[] }> {
+    await this.store.ready; this.store.scan();
+    const persistent = pids.filter(pid => this.store.hasPid(pid));
+    if (persistent.length === pids.length) return this.store.peek(pids, peekTimeSec, includeToolCalls);
+    if (persistent.length) {
+      const results = await Promise.all([this.store.peek(persistent, peekTimeSec, includeToolCalls), this.peekProcesses(pids.filter(pid => !this.store.hasPid(pid)), peekTimeSec, includeToolCalls)]);
+      return { ...results[0], processes: pids.map(pid => results.flatMap(r => r.processes).find(p => p.pid === pid)!) };
+    }
     const targetPids = validatePeekPids(pids);
     const targetPeekTimeSec = validatePeekTimeSec(peekTimeSec);
     const processes: PeekProcessResult[] = [];
@@ -629,6 +581,8 @@ export class FileProcessService {
   }
 
   async killProcess(pid: number) {
+    await this.store.ready; this.store.scan();
+    if (this.store.hasPid(pid)) return this.store.kill(pid);
     const proc = this.readProcess(pid);
     const refreshed = this.refreshStatus(proc);
     if (refreshed.status !== 'running') {
@@ -659,7 +613,8 @@ export class FileProcessService {
   }
 
   async cleanupProcesses() {
-    let removed = 0;
+    await this.store.ready; this.store.scan(); await this.store.check();
+    let removed = this.store.collect(Date.now(), true).length;
     for (const proc of this.readAllProcesses()) {
       const refreshed = this.refreshStatus(proc);
       if (refreshed.status === 'running') continue;
@@ -676,6 +631,17 @@ export class FileProcessService {
   }
 
   // ---- 內部：儲存/狀態 ----
+
+  private collectLegacy(now = Date.now()): void {
+    for (const stored of this.readAllProcesses()) {
+      const proc = this.refreshStatus(stored);
+      if (proc.status !== 'running' && proc.endTime && now - Date.parse(proc.endTime) >= 30 * 60 * 1000) {
+        rmSync(this.resolveStoredProcessDir(proc), { recursive: true, force: true });
+        this.outputEvents.delete(proc.stdoutPath); this.outputEvents.delete(proc.stderrPath);
+      }
+    }
+  }
+  dispose(): void { this.store.dispose(); if (this.gc) clearInterval(this.gc); }
 
   private readAllProcesses(): StoredProcess[] {
     const cwdsDir = this.resolveCwdsDir();
@@ -733,6 +699,7 @@ export class FileProcessService {
         呼叫端會據此判定任務失敗並重跑，而它可能其實成功了。
       */
       proc.status = 'lost';
+      proc.endTime = new Date().toISOString();
       this.appendTextFileSafe(
         proc.stderrPath,
         '\nProcess disappeared without exit-status metadata; marking as lost ' +
@@ -873,49 +840,6 @@ export class FileProcessService {
   private resolveExitStatusPath(processDir: string): string {
     return join(processDir, 'exit-status.json');
   }
-  private resolveDetachedWrapperNodeWin32Path(): string {
-    // 換版本名，已存在的舊 wrapper 才不會讓 .cmd 修正永遠沒有生效。
-    return join(this.stateDir, 'detached-runner-win32-v2.cjs');
-  }
-
-  private ensureDetachedWrapperNodeWin32(): string {
-    const wrapperPath = this.resolveDetachedWrapperNodeWin32Path();
-    if (existsSync(wrapperPath)) return wrapperPath;
-    writeFileSync(wrapperPath, `"use strict";
-const{readFileSync,writeFileSync,unlinkSync,appendFileSync,statSync,mkdirSync}=require("node:fs");
-const{spawn}=require("node:child_process");
-const{join}=require("node:path");
-const spec=JSON.parse(readFileSync(process.argv[2],"utf-8"));
-try{unlinkSync(process.argv[2]);}catch{}
-const dir=join(spec.stateDir,"cwds",spec.cwdKey,String(process.pid));
-const out=join(dir,"stdout.log");
-const errP=join(dir,"stderr.log");
-const ext=join(dir,"exit-status.json");
-function waitDir(cb){const p=()=>{try{statSync(dir);cb();}catch{setTimeout(p,50);}};p();}
-waitDir(()=>{
-// Node 20+ 不可直接 spawn npm 的 .cmd shim；與記憶體版一致，明確經過 cmd.exe。
-const command='"'+spec.cliPath+'" '+spec.args.map(a=>a.includes(' ')?'"'+a+'"':a).join(' ');
-const binary=spec.needsShell?(process.env.ComSpec||process.env.COMSPEC||'cmd.exe'):spec.cliPath;
-const args=spec.needsShell?['/d','/s','/c','"'+command+'"']:spec.args;
-const child=spawn(binary,args,{cwd:spec.cwd,stdio:[spec.stdinPrompt?"pipe":"ignore","pipe","pipe"],shell:false,windowsVerbatimArguments:!!spec.needsShell,windowsHide:true});
-if(spec.stdinPrompt&&child.stdin){child.stdin.on("error",()=>{});try{child.stdin.write(spec.stdinPrompt);child.stdin.end();}catch{}}
-child.stdout.on("data",d=>{try{appendFileSync(out,d);}catch{}});
-child.stderr.on("data",d=>{try{appendFileSync(errP,d);}catch{}});
-child.on("close",code=>{
-const s=code===0?"completed":"failed";
-try{writeFileSync(ext,JSON.stringify({status:s,exitCode:code??-1}));}catch{}
-process.exit(code??1);
-});
-child.on("error",e=>{
-try{appendFileSync(errP,"\\nProcess error: "+e.message);}catch{}
-try{writeFileSync(ext,JSON.stringify({status:"failed",exitCode:-1}));}catch{}
-process.exit(1);
-});
-});
-`);
-    return wrapperPath;
-  }
-
   private resolveDetachedWrapperPath(): string {
     return join(this.stateDir, 'detached-runner-v2.sh');
   }

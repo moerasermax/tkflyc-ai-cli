@@ -64,7 +64,7 @@ export interface BuildCliCommandOptions {
    * ★ fail-closed：給了這個欄位，而該 agent 沒有系統提示通道，就**拒絕啟動**。
    *   靜默忽略會讓呼叫端以為那段框架送到了、實際上模型什麼都沒看到——
    *   那比不支援更糟，因為它看起來成功了。
-   *   目前只有 claude 有這條通道（`--append-system-prompt-file`）；
+   *   claude 用 `--append-system-prompt-file`，grok 用 `--rules`（身分鎖在前）；
    *   codex exec 只有 `-c key=value`、agy 的 23 個旗標裡沒有對應項（2026-09-10 查 --help）。
    *   這是 vendor 的現況，不是我們挑呼叫端。
    */

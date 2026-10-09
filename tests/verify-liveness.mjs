@@ -73,6 +73,16 @@ function terminalChecks(prefix, result) {
   check(`${prefix} PONG`, result?.agentOutput?.message === 'PONG');
 }
 
+// Windows CIM／runner 冷啟動可超過一秒；先由獨立 log 證明 stub 已輸出，再驗一秒 wait。
+async function stubOutputReady(state, jobId) {
+  const path = join(state, 'jobs', jobId, 'stdout.log'), deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    if (existsSync(path) && readFileSync(path, 'utf8').includes('thread.started')) return;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw Error('Stub first output did not arrive');
+}
+
 async function mcpChecks() {
   const child = spawn(process.execPath, [join(ROOT, 'dist/bin/ai-cli-mcp.js')], {
     cwd: ROOT, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
@@ -117,6 +127,7 @@ async function mcpChecks() {
     pid = run?.pid;
     check('MCP run uses codex stub', Number.isSafeInteger(pid) && run.agent === 'codex', JSON.stringify(run));
     if (!pid) return;
+    await stubOutputReady(process.env.AI_CLI_STATE_DIR, run.jobId);
     const first = await call('wait', { pids: [pid], timeout: 1 });
     check('MCP timeout is not an error', !first.error && !first.result?.isError, JSON.stringify(first));
     const results = decode(first);
@@ -162,6 +173,9 @@ function cli(args, stateDir) {
 }
 
 async function fileChecks(FileProcessService) {
+  // CIM 與多次跨行程 CLI 冷啟動也算在 stub 壽命內，留足觀察 running 的時間。
+  const oldTotal = process.env.SLOW_AGENT_TOTAL_SEC;
+  process.env.SLOW_AGENT_TOTAL_SEC = '18';
   const stateDir = join(TEMP, 'state');
   const options = { stateDir, cliPaths: { codex: stub } };
   const service = new FileProcessService(options);
@@ -197,6 +211,8 @@ async function fileChecks(FileProcessService) {
     console.log(`File sample: ${JSON.stringify(first?.[0])}`);
   } finally {
     await service.waitForProcesses([run.pid], 30).catch(() => {});
+    service.dispose(); reader.dispose();
+    process.env.SLOW_AGENT_TOTAL_SEC = oldTotal;
   }
 }
 
@@ -280,12 +296,12 @@ async function edgeChecks(ProcessService, FileProcessService, buildLiveness, emp
 
   const service = new ProcessService({ cliPaths: { codex: stub, claude: stub, antigravity: stub } });
   const run = service.startProcess({ model: 'gpt-5.5', prompt: 'Memory counters', workFolder: ROOT });
-  const entry = service.processManager.get(run.pid);
+  const entry = service.findProcess(run.pid);
   try {
     const originalListeners = entry.process.listenerCount('close');
     for (let n = 0; n < 12; n++) await service.waitForProcesses([run.pid, run.pid], 0.001).catch(() => {});
     check('repeated waits release listeners', entry.process.listenerCount('close') === originalListeners);
-    entry.process.stderr.emit('data', Buffer.from('警告'));
+    appendFileSync(join(entry.directory, 'stderr.log'), Buffer.from('警告'));
     check('Memory stderr counts UTF-8 bytes', service.getProcessResult(run.pid).liveness.stderrBytes === Buffer.byteLength('警告'));
     check('Memory stderr updates last output', typeof service.getProcessResult(run.pid).liveness.sinceLastOutputSec === 'number');
     const { getAgent } = await import('../dist/agents/registry.js');

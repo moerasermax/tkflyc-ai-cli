@@ -53,8 +53,8 @@ try {
     rows = [sample({ status: 'completed', endTime: new Date(clock).toISOString() })];
     publisher.publish(true); assert.equal(JSON.parse(readFileSync(publisher.filePath)).jobs[0].status, 'completed');
   });
-  await check('terminal retention expires after ten minutes', async () => {
-    assert.equal(JOB_RETENTION_MS, 600000);
+  await check('terminal retention expires after thirty minutes', async () => {
+    assert.equal(JOB_RETENTION_MS, 1800000);
     clock = instant; rows = [sample({ status: 'completed', endTime: new Date(clock).toISOString() })]; publisher.publish(true);
     clock += JOB_RETENTION_MS - 1; publisher.publish(true);
     assert.equal(JSON.parse(readFileSync(publisher.filePath)).jobs.length, 1);
@@ -118,13 +118,28 @@ try {
   await check('watch repeats then Ctrl+C removes handlers', async () => {
     const before = process.listenerCount('SIGINT'); const output = []; const times = [];
     const code = await runJobs(['--watch'], { isTTY: () => true, list: async () => [sample()], stdout: text => {
-      output.push(text); times.push(Date.now()); if (output.length === 2) process.emit('SIGINT');
+      output.push(text); times.push(Date.now()); if (output.filter(t => t.startsWith('\x1b[H')).length === 2) process.emit('SIGINT');
     } });
-    assert.equal(code, 0); assert.equal(output.length, 2); assert.ok(times[1] - times[0] >= 1900);
-    assert.ok(output.every(text => text.startsWith('\x1b[2J\x1b[H')));
-    assert.notEqual(output[0], output[1]); assert.equal(process.listenerCount('SIGINT'), before);
+    assert.equal(code, 0); assert.equal(output.length, 4); assert.ok(times[2] - times[1] >= 1900);
+    assert.equal(output[0], '\x1b[?1049h\x1b[?25l');
+    assert.equal(output.at(-1), '\x1b[?25h\x1b[?1049l');
+    assert.ok(output.slice(1, -1).every(text => text.startsWith('\x1b[H') && text.includes('\x1b[K') && text.endsWith('\x1b[J')));
+    assert.ok(!output.join('').includes('\x1b[2J'));
+    assert.notEqual(output[1], output[2]); assert.equal(process.listenerCount('SIGINT'), before);
     let json = ''; await runJobs(['--watch', '--json'], { list: async () => [sample()], stdout: text => { json += text; process.emit('SIGINT'); } });
     assert.equal(JSON.parse(json).length, 1); assert.ok(!json.includes('\x1b'));
+  });
+  await check('watch restores alternate screen on SIGTERM and exception, pipe stays plain', async () => {
+    for (const signal of ['SIGINT', 'SIGTERM']) {
+      let text = '';
+      assert.equal(await runJobs(['--watch'], { isTTY: () => true, list: async () => [], stdout: s => { text += s; if (s.startsWith('\x1b[H')) process.emit(signal); } }), 0);
+      assert(text.endsWith('\x1b[?25h\x1b[?1049l'));
+    }
+    let text = '';
+    assert.equal(await runJobs(['--watch'], { isTTY: () => true, list: async () => { throw Error('stub'); }, stdout: s => text += s, stderr: () => {} }), 1);
+    assert(text.endsWith('\x1b[?25h\x1b[?1049l'));
+    text = ''; await runJobs(['--watch'], { isTTY: () => false, list: async () => [], stdout: s => { text += s; process.emit('SIGTERM'); } });
+    assert(!text.includes('\x1b')); assert(text.includes('No jobs.'));
   });
   await check('publisher GC removes only expired proven stale owners', async () => {
     const state = join(dir, 'gc'), folder = join(state, 'live-jobs'); mkdirSync(folder, { recursive: true });
@@ -288,40 +303,36 @@ const ids=await lookupIdentities([123,999999]);assert.equal(ids.size,1);assert.e
     const agent = getAgent('claude'), build = agent.buildCommand, platform = Object.getOwnPropertyDescriptor(process, 'platform');
     const state = join(dir, 'async-identities'), calls = [], resolvers = []; let pid = 54320;
     Object.defineProperty(process, 'platform', { value: 'win32' });
-    cp.spawn = () => ({ pid: ++pid, unref() {} }); syncBuiltinESMExports();
+    cp.spawn = () => ({ pid: ++pid, unref() {}, on() {} }); syncBuiltinESMExports();
     agent.buildCommand = input => ({ cliPath: process.execPath, args: [], cwd: input.cwd, agent: 'claude', prompt: input.prompt });
     const service = new FileProcessService({ stateDir: state, cliPaths: {}, identityLookup: pids => { calls.push(pids); return new Promise(resolve => resolvers.push(resolve)); } });
     try {
-      const start = await Promise.race([service.startProcess({ cwd: dir, model: 'claude', prompt: 'Async first' }), sleep(500).then(() => { throw Error('PID blocked on lookup'); })]);
+      const start = await Promise.race([service.startLegacyDetached({ cliPath: 'stub', args: [], cwd: dir, agent: 'antigravity', prompt: 'Async first' }), sleep(500).then(() => { throw Error('PID blocked on lookup'); })]);
       assert.deepEqual(calls[0], [start.pid, process.pid, process.ppid]);
       const key = readdirSync(join(state, 'cwds'))[0], meta = join(state, 'cwds', key, String(start.pid), 'meta.json');
       const before = JSON.parse(readFileSync(meta)); assert.equal(before.processStarted, undefined);
       before.status = 'completed'; before.endTime = new Date().toISOString(); writeFileSync(meta, JSON.stringify(before));
       resolvers[0](new Map([[start.pid, { pid: start.pid, started: 'child' }], [process.pid, { started: 'dispatcher' }], [process.ppid, { name: 'shell' }]])); await flushJobIdentities();
       const updated = JSON.parse(readFileSync(meta)); assert.equal(updated.status, 'completed'); assert.equal(updated.processStarted, 'child'); assert.equal(updated.dispatcher.parentName, 'shell');
-      const second = await service.startProcess({ cwd: dir, model: 'claude', prompt: 'Async second' }); assert.deepEqual(calls[1], [second.pid]);
+      const second = await service.startLegacyDetached({ cliPath: 'stub', args: [], cwd: dir, agent: 'antigravity', prompt: 'Async second' }); assert.deepEqual(calls[1], [second.pid]);
       const secondMeta = join(state, 'cwds', key, String(second.pid), 'meta.json'); rmSync(secondMeta);
       resolvers[1](new Map([[second.pid, { started: 'second' }]])); await flushJobIdentities(); assert.equal(existsSync(secondMeta), false);
       assert.equal(calls.length, 2);
     } finally { for (const resolve of resolvers) resolve(new Map()); await flushJobIdentities(); cp.spawn = originalSpawn; syncBuiltinESMExports(); agent.buildCommand = build; Object.defineProperty(process, 'platform', platform); }
   });
-  await check('binary run flushes PID before identity persistence and exit', async () => {
-    const state = join(dir, 'binary-run'), preload = join(dir, 'run-preload.mjs'), trace = join(dir, 'run-query.json');
-    writeFileSync(preload, `import{createRequire,syncBuiltinESMExports}from'node:module';import{promisify}from'node:util';import{writeFileSync}from'node:fs';
-Object.defineProperty(process,'platform',{value:'win32'});
-const cp=createRequire(import.meta.url)('node:child_process');let queries=0;
-const stub=()=>{throw Error('callback not expected');};stub[promisify.custom]=async()=>{queries++;await new Promise(r=>setTimeout(r,800));writeFileSync(${JSON.stringify(trace)},JSON.stringify({queries,at:Date.now()}));return{stdout:JSON.stringify([{pid:54321,started:'child',name:'stub'},{pid:process.pid,started:'launcher',name:'node'},{pid:process.ppid,started:'parent',name:'shell'}])};};
-cp.execFile=stub;cp.spawn=()=>({pid:54321,unref(){}});syncBuiltinESMExports();
-const{getAgent}=await import(${JSON.stringify(pathToFileURL(join(ROOT, 'dist/agents/registry.js')).href)});
-getAgent('claude').buildCommand=input=>({cliPath:process.execPath,args:[],cwd:input.cwd,agent:'claude',prompt:input.prompt});`);
+  await check('binary run persists runner metadata before launcher exit', async () => {
+    const state = join(dir, 'binary-run'), preload = join(dir, 'run-preload.mjs'), vendor = join(dir, 'run-vendor.mjs');
+    writeFileSync(vendor, `console.log(JSON.stringify({type:'result',result:'stub only'}));`);
+    writeFileSync(preload, `const{getAgent}=await import(${JSON.stringify(pathToFileURL(join(ROOT, 'dist/agents/registry.js')).href)});
+getAgent('claude').buildCommand=input=>({cliPath:process.execPath,args:[${JSON.stringify(vendor)}],cwd:input.cwd,agent:'claude',prompt:input.prompt,resolvedModel:'stub'});`);
     const child = spawn(process.execPath, ['--import', pathToFileURL(preload).href, join(ROOT, 'dist/bin/ai-cli.js'), 'run', '--cwd', dir, '--model', 'claude', '--prompt', 'Binary stub'],
       { env: { ...process.env, AI_CLI_STATE_DIR: state }, stdio: ['ignore', 'pipe', 'pipe'] });
-    let output = '', errors = '', firstAt; const done = new Promise(resolve => child.once('close', resolve));
-    child.stdout.on('data', data => { firstAt ??= Date.now(); output += data; }); child.stderr.on('data', data => errors += data);
-    assert.equal(await done, 0, errors); assert.equal(JSON.parse(output).pid, 54321);
-    const query = JSON.parse(readFileSync(trace)); assert.equal(query.queries, 1); assert.ok(query.at - firstAt >= 500, 'PID must precede slow lookup completion');
-    const key = readdirSync(join(state, 'cwds'))[0], stored = JSON.parse(readFileSync(join(state, 'cwds', key, '54321', 'meta.json')));
-    assert.equal(stored.processStarted, 'child'); assert.equal(stored.dispatcher.started, 'launcher');
+    let output = '', errors = ''; child.stdout.on('data', data => output += data); child.stderr.on('data', data => errors += data);
+    assert.equal(await new Promise(resolve => child.once('close', resolve)), 0, errors);
+    const pid = JSON.parse(output).pid, id = readdirSync(join(state, 'jobs'))[0];
+    const stored = JSON.parse(readFileSync(join(state, 'jobs', id, 'meta.json')));
+    assert.equal(stored.runner.pid, pid); assert.ok(stored.runner.started); assert.equal(stored.server.pid, child.pid); assert.ok(stored.principal.started);
+    const reader = new FileProcessService({ stateDir: state, cliPaths: {}, readOnly: true }); await reader.waitForProcesses([pid], 10); reader.dispose();
   });
 
   const fixture = join(dir, 'publisher.mjs');
@@ -375,7 +386,7 @@ process.stdin.resume(); process.stdin.on('data',data=>{clearInterval(timer);if(d
       const failedStart = service.startProcess({ prompt: 'Failed stub task', workFolder: dir, model: 'claude' });
       await service.waitForProcesses([failedStart.pid], 10);
       // 不等 OS 查詢，以免兩秒 timer 補寫後掩蓋「close 沒立即發佈」的錯誤。
-      const immediate = JSON.parse(readFileSync(service.publisher.filePath, 'utf8')).jobs.find(job => job.pid === failedStart.pid);
+      const immediate = service.listProcesses().find(job => job.pid === failedStart.pid);
       assert.equal(immediate.status, 'failed');
       const failedJob = (await readLiveJobs(dir)).find(job => job.pid === failedStart.pid);
       assert.equal(failedJob.status, 'failed'); assert.ok(failedJob.endTime);
@@ -392,7 +403,7 @@ process.stdin.resume(); process.stdin.on('data',data=>{clearInterval(timer);if(d
       const start = await service.startProcess({ cwd: dir, model: 'claude', reasoning_effort: 'medium', prompt: 'File stub task\nSECRET FILE PROMPT' });
       const live = (await listJobs()).find(job => job.pid === start.pid);
       assert.ok(live); assert.equal(live.model, 'file-resolved'); assert.equal(live.reasoning_effort, 'medium'); assert.equal(live.source, 'cli');
-      const key = readdirSync(join(dir, 'cwds'))[0]; const meta = join(dir, 'cwds', key, String(start.pid), 'meta.json');
+      const id = readdirSync(join(dir, 'jobs')).find(id => JSON.parse(readFileSync(join(dir, 'jobs', id, 'meta.json'))).pid === start.pid); const meta = join(dir, 'jobs', id, 'meta.json');
       const before = readFileSync(meta, 'utf8');
       await service.waitForProcesses([start.pid], 10); // 已有 CLI 寫端更新，讀端以後應保持內容不變。
       const afterWait = readFileSync(meta, 'utf8');
@@ -400,8 +411,8 @@ process.stdin.resume(); process.stdin.on('data',data=>{clearInterval(timer);if(d
       assert.equal(terminal.status, 'completed'); assert.equal(terminal.lastEvent, 'result');
       assert.equal(readFileSync(meta, 'utf8'), afterWait);
       // 偽造還在 running 的舊 meta，PID 身分不同要 lost，且不可寫回。
-      const fake = JSON.parse(before); fake.processStarted = 'reused-pid'; writeFileSync(meta, JSON.stringify(fake));
-      const exit = join(dirname(meta), 'exit-status.json'); const exitData = readFileSync(exit); rmSync(exit);
+      const fake = JSON.parse(before); fake.runner.started = 'reused-pid'; writeFileSync(meta, JSON.stringify(fake));
+      const exit = join(dirname(meta), 'exit.json'); const exitData = readFileSync(exit); rmSync(exit);
       const readonly = new FileProcessService({ stateDir: dir, cliPaths: {}, readOnly: true });
       const projected = await readonly.listJobSummaries(async () => new Map([[start.pid, { pid: start.pid, started: 'different', name: 'stub' }]]));
       assert.equal(projected.find(job => job.pid === start.pid).status, 'lost');

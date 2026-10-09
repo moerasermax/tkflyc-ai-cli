@@ -122,7 +122,7 @@ check(
 const oldFake = new FakeCodex([OLD_CLI_REJECTS_FLAG, RATE_PANEL]);
 const old = await queryWith(oldFake);
 check(
-  oldFake.calls.length === 2 && oldFake.calls[1].length === 0,
+  oldFake.calls.length === 2 && !oldFake.calls[1].includes('--no-daemon') && oldFake.calls[1].includes('check_for_update_on_startup=false'),
   '★ 舊版 codex 不認得 --no-daemon 時拿掉參數重跑一次',
   `得到 ${JSON.stringify(oldFake.calls)}`
 );

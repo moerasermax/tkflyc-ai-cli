@@ -1,6 +1,6 @@
 /**
  * Model 目錄與 alias 表。
- * 5.0.0 起只剩 claude / codex / antigravity / direct-api（kiro 與 forge 已移除）。
+ * 支援 claude / codex / grok / antigravity / direct-api（kiro 與 forge 已移除）。
  *
  * 各 agent 的 model 清單其實也定義在各自的 agents/<name>.ts，
  * 這裡彙整出對外的 models payload 與描述字串。
@@ -119,6 +119,11 @@ export const DISPATCH_GUIDANCE: ReadonlyArray<{
   reasoningEffort?: string;
   note: string;
 }> = [
+  {
+    situation: '需要 xAI Grok CLI 的程式碼／文字工作',
+    model: 'grok-4.7 / grok-4.7-build-fast',
+    note: '獨立 Grok CLI pipe 後端，持久化 job 可接回；模型清單查 grok models，low/medium/high/xhigh effort 已實測（grok 1.0.50）。使用 Grok CLI 自己的登入，不是 direct-api provider。',
+  },
   {
     situation: '合併零碎小任務',
     model: 'codex / claude',
@@ -273,7 +278,7 @@ export const NVIDIA_FREE_TIER_CAVEATS: ReadonlyArray<string> = [
 */
 export const MODEL_LIST_CAVEAT = {
   notAnAllowlist:
-    '頂層 claude / codex / antigravity / direct-api 四個陣列是候選建議，不是可派工模型的全集。'
+    '頂層 claude / codex / grok / antigravity / direct-api 五個陣列是候選建議，不是可派工模型的全集。'
     + 'claude agent 是整個 routing 的 fallback（matchesModel 永遠回 true）：一個名稱會先經過 '
     + 'direct-api 前綴解析、alias 展開、已移除模型（REMOVED_MODELS）攔截，走完這三關仍沒被'
     + '其他 agent 認領的，就原樣交給 claude CLI 的 --model——只要 vendor CLI 認得那個名字'
@@ -292,8 +297,8 @@ export const MODEL_LIST_CAVEAT = {
     + '已知的例子見 knownBadModels，但那份清單同樣是人工維護的，不會自動跟上。',
   authority:
     '要確定某個名稱現在能不能用，權威是 vendor CLI 自己（claude --help、~/.codex/models_cache.json、'
-    + 'agy models），不是這份 payload。四個陣列的新鮮度並不一致：claude 與 codex 是原始碼裡的'
-    + '手動清單，vendor 出新模型不會自動進來（fable 就是這樣漏掉的）；antigravity 則會把實查到'
+    + 'agy models、grok models），不是這份 payload。五個陣列的新鮮度並不一致：claude 與 codex 是原始碼裡的'
+    + '手動清單，vendor 出新模型不會自動進來（fable 就是這樣漏掉的）；antigravity 與 grok 則會把實查到'
     + '且可路由的模型併進來，所以它跟得上 agy 的新模型；direct-api 那幾筆是前綴佔位字串，'
     + '本機實際設了哪些 provider 要看 directApiProviders。逐筆的出處看 catalogV2 的 source 欄位'
     + '（vendor-cli＝問過 vendor、builtin-fallback＝原始碼靜態值）。',
@@ -418,6 +423,7 @@ export function getSupportedModelsDescription(): string {
     '"claude-ultra", "codex-ultra", "codex-ultracode", "agy-ultra"',
     ...byAgent.claude.map((m) => `"${m}"`),
     ...byAgent.codex.map((m) => `"${m}"`),
+    ...byAgent.grok.map((m) => `"${m}"`),
     ...byAgent.antigravity.map((m) => `"${m}"`),
     ...byAgent['direct-api'].map((m) => `"${m}"`),
   ].join(', ');
@@ -429,6 +435,7 @@ export function getModelParameterDescription(): string {
   const all = [
     ...byAgent.claude,
     ...byAgent.codex,
+    ...byAgent.grok,
     ...byAgent.antigravity,
     ...byAgent['direct-api'],
   ];
@@ -515,12 +522,13 @@ export function getModelsPayload(snapshot: ConfigSnapshot = loadUserConfigSnapsh
     }),
     claude: byAgent.claude,
     codex: byAgent.codex,
+    grok: byAgent.grok,
     antigravity: byAgent.antigravity,
     'direct-api': byAgent['direct-api'],
     /*
       ★ v2 目錄：**每一筆都說得出自己的出處與時間**。
 
-        上面那四個陣列是既有形狀、有現成消費者，所以不動。但它們沒有
+        上面各 agent 陣列保留既有形狀，Grok 以新增欄位加入。但它們沒有
         任何欄位能讓讀的人分辨「這是問過 vendor 的」還是「這是原始碼裡
         的靜態值」——2026-07-31 就因此發生過一次把過時硬編當成事實
         轉述的誤導（agy 的模型清單與 --model 支援度都早已改變）。
@@ -553,7 +561,7 @@ export function getModelsPayload(snapshot: ConfigSnapshot = loadUserConfigSnapsh
     */
     nvidiaFreeTierCaveats: NVIDIA_FREE_TIER_CAVEATS,
     /*
-      ★ 上面那四個陣列該怎麼讀。呼叫端是 AI，它只看得到 payload——
+      ★ 上面各 agent 陣列該怎麼讀。呼叫端是 AI，它只看得到 payload——
       清單沒說自己不是全集，讀的人就會把它當全集。見 MODEL_LIST_CAVEAT 上方註解。
     */
     modelListCaveat: MODEL_LIST_CAVEAT,

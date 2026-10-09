@@ -99,6 +99,10 @@ export function inspectCliBinary(config: BinaryConfig): CliBinaryStatus {
     return { configuredCommand, resolvedPath, available: resolvedPath !== null, lookup: 'env' };
   }
 
+  if (config.preferPath) {
+    const resolvedPath = findExecutableOnPath(configuredCommand);
+    if (resolvedPath) return { configuredCommand, resolvedPath, available: true, lookup: 'path' };
+  }
   if (config.localInstallPath && isExecutableFile(config.localInstallPath)) {
     return { configuredCommand, resolvedPath: config.localInstallPath, available: true, lookup: 'local' };
   }

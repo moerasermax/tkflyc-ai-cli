@@ -44,6 +44,7 @@ export function validatePeekTimeSec(value: unknown): number {
 }
 
 export interface PeekProcessResult {
+  jobId?: string;
   pid: number;
   agent: string | null;
   status: string;

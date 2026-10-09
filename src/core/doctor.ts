@@ -34,6 +34,7 @@ export function resolveAllCliPaths(): CliPaths {
   return {
     claude: path('claude'),
     codex: path('codex'),
+    grok: path('grok'),
     antigravity: path('antigravity'),
   };
 }

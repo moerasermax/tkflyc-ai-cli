@@ -9,6 +9,7 @@
 export type AgentId =
   | 'claude'
   | 'codex'
+  | 'grok'
   | 'antigravity'
   | 'direct-api';
 
@@ -31,6 +32,9 @@ export interface BuiltCommand {
   sessionId?: string;
   /** 若為字串，prompt 透過 stdin（positional `-`）送入，而非當作 arg。 */
   stdinPrompt?: string;
+  /** 檔案 prompt 的建置暫存；持久化 store 接管到 job 目錄後解除 fallback 清理。 */
+  temporaryPromptFile?: string;
+  releaseTemporaryPrompt?: () => void;
   /** direct-api 專用：OpenAI-compatible API 連線資訊。 */
   directApi?: DirectApiCommandConfig;
 }
@@ -96,6 +100,8 @@ export interface BinaryConfig {
   defaultCliName: string;
   /** 可選的本機安裝絕對路徑（依平台），找得到就優先用。 */
   localInstallPath?: string;
+  /** 此 agent 優先 PATH，找不到才退回 localInstallPath；既有 agent 保留本機優先。 */
+  preferPath?: boolean;
 }
 
 /** reasoning_effort 支援度。 */

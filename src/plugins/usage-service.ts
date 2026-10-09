@@ -362,11 +362,21 @@ export function parseAgyUsage(text: string) {
 
 // ─── providers ───────────────────────────────────────────────────────────────
 
-interface PtyRunResult { output: string; exitCode: number | null; signal: string | null; timedOut: boolean }
+interface PtyRunResult { output: string; exitCode: number | null; signal: string | null; timedOut: boolean; error?: string }
 
 // codex 0.160 起互動模式會啟動共用背景 daemon，而以系統管理員權限執行時 daemon 拒絕啟動，
 // TUI 只印錯誤、不出 /status 面板。查額度只要一次性的 TUI，用不到 daemon。
-const CODEX_USAGE_ARGS = ['--no-daemon'];
+// Codex ConfigToml 原生鍵（0.162.0 binary），官方 config-reference：boolean。
+const CODEX_UPDATE_ARGS = ['-c', 'check_for_update_on_startup=false'];
+const CODEX_USAGE_ARGS = ['--no-daemon', ...CODEX_UPDATE_ARGS];
+
+/** 更新選單可能把 /status 的 Enter 當成更新確認；一旦出現就停止自動按鍵。 */
+export function hasUpdatePrompt(output: string): boolean {
+  const screen = _cleanUsageText(renderTerminal(output));
+  return /press[^\n]{0,40}(?:enter|return)[^\n]{0,40}(?:to\s+)?updat/i.test(screen)
+    || (/(?:update|new\s+version)\s+available/i.test(screen)
+      && /(?:^|\n)\s*(?:[›❯>]\s*|\d+[.)]\s*)(?:update\b|upgrade\b|skip\b|not now\b)/im.test(screen));
+}
 
 // 舊版 codex 不認得 --no-daemon，clap 印「unexpected argument '--no-daemon'」後直接退出。
 // 不能只比對 "--no-daemon"：管理員權限的 daemon 錯誤本身就寫著「rerun ... with --no-daemon」。
@@ -485,7 +495,7 @@ export function readCodexSessionPlan(codexHome: string): string | null {
 export class CodexUsageProvider {
   provider = 'codex';
   transport = 'pty';
-  constructor(private cliPath: string) {}
+  constructor(private cliPath: string, private ptyFactory = _loadPtyModule) {}
 
   async query({ fresh = false }: { fresh?: boolean } = {}) {
     // 有夠新的 session 檔就不開 TUI（瞬間、不受權限與信任畫面影響）。refresh=true 一律走 TUI。
@@ -496,7 +506,11 @@ export class CodexUsageProvider {
     // 先帶參數、不認得才拿掉重跑一次：新版不多付一次啟動成本，也不必另外 spawn `codex --help`
     // （cliPath 在 Windows 常是 .cmd shim，PTY 吃得下、child_process 直接 spawn 吃不下）。
     let result = await this._run(CODEX_USAGE_ARGS);
-    if (isCodexNoDaemonUnsupported(result.output)) result = await this._run([]);
+    if (isCodexNoDaemonUnsupported(result.output)) result = await this._run(CODEX_UPDATE_ARGS);
+    if (result.error) {
+      if (hasUpdatePrompt(result.output)) { const fromFile = readCodexSessionRateLimits(_codexHome()); if (fromFile) return fromFile; }
+      throw new Error(result.error);
+    }
     const text = _cleanUsageText(renderTerminal(result.output));
     if (!text) throw new Error('codex usage: no output');
     const usage = parseCodexUsage(text);
@@ -519,7 +533,7 @@ export class CodexUsageProvider {
     return new Promise((resolve, reject) => {
       let ptyProc: any;
       try {
-        const pty = _loadPtyModule();
+        const pty = this.ptyFactory();
         // 在 homedir 啟動，盡量避免專案層級 MCP server 拖慢開機
         ptyProc = pty.spawn(this.cliPath, args, { name: 'xterm-color', cols: 200, rows: 50, cwd: homedir(), env: buildWorkerEnv() });
       } catch (e) { reject(e); return; }
@@ -548,16 +562,21 @@ export class CodexUsageProvider {
 
       const strip = (x: string) => x.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
       const panelRe = /(?:5h|weekly|rate)\s*limit|%\s*(?:left|used)|resets?\s+\d{1,2}:\d{2}|\d+%\s*context\s+left/i;
+      const guardUpdate = () => {
+        if (!hasUpdatePrompt(output)) return false;
+        settle({ output, exitCode: null, signal: null, timedOut: false, error: 'codex usage: update prompt detected; automatic keys cancelled' }); return true;
+      };
       const sendStatus = () => {
+        if (settled || guardUpdate()) return;
         sent = true; sends++; lastSendAt = Date.now();
         const [first, ...rest] = codexStatusWrites(strip(output).slice(-400));
         try { ptyProc.write(first); } catch {}
-        for (const keys of rest) setTimeout(() => { if (!settled) { try { ptyProc.write(keys); } catch {} } }, CODEX_STATUS_ENTER_DELAY_MS);
+        for (const keys of rest) setTimeout(() => { if (!settled && !guardUpdate()) { try { ptyProc.write(keys); } catch {} } }, CODEX_STATUS_ENTER_DELAY_MS);
       };
 
       hardKillT = setTimeout(() => { timedOut = true; settle({ output, exitCode: null, signal: null, timedOut }); }, 60_000);
 
-      ptyProc.onData((d: string) => { output += d; lastDataAt = Date.now(); });
+      ptyProc.onData((d: string) => { output += d; lastDataAt = Date.now(); guardUpdate(); });
       ptyProc.onExit(({ exitCode, signal }: { exitCode: number; signal: string }) => settle({ output, exitCode, signal, timedOut }));
 
       const poll = () => {
@@ -589,7 +608,7 @@ export class CodexUsageProvider {
 class AgyUsageProvider {
   provider = 'agy';
   transport = 'pty';
-  constructor(private cliPath: string) {}
+  constructor(private cliPath: string, private ptyFactory = _loadPtyModule) {}
 
   async query() {
     const result = await this._run();
@@ -602,7 +621,7 @@ class AgyUsageProvider {
     return new Promise((resolve, reject) => {
       let ptyProc: any;
       try {
-        const pty = _loadPtyModule();
+        const pty = this.ptyFactory();
         ptyProc = pty.spawn(this.cliPath, ['--dangerously-skip-permissions'], { name: 'xterm-color', cols: 220, rows: 50, cwd: process.cwd(), env: buildWorkerEnv() });
       } catch (e) { reject(e); return; }
       if (!ptyProc?.pid) { reject(new Error('agy pty.spawn returned no pid')); return; }
@@ -643,13 +662,14 @@ class AgyUsageProvider {
   }
 }
 
-class ClaudeUsageProvider {
+export class ClaudeUsageProvider {
   provider = 'claude';
   transport = 'pty';
-  constructor(private cliPath: string) {}
+  constructor(private cliPath: string, private ptyFactory = _loadPtyModule) {}
 
   async query() {
     const result = await this._run();
+    if (result.error) throw new Error(result.error);
     const text = _cleanUsageText(renderTerminal(result.output));
     if (!text) throw new Error('claude usage: no output');
     return parseClaudeUsage(text);
@@ -659,7 +679,7 @@ class ClaudeUsageProvider {
     return new Promise((resolve, reject) => {
       let ptyProc: any;
       try {
-        const pty = _loadPtyModule();
+        const pty = this.ptyFactory();
         ptyProc = pty.spawn(this.cliPath, [], { name: 'xterm-color', cols: 200, rows: 50, cwd: process.cwd(), env: buildWorkerEnv() });
       } catch (e) { reject(e); return; }
       if (!ptyProc?.pid) { reject(new Error('claude pty.spawn returned no pid')); return; }
@@ -674,14 +694,20 @@ class ClaudeUsageProvider {
         resolve(v);
       };
 
+      const guardUpdate = () => {
+        if (!hasUpdatePrompt(output)) return false;
+        settle({ output, exitCode: null, signal: null, timedOut: false, error: 'claude usage: update prompt detected; automatic keys cancelled' }); return true;
+      };
       hardKillT = setTimeout(() => { timedOut = true; settle({ output, exitCode: null, signal: null, timedOut }); }, 25_000);
 
       ptyProc.onData((data: string) => {
         output += data;
+        if (settled || guardUpdate()) return;
         // 等 Claude Code prompt 出現後才送 /usage
         if (!commandSent && output.includes('❯')) {
           commandSent = true;
           setTimeout(() => {
+            if (settled || guardUpdate()) return;
             try { ptyProc.write('/usage\r'); } catch {}
             // 等 Claude Max usage 資料真正載入後再截取
             const poll = () => {

@@ -376,6 +376,47 @@ try {
     assert.equal(adapter.read(1).tools.length, 1); assert(adapter.read(1).stderr.includes('404'));
     assert.throws(() => runtime.serviceAdapter({}).read(1), /raw tap/);
   });
+  await check('raw tap tolerates delayed runner logs until terminal', async () => {
+    const directory = join(temp, 'delayed-logs'); await mkdir(directory);
+    let status = 'running', tick = 0, identified = false;
+    const adapter = runtime.serviceAdapter({
+      ready: new Promise(resolve => setTimeout(() => { identified = true; resolve(); }, 20)),
+      startProcess: () => { assert(identified, 'must await principal initialization before launch'); return { pid: 1, agent: 'claude' }; },
+      findProcess: () => ({ directory, toolType: 'claude', stdout: '', stderr: '' }),
+      getProcessResult: () => ({ status, exitCode: status === 'completed' ? 0 : undefined }) });
+    assert.equal(adapter.read(1).stdout, '');
+    // bootstrap meta 可先出現；runner 身分重試期间仍没有 log。
+    await writeFile(join(directory, 'meta.json'), '{}');
+    const monitored = await runtime.runMonitored({ start: {}, timeoutMs: 100 }, {
+      adapter, selfPid: 90, snapshot: async () => [proc(90, 'node', 'stub verifier', 0)],
+      terminate: async () => [], now: () => tick, scanMs: 1,
+      pause: async () => { tick++; if (tick === 2) {
+        await writeFile(join(directory, 'stdout.log'), 'delayed stub output');
+        await writeFile(join(directory, 'stderr.log'), ''); status = 'completed';
+        await writeFile(join(directory, 'exit.json'), '{}');
+      } },
+    });
+    assert.equal(monitored.monitorError, undefined); assert.equal(monitored.stdout, 'delayed stub output');
+    await rm(join(directory, 'stdout.log'));
+    assert.throws(() => adapter.read(1), { code: 'ENOENT' });
+    status = 'running'; // exit.json 比 service status 先更新也不可吞掉缺檔。
+    assert.throws(() => adapter.read(1), { code: 'ENOENT' });
+    await rm(join(directory, 'exit.json')); await mkdir(join(directory, 'stdout.log'));
+    assert.throws(() => adapter.read(1)); // EISDIR／權限等非 ENOENT 不容忍。
+  });
+  await check('durable Grok raw tap reads bridge calls before bounded tail and correlates F2', async () => {
+    const directory = join(temp, 'durable-grok'); await mkdir(directory);
+    const stream = [
+      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'use_tool', input: { tool_name: 'ai-cli__run' } }] } },
+      { type: 'user', message: { content: [{ type: 'tool_result', is_error: true, content: 'AI_CLI_NESTED_DISPATCH_BLOCKED: stub' }] } },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'x'.repeat(8000) }] } },
+    ].map(JSON.stringify).join('\n');
+    await writeFile(join(directory, 'stdout.log'), stream); await writeFile(join(directory, 'stderr.log'), 'full stderr');
+    const adapter = runtime.serviceAdapter({ findProcess: () => ({ directory, toolType: 'grok', stdout: 'bounded tail', stderr: '' }),
+      getProcessResult: () => ({ ...done('ok'), agentOutput: { message: 'ok', tools: [{ name: 'use_tool', input: { tool_name: 'ai-cli__run' } }] } }) });
+    const read = adapter.read(1); assert(read.stdout.length > 8000); assert.equal(read.stderr, 'full stderr');
+    assert.equal(logic.aiCliTools(read.tools).length, 1); assert.equal(logic.unblockedAiCliTools(read).length, 0);
+  });
   await check('add.py 缺檔 FAIL，stub 兩次 Python 執行都須成功', async () => {
     assert.equal((await runtime.verifyAdd(join(temp, 'missing.py'), 'stub')).passed, false);
     const path = join(temp, 'add.py'); await writeFile(path, 'stub add source');
