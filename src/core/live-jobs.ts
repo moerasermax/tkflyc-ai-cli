@@ -64,7 +64,11 @@ async function lookupProcessIdentities(pids: number[], includeCommandLine = fals
       }
       for (const line of stdout.split('\n')) {
         const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.{24})\s+(.+)$/);
-        if (match) result.set(Number(match[1]), { pid: Number(match[1]), ppid: Number(match[2]), started: match[3], name: match[4].split('/').pop()! });
+        if (match) {
+          // npm title 可含 @scope/package 的 slash，不能誤當 executable 路徑截掉前綴。
+          const name = /^(?:npm|npx)(?:\s|$)/i.test(match[4]) ? match[4] : match[4].split('/').pop()!;
+          result.set(Number(match[1]), { pid: Number(match[1]), ppid: Number(match[2]), started: match[3], name });
+        }
       }
       if (includeCommandLine && result.size) {
         const { stdout: commands } = await exec('ps', ['-p', [...result.keys()].join(','), '-o', 'pid=,args='], { timeout: 5000 }).catch(() => ({ stdout: '' }));

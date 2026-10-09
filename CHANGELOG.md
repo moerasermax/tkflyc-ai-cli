@@ -10,6 +10,7 @@
 
 ### 修正
 
+- POSIX 主導者辨識支援完整 executable 路徑與 npm／npx 改過的行程標題，精準跳過套件啟動器及 npm script shell、保留普通 Node 主導者；補三平台真實行程鏈回歸，修正 Node 22 的 fs stub 全域攔截與 macOS 驗收 ps 中間欄 comm 截斷，核對失敗留下 PID／PPID／名稱／命令與條件診斷。（Codex）
 - Antigravity 後備 Flash 更新為 `gemini-3.8-flash-high`，成功查詢／快取的候選清單僅保留可路由 vendor 模型與 `agy`／`agy-default`，避免驗收預設清單混入退役後備模型。（Codex）
 - Worker 驗收先等待 ProcessService.ready，避免首筆 launch.tmp 快照尚未初始化的 principal:null；raw tap 容忍 runner 身分重試期間尚未建立的 stdout／stderr log，結束後缺檔仍判監控失敗。principal 補 npm run／test 的 npm-cli 與直屬 script shell 啟動器，停在第一個非啟動器（含 Git Bash snapshot shell），查不到身分仍保留 null／stderr／下輪重試。補延遲初始化／log、啟動鏈與查詢失敗 stub 回歸及 raw tap 突變。（Codex）
 - 6.8.0 第四部分依另一家模型的獨立稽核修正 H1／H2、M1–M7、L1–L4：runner 身分三次退避失敗先落 failed／清 prompt、不啟動 worker；bootstrap 與 30 秒寬限避免無 meta 永遠 running，meta 寫失敗終止自己的 worker；終止核對失敗可重試、成功送出才標 killed／timedOut。GC rename 為 .deleting 後刪並掃孤兒，verbose 每 stream 限 8 MiB 附截短標記；server／principal 缺身分重試並寫 stderr，精準跳過 npx／npm exec／shell 啟動器而保留 Node 主導者。更新提示只認互動選單、Codex 可退回 session 額度；CLI 握手逾時仍回 PID＋jobId＋warning／exit 0 防重派。Grok 共用所有非 success 的 failed 判定、補相容 deny 名稱、prompt 納入 job 回收與 staging 清理；兩秒 check 只追自己的 job、GC 每 60 秒並共用身分快取（穩態每分鐘 PowerShell 由 60N 降至約 N，不含派工／kill／監看讀端）。新增 stub 故障回歸及 H1／H2／M5／M6 四筆手動突變；未新增任何 worker 重跑或 prompt 重送路徑，中英文 README／工具描述同步。（Codex）

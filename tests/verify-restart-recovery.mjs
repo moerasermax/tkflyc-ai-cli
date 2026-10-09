@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { parseArgs, selectJobs, runRecovery, stopOwned, liveDeps } from '../tools/acceptance/restart-recovery.mjs';
+import { parseArgs, selectJobs, runRecovery, stopOwned, verifySpawnedServer, liveDeps } from '../tools/acceptance/restart-recovery.mjs';
 const temp = await mkdtemp(join(tmpdir(), 'ai-cli-restart-test-'));
 let passed = 0;
 async function test(name, fn) { await fn(); passed++; console.log('PASS ' + name); }
@@ -48,6 +48,24 @@ try {
     await stopOwned(owned, { snapshot: async () => [owned], kill: async pid => killed.push(pid) }); assert.deepEqual(killed, [1]);
     await assert.rejects(stopOwned(owned, { snapshot: async () => [{ ...owned, command: 'node other' }], kill: async () => assert.fail('must not kill') }), /Refusing/);
     await assert.rejects(stopOwned({ ...owned, name: 'grok.exe' }, { snapshot: async () => [{ ...owned, name: 'grok.exe', started: '2026-01-02T00:00:00Z' }], kill: async () => assert.fail('must not kill') }), /Refusing/);
+  });
+  await test('restart spawned server requires exact identity and diagnoses every rejected condition', () => {
+    const p = { pid: 101, ppid: 90, name: '/Users/runner/hostedtoolcache/node/22/bin/node',
+      command: '/Users/runner/hostedtoolcache/node/22/bin/node /tmp/dist/bin/ai-cli-mcp.js ' + 'x'.repeat(120),
+      started: 'Fri Oct  9 13:30:35 2026' };
+    assert.equal(verifySpawnedServer([p], 101, 90, 'darwin'), p);
+    for (const [condition, patch] of [['pid', { pid: 102 }], ['ppid', { ppid: 91 }],
+      ['node', { name: p.name.slice(0, 16) }], ['command', { command: 'node unrelated.js' }], ['started', { started: '' }]]) {
+      assert.throws(() => verifySpawnedServer([{ ...p, ...patch }], 101, 90, 'darwin'), error => {
+        const detail = JSON.parse(error.message.slice(error.message.indexOf('{')));
+        assert.equal(detail.platform, 'darwin'); assert.equal(detail.expectedPid, 101); assert.equal(detail.expectedPpid, 90);
+        assert.equal(detail.candidates[0].checks[condition], false);
+        assert.equal(detail.candidates[0].pid, patch.pid ?? 101); assert.equal(detail.candidates[0].ppid, patch.ppid ?? 90);
+        assert.equal(detail.candidates[0].name, patch.name ?? p.name); assert(detail.candidates[0].command.length <= 120);
+        return true;
+      });
+    }
+    assert.throws(() => verifySpawnedServer([], 101, 90), /"snapshotCount":0,"candidates":\[\]/);
   });
   await test('restart live MCP transport uses only three stub vendors and recovers without rerun', async () => {
     const worker = join(temp, 'vendor.mjs'), preload = join(temp, 'preload.mjs');

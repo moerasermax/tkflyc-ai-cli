@@ -125,6 +125,19 @@ export async function stopOwned(expected, deps) {
   if (creationTime(expected) === null || processKey(current) !== processKey(expected) || current.name !== expected.name || current.command !== expected.command) throw Error(`Refusing unverified/reused PID ${expected.pid}`);
   await deps.kill(current.pid);
 }
+/** 直接子行程必須通過全部核對；診斷保留候選，絕不拿相近的行程取代。 */
+export function verifySpawnedServer(rows, pid, ppid, platform = process.platform) {
+  const checks = p => ({ pid: p.pid === pid, ppid: p.ppid === ppid,
+    node: /^(node|nodejs)(\.exe)?$/i.test(p.name.replace(/^.*[\\/]/, '')),
+    command: p.command.includes('ai-cli-mcp.js'), started: creationTime(p) !== null });
+  const identity = rows.find(p => Object.values(checks(p)).every(Boolean));
+  if (!identity) throw Error('Cannot verify spawned Node MCP server: ' + JSON.stringify({
+    platform, expectedPid: pid, expectedPpid: ppid, snapshotCount: rows.length,
+    candidates: rows.filter(p => p.pid === pid || p.ppid === ppid || p.command.includes('ai-cli-mcp.js'))
+      .map(p => ({ pid: p.pid, ppid: p.ppid, name: p.name, command: p.command.slice(0, 120), checks: checks(p) })),
+  }));
+  return identity;
+}
 export async function liveDeps() {
   const { readJobMetas, sameIdentity } = await import('../../dist/core/job-store.js');
   const { lookupIdentities } = await import('../../dist/core/live-jobs.js');
@@ -175,8 +188,12 @@ export async function liveDeps() {
       });
       const stop = async () => { if (closed) return; if (!identity) throw Error('MCP server identity unavailable'); await stopOwned(identity, safety); await closedPromise; };
       // spawn 的直接子行程，核對 Node 身分與命令；未核對的行程絕不終止。
-      identity = (await snapshot()).find(p => p.pid === child.pid && p.ppid === process.pid && /^(node|nodejs)(\.exe)?$/i.test(p.name.replace(/^.*[\\/]/, '')) && p.command.includes('ai-cli-mcp.js'));
-      if (!identity) throw Error('Cannot verify spawned Node MCP server'); remember(identity);
+      let rows;
+      try { rows = await snapshot(); }
+      catch (error) { child.stdin.end(); throw Error(`Cannot snapshot spawned MCP server pid=${child.pid} ppid=${process.pid}: ${error.message}`); }
+      try { identity = verifySpawnedServer(rows, child.pid, process.pid); }
+      catch (error) { child.stdin.end(); throw error; }
+      remember(identity);
       return { child, stop, init: () => send('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'restart-recovery', version: '1' } }),
         call: async (name, args = {}) => { const r = await send('tools/call', { name, arguments: args }); if (r.isError) throw Error(JSON.stringify(r)); return JSON.parse(r.content.find(c => c.type === 'text').text); } };
     } };

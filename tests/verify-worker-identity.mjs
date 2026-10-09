@@ -103,6 +103,10 @@ try {
       const text = '   2203    2202 npm test        Fri Oct  9 13:30:35 2026 npm test\n'
         + ' 101 90 /Applications/My CLI/codex Fri Oct 19 12:34:56 2026 /Applications/My CLI/codex exec --json -\n';
       const rows = await runtime.processSnapshot(async (file, args, options) => {
+        if (platform === 'darwin' && args.at(-1) === 'pid=,comm=') {
+          assert.deepEqual(args, ['-axww', '-o', 'pid=,comm=']);
+          return { code: 0, stdout: '2203 npm test\n101 /Applications/My CLI/codex\n' };
+        }
         assert.equal(file, 'ps'); assert.deepEqual(args, ['-axo', 'pid=,ppid=,comm=,lstart=,args=']);
         assert.equal(options.env.LC_ALL, 'C'); return { code: 0, stdout: text };
       }, platform);
@@ -111,6 +115,19 @@ try {
     }
     assert.deepEqual(runtime.parsePosixSnapshot(''), []);
     assert.throws(() => runtime.parsePosixSnapshot('2203 2202 npm test invalid date npm test'), /無法解析 ps/);
+  });
+  await check('macOS snapshot restores comm truncated to 16 characters', async () => {
+    const name = '/Users/runner/hostedtoolcache/node/22.20.0/arm64/bin/node';
+    const rows = await runtime.processSnapshot(async (file, args) => {
+      assert.equal(file, 'ps');
+      return { code: 0, stdout: args.at(-1) === 'pid=,comm='
+        ? `101 ${name}\n`
+        : `101 90 ${name.slice(0, 16)} Fri Oct  9 13:30:35 2026 ${name} /tmp/dist/bin/ai-cli-mcp.js\n` };
+    }, 'darwin');
+    assert.equal(rows[0].name, name); assert.equal(rows[0].ppid, 90);
+    assert(rows[0].command.includes('ai-cli-mcp.js'));
+    await assert.rejects(runtime.processSnapshot(async (file, args) => ({ code: args.at(-1) === 'pid=,comm=' ? 1 : 0,
+      stdout: `101 90 node Fri Oct  9 13:30:35 2026 node server\n`, stderr: 'denied' }), 'darwin'), /名稱掃描失敗/);
   });
   await check('POSIX product identity lookup preserves spaced comm and exact lstart', async () => {
     // 子行程覆寫平台與 OS 查詢，Windows 也能走實際產品的 POSIX 分支。
@@ -123,27 +140,32 @@ cp.execFile=(file,args,options,callback)=>{
   assert.equal(file,'ps');
   if(args.at(-1)==='pid=,ppid=,lstart=,comm=') {
     assert.equal(options.env.LC_ALL,'C'); assert.equal(options.env.TZ,'UTC');
-    callback(null,' 2203 2202 '+started[0]+' npm test\\n 101 90 '+started[1]+' /Applications/My CLI/codex\\n','');
-  } else { assert.equal(args.at(-1),'pid=,args='); callback(null,' 2203 npm test\\n 101 /Applications/My CLI/codex exec --json -\\n',''); }
+    callback(null,' 2203 2202 '+started[0]+' npm test\\n 101 90 '+started[1]+' /Applications/My CLI/codex\\n 2204 2202 '+started[0]+' npm exec @tkflyc/ai-cli-mcp\\n','');
+  } else { assert.equal(args.at(-1),'pid=,args='); callback(null,' 2203 npm test\\n 101 /Applications/My CLI/codex exec --json -\\n 2204 npm exec @tkflyc/ai-cli-mcp\\n',''); }
 };
 cp.execFile[Symbol.for('nodejs.util.promisify.custom')]=(...args)=>new Promise((resolve,reject)=>
  cp.execFile(...args,(error,stdout,stderr)=>error?reject(error):resolve({stdout,stderr})));
-fs.readFileSync=path=>{
+const originalReadFileSync=fs.readFileSync;
+fs.readFileSync=(path,...args)=>{
   if(path==='/proc/sys/kernel/random/boot_id') return 'stub-boot\\n';
   if(path==='/proc/2203/stat') return '2203 (npm test) '+['S','2202',...Array(17).fill('0'),'12345'].join(' ');
   if(path==='/proc/2203/cmdline') return 'npm\\0test\\0';
-  throw Error('Unexpected read '+path);
+  return originalReadFileSync(path,...args);
 };
 syncBuiltinESMExports();
 const {lookupIdentities,lookupPrincipalIdentities}=await import('./dist/core/live-jobs.js');
-assert.deepEqual([...await lookupIdentities([2203,101])].map(([,r])=>r),[
+assert.deepEqual([...await lookupIdentities([2203,101,2204])].map(([,r])=>r),[
  {pid:2203,ppid:2202,started:started[0],name:'npm test'},
- {pid:101,ppid:90,started:started[1],name:'codex'}]);
+ {pid:101,ppid:90,started:started[1],name:'codex'},
+ {pid:2204,ppid:2202,started:started[0],name:'npm exec @tkflyc/ai-cli-mcp'}]);
 assert.equal((await lookupPrincipalIdentities([2203])).get(2203).commandLine,'npm test');
+const {isPackageLauncher}=await import('./dist/core/principal.js');
+assert(isPackageLauncher((await lookupPrincipalIdentities([2204])).get(2204)));
 Object.defineProperty(process,'platform',{value:'linux'});
 assert.deepEqual((await lookupPrincipalIdentities([2203])).get(2203),
  {pid:2203,ppid:2202,started:'stub-boot:12345',name:'npm test',commandLine:'npm test'});`;
-    await promisify(execFile)(process.execPath, ['--input-type=module', '-e', probe], { windowsHide: true });
+    await promisify(execFile)(process.execPath, ['--input-type=module', '-e', probe], { windowsHide: true })
+      .catch(error => { throw Error(`Node ${process.version} POSIX identity probe: ${error.stderr || error.message}`); });
   });
   await check('codex exec 是獨立參數，exec-server 不算', () => {
     assert(logic.isWorker(proc(1, 'codex.exe', '"C:\\Program Files\\codex.exe" exec --json -')));

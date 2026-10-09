@@ -124,7 +124,17 @@ export async function processSnapshot(run = command, platform = process.platform
       '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,@{Name="CreationDate";Expression={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString("o")} else {""}}}) | ConvertTo-Json -Compress'])
     : await run('ps', ['-axo', 'pid=,ppid=,comm=,lstart=,args='], { env: { ...process.env, LC_ALL: 'C' } });
   if (result.code !== 0) throw new Error(`行程掃描失敗：${result.stderr}`);
-  return win ? parseWindowsSnapshot(result.stdout) : parsePosixSnapshot(result.stdout);
+  const rows = win ? parseWindowsSnapshot(result.stdout) : parsePosixSnapshot(result.stdout);
+  if (platform !== 'darwin') return rows;
+  // BSD ps 的非最後一欄 comm 固定最多 16 字元，-ww 也無法修正。
+  // 改成最後一欄另查完整 comm；建立時間／命令仍取自原快照，消失的 PID 不納入。
+  const names = await run('ps', ['-axww', '-o', 'pid=,comm='], { env: { ...process.env, LC_ALL: 'C' } });
+  if (names.code !== 0) throw new Error(`行程名稱掃描失敗：${names.stderr}`);
+  const byPid = new Map(names.stdout.split(/\r?\n/).flatMap(line => {
+    const m = line.trim().match(/^(\d+)\s+(.+)$/);
+    return m ? [[Number(m[1]), m[2]]] : [];
+  }));
+  return rows.filter(p => byPid.has(p.pid)).map(p => ({ ...p, name: byPid.get(p.pid) }));
 }
 
 const isNode = p => /^(?:node|nodejs)(?:\.exe)?$/i.test(p.name.replace(/^.*[\\/]/, ''));

@@ -5,8 +5,20 @@ export function identityOnly(identity: ProcessIdentity): ProcessIdentity {
   const { commandLine: _commandLine, ...safe } = identity;
   return safe;
 }
+// POSIX comm 可是完整 executable 路徑；不能用主機的 path.basename 解析另一平台的分隔符。
+function processName(identity: ProcessIdentity): string { return identity.name.replace(/^.*[\\/]/, ''); }
+function npmTitle(identity: ProcessIdentity): string {
+  const name = processName(identity);
+  // Linux comm 有長度限制，macOS 也可能保留原始 node 名稱；以完整 args 的前綴佐證。
+  return /^(?:node|nodejs)(?:\.exe)?$/i.test(name) || /^(?:npm|npx)(?:\s|$)/i.test(identity.name) ? identity.commandLine?.trim() ?? '' : '';
+}
+function isNpmScriptLauncher(identity: ProcessIdentity): boolean {
+  return /^npm\s+(?:run|run-script|test)(?:\s|$)/i.test(npmTitle(identity))
+    || (/^(?:node|nodejs)(?:\.exe)?$/i.test(processName(identity))
+      && /(?:^|[\s"'\\/])npm-cli\.js["']?\s+(?:run|run-script|test)(?:\s|$)/i.test(identity.commandLine ?? ''));
+}
 function shellCommand(identity: ProcessIdentity): { program: string; args: string } | undefined {
-  if (!/^(?:cmd|sh|bash|dash|zsh)(?:\.exe)?$/i.test(identity.name)) return;
+  if (!/^(?:cmd|sh|bash|dash|zsh)(?:\.exe)?$/i.test(processName(identity))) return;
   let command = identity.commandLine?.match(/(?:\/c|-c)\s+(.+)$/i)?.[1].trim();
   if (!command) return;
   // cmd /s /c 的外層雙引號、POSIX sh -c 的整句引號，與含空格的 executable 引號分開。
@@ -22,7 +34,8 @@ function shellCommand(identity: ProcessIdentity): { program: string; args: strin
 }
 export function isPackageLauncher(identity: ProcessIdentity): boolean {
   const command = identity.commandLine ?? '';
-  if (/^(?:node|nodejs)(?:\.exe)?$/i.test(identity.name)) {
+  if (/^(?:npm\s+(?:exec|x|run|run-script|test)|npx)(?:\s|$)/i.test(npmTitle(identity))) return true;
+  if (/^(?:node|nodejs)(?:\.exe)?$/i.test(processName(identity))) {
     return /(?:^|[\s"'\\/])npx-cli\.js(?:[\s"']|$)/i.test(command)
       || /(?:^|[\s"'\\/])npm-cli\.js["']?\s+(?:exec|x|run|run-script|test)(?:\s|$)/i.test(command);
   }
@@ -35,15 +48,15 @@ export async function resolvePrincipal(parentPid: number, lookup: IdentityLookup
     seen.add(parentPid);
     const parent = (await lookup([parentPid])).get(parentPid);
     if (!parent) return null;
-    if (/^(?:node|nodejs|cmd|sh|bash|dash|zsh)(?:\.exe)?$/i.test(parent.name) && !parent.commandLine?.trim()) return null;
+    if ((/^(?:node|nodejs|cmd|sh|bash|dash|zsh)(?:\.exe)?$/i.test(processName(parent))
+      || /^(?:npm|npx)(?:\s|$)/i.test(parent.name)) && !parent.commandLine?.trim()) return null;
     // npm exec 也會在 npm node 與 server 中插入 `sh -c ai-cli-mcp`／cmd shim。
     // 只有命令精準指向本套件、且上層確實是 npm/npx 啟動器才可跳過。
     const shell = shellCommand(parent);
     const serverShim = shell && /^ai-cli(?:-mcp)?(?:\.cmd)?$/i.test(shell.program) && !shell.args;
     // npm run/test 的 script shell 命令是 script 本文，必須由直屬 npm-cli 父行程佐證。
     const shimLauncher = shell && parent.ppid ? (await lookup([parent.ppid])).get(parent.ppid) : undefined;
-    const scriptShell = shimLauncher && /^(?:node|nodejs)(?:\.exe)?$/i.test(shimLauncher.name)
-      && /(?:^|[\s"'\\/])npm-cli\.js["']?\s+(?:run|run-script|test)(?:\s|$)/i.test(shimLauncher.commandLine ?? '');
+    const scriptShell = shimLauncher && isNpmScriptLauncher(shimLauncher);
     if (!isPackageLauncher(parent) && !(shimLauncher && ((serverShim && isPackageLauncher(shimLauncher)) || scriptShell))) return identityOnly(parent);
     parentPid = parent.ppid ?? 0;
   }
