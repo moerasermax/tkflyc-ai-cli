@@ -98,6 +98,53 @@ try {
     assert.equal(runtime.parseWindowsSnapshot('[]').length, 0);
   });
   await check('POSIX ps 解析保留建立時間與完整 args', () => assert.deepEqual(runtime.parsePosixSnapshot(' 101 90 /bin/codex Wed Oct  7 12:34:56 2026 /bin/codex exec --json -')[0], proc(101, '/bin/codex', '/bin/codex exec --json -', 90, 'Wed Oct  7 12:34:56 2026')));
+  await check('POSIX ps Linux/macOS comm 含空格與個位數日期', async () => {
+    for (const platform of ['linux', 'darwin']) {
+      const text = '   2203    2202 npm test        Fri Oct  9 13:30:35 2026 npm test\n'
+        + ' 101 90 /Applications/My CLI/codex Fri Oct 19 12:34:56 2026 /Applications/My CLI/codex exec --json -\n';
+      const rows = await runtime.processSnapshot(async (file, args, options) => {
+        assert.equal(file, 'ps'); assert.deepEqual(args, ['-axo', 'pid=,ppid=,comm=,lstart=,args=']);
+        assert.equal(options.env.LC_ALL, 'C'); return { code: 0, stdout: text };
+      }, platform);
+      assert.deepEqual(rows, [proc(2203, 'npm test', 'npm test', 2202, 'Fri Oct  9 13:30:35 2026'),
+        proc(101, '/Applications/My CLI/codex', '/Applications/My CLI/codex exec --json -', 90, 'Fri Oct 19 12:34:56 2026')]);
+    }
+    assert.deepEqual(runtime.parsePosixSnapshot(''), []);
+    assert.throws(() => runtime.parsePosixSnapshot('2203 2202 npm test invalid date npm test'), /無法解析 ps/);
+  });
+  await check('POSIX product identity lookup preserves spaced comm and exact lstart', async () => {
+    // 子行程覆寫平台與 OS 查詢，Windows 也能走實際產品的 POSIX 分支。
+    const probe = `import assert from 'node:assert/strict';
+import {createRequire,syncBuiltinESMExports} from 'node:module';
+const require=createRequire(import.meta.url), cp=require('node:child_process'), fs=require('node:fs');
+Object.defineProperty(process,'platform',{value:'darwin',configurable:true});
+const started=['Fri Oct  9 13:30:35 2026','Fri Oct 19 12:34:56 2026'];
+cp.execFile=(file,args,options,callback)=>{
+  assert.equal(file,'ps');
+  if(args.at(-1)==='pid=,ppid=,lstart=,comm=') {
+    assert.equal(options.env.LC_ALL,'C'); assert.equal(options.env.TZ,'UTC');
+    callback(null,' 2203 2202 '+started[0]+' npm test\\n 101 90 '+started[1]+' /Applications/My CLI/codex\\n','');
+  } else { assert.equal(args.at(-1),'pid=,args='); callback(null,' 2203 npm test\\n 101 /Applications/My CLI/codex exec --json -\\n',''); }
+};
+cp.execFile[Symbol.for('nodejs.util.promisify.custom')]=(...args)=>new Promise((resolve,reject)=>
+ cp.execFile(...args,(error,stdout,stderr)=>error?reject(error):resolve({stdout,stderr})));
+fs.readFileSync=path=>{
+  if(path==='/proc/sys/kernel/random/boot_id') return 'stub-boot\\n';
+  if(path==='/proc/2203/stat') return '2203 (npm test) '+['S','2202',...Array(17).fill('0'),'12345'].join(' ');
+  if(path==='/proc/2203/cmdline') return 'npm\\0test\\0';
+  throw Error('Unexpected read '+path);
+};
+syncBuiltinESMExports();
+const {lookupIdentities,lookupPrincipalIdentities}=await import('./dist/core/live-jobs.js');
+assert.deepEqual([...await lookupIdentities([2203,101])].map(([,r])=>r),[
+ {pid:2203,ppid:2202,started:started[0],name:'npm test'},
+ {pid:101,ppid:90,started:started[1],name:'codex'}]);
+assert.equal((await lookupPrincipalIdentities([2203])).get(2203).commandLine,'npm test');
+Object.defineProperty(process,'platform',{value:'linux'});
+assert.deepEqual((await lookupPrincipalIdentities([2203])).get(2203),
+ {pid:2203,ppid:2202,started:'stub-boot:12345',name:'npm test',commandLine:'npm test'});`;
+    await promisify(execFile)(process.execPath, ['--input-type=module', '-e', probe], { windowsHide: true });
+  });
   await check('codex exec 是獨立參數，exec-server 不算', () => {
     assert(logic.isWorker(proc(1, 'codex.exe', '"C:\\Program Files\\codex.exe" exec --json -')));
     for (const command of ['codex exec-server', 'codex --mode=exec', 'codex --foo preexec']) assert(!logic.isWorker(proc(1, 'codex.exe', command)));

@@ -2045,5 +2045,13 @@
     "expect": "尚無快取時頂層使用目前後備清單",
     "script": "verify-catalog-source.mjs",
     "from": "  'gemini-3.8-flash-high',"
+  },
+  {
+    "name": "POSIX acceptance rejects spaced comm",
+    "file": "tools/acceptance/worker-identity-runtime.mjs",
+    "from": "    const m = line.match(/^\\s*(\\d+)\\s+(\\d+)\\s+(.+?)\\s+(\\w{3}\\s+\\w{3}\\s+\\d{1,2}\\s+\\d\\d:\\d\\d:\\d\\d\\s+\\d{4})\\s*(.*)$/);",
+    "to": "    const m = line.match(/^\\s*(\\d+)\\s+(\\d+)\\s+(\\S+)\\s+(\\w{3}\\s+\\w{3}\\s+\\d{1,2}\\s+\\d\\d:\\d\\d:\\d\\d\\s+\\d{4})\\s*(.*)$/);",
+    "script": "verify-worker-identity.mjs",
+    "expect": "POSIX ps Linux/macOS comm"
   }
 ]

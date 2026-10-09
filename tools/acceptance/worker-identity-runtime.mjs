@@ -111,13 +111,14 @@ export function parseWindowsSnapshot(json) {
 }
 export function parsePosixSnapshot(text) {
   return text.trim().split(/\r?\n/).filter(Boolean).map(line => {
-    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d\d:\d\d:\d\d\s+\d{4})\s*(.*)$/);
+    // comm 可含空格（Linux 的 npm test）；以 lstart 的五欄日期辨識邊界。
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d\d:\d\d:\d\d\s+\d{4})\s*(.*)$/);
     if (!m) throw new Error(`無法解析 ps：${line}`);
     return { pid: Number(m[1]), ppid: Number(m[2]), name: m[3], started: m[4], command: m[5] };
   });
 }
-export async function processSnapshot(run = command) {
-  const win = process.platform === 'win32';
+export async function processSnapshot(run = command, platform = process.platform) {
+  const win = platform === 'win32';
   const result = win
     ? await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,@{Name="CreationDate";Expression={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString("o")} else {""}}}) | ConvertTo-Json -Compress'])

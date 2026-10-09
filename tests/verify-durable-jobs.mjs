@@ -117,7 +117,10 @@ if (!section || section === 'restart') {
     assert.equal(result.status, 'completed'); assert.equal(result.recovered, true); assert.equal(result.agentOutput.message, '完整輸出：PONG');
   });
   await check('MCP runner and worker dead without exit becomes lost with output', async () => {
-    const job = await dispatch(c, state, { delay: 60000 }); await c.stop();
+    const job = await dispatch(c, state, { delay: 60000 });
+    // meta 只證明 worker 已 spawn；POSIX SIGKILL 可能早於 stub 的首筆輸出。
+    await until(() => existsSync(join(job.dir, 'stdout.log')) && readFileSync(join(job.dir, 'stdout.log'), 'utf8').includes('thread.started'));
+    await c.stop();
     const ids = await lookupIdentities([job.pid, job.meta.worker.pid]);
     assert.equal(ids.get(job.pid)?.started, job.meta.runner.started);
     assert.equal(ids.get(job.meta.worker.pid)?.started, job.meta.worker.started);
