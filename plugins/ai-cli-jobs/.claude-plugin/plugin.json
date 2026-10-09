@@ -1,7 +1,7 @@
 {
   "name": "ai-cli-jobs",
-  "version": "0.1.0",
-  "description": "Show this Claude Code session's ai-cli jobs above the prompt and a one-line summary below it, polling MCP every 3 seconds without model tokens.",
+  "version": "0.1.1",
+  "description": "Show this Claude Code session's ai-cli jobs above the prompt and a one-line summary below it, polling MCP every 0.5 seconds without model tokens.",
   "author": { "name": "YC (moerasermax)" },
   "types": "./types/index.d.ts"
 }

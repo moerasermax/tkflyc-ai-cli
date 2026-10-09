@@ -17,6 +17,8 @@
 - `list_processes` 呼叫加 10 秒逾時，避免一次沒回應的呼叫讓 `busy` 永遠鎖住、之後每輪都被跳過。
   實測這不是本次轉圈的原因（見下方文件段），留著當保險。（Claude）
 - 輪詢間隔由 3 秒改為 0.5 秒；`POLL_MS` 改為 export，測試改用常數而不是寫死 3000。（Claude）
+- plugin 版本 0.1.0 → 0.1.1，描述裡的輪詢間隔同步改為 0.5 秒。版本號不變時 `claude plugin update` 會回
+  「already at the latest version」，其他機器就收不到上面幾筆修正。（Claude）
 
 ### 文件
 
