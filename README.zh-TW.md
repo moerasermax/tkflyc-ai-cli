@@ -228,6 +228,8 @@ npm run typecheck  # 只型別檢查
 ## 模型目錄的出處與查詢時間
 
 `models` payload 保留既有各 agent 字串陣列與 aliases，詳細來源看 `catalogV2`。
+頂層 antigravity 清單採可路由的 vendor 結果（含成功快取）加 `agy`／`agy-default`；
+尚無可用結果時才回後備 `agy`、`agy-default`、`gemini-3.1-pro-high`、`gemini-3.8-flash-high`。
 `catalogV2.entries[]` 保留 `id / agent / model / displayName / billingRoute / source / verifiedAt / routable`；
 `catalogV2.agents[]` 每列是 `{ agent, binaryFound, source, verifiedAt, discoveryNote }`。
 每列的 `verifiedAt` 與所屬 entries 一致，快取不會把原時間改成現在。

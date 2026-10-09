@@ -54,6 +54,12 @@ must report `A=沒有`, `B=有`; T6 must produce the tested add.py with worker p
 The tested Grok 1.0.50 did not receive the Claude SessionStart identity hook, which
 is why this backend supplies the lock through `--rules`. Real-model tests remain opt-in.
 
+## Antigravity model list
+
+Antigravity's top-level model list uses routable vendor results (including successful
+cached results) plus `agy` / `agy-default`. Without a usable result, its fallback is
+`agy`, `agy-default`, `gemini-3.1-pro-high`, and `gemini-3.8-flash-high`.
+
 ## Quick start
 
 From npm — nothing to build:

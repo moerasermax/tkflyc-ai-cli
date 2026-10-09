@@ -22,7 +22,7 @@ import { join } from 'node:path';
 import type { AgentDefinition, BuildCommandInput, BuiltCommand, ModelDiscoveryResult } from './types.js';
 
 /**
- * 靜態後備清單。**只有在問不到 `agy models` 時才會被用到。**
+ * 靜態後備清單。**只有在尚無可用的 vendor 查詢結果／快取時才會被用到。**
  *
  * ★ 這份清單曾經是錯的，而且錯得沒有人看得出來：它宣稱 agy 只有四個
  *   模型、且「不接受 --model」。實測 v1.1.9 有 11 個模型（id 形如
@@ -31,13 +31,14 @@ import type { AgentDefinition, BuildCommandInput, BuiltCommand, ModelDiscoveryRe
  *
  *   所以現在的第一來源是 `discoverModels()` 去問 CLI，
  *   而這份清單對外一律標成 `builtin-fallback`。
+ *   後備 Flash 採用目前 vendor 提供的 `gemini-3.8-flash-high`。
  *   保留 'agy'/'agy-default' 是為了讓既有的 alias 路由不斷。
  */
 const ANTIGRAVITY_FALLBACK_MODELS = [
   'agy',
   'agy-default',
   'gemini-3.1-pro-high',
-  'gemini-3.5-flash-high',
+  'gemini-3.8-flash-high',
 ] as const;
 
 /**

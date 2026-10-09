@@ -16,7 +16,7 @@ setTimeout(() => {
   trace('completed');
   console.log('Fetching available models...');
   if (process.env.AGY_STUB_EMPTY !== 'true') {
-    console.log('gemini-3.7-flash-high\tGemini 3.7 Flash (High)');
+    console.log('gemini-3.8-flash-high\tGemini 3.8 Flash (High)');
     console.log('gemini-3.1-pro-high\tGemini 3.1 Pro (High)');
     console.log('claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)');
     console.log('gpt-oss-120b-medium\tGPT-OSS 120B (Medium)');

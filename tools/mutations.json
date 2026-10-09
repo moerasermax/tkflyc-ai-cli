@@ -2029,5 +2029,21 @@
     "expect": "raw tap tolerates delayed runner logs until terminal",
     "script": "verify-worker-identity.mjs",
     "from": "          if (error.code === 'ENOENT' && result.status === 'running' && !existsSync(join(entry.directory, 'exit.json'))) return '';"
+  },
+  {
+    "name": "Antigravity 成功查詢仍聯集後備清單",
+    "file": "src/models/catalog.ts",
+    "to": "    if (false) {",
+    "expect": "成功查詢的頂層清單不混入 vendor 未列出的後備模型",
+    "script": "verify-catalog-source.mjs",
+    "from": "    if (agent.id === 'antigravity' && (source === 'vendor-cli' || source === 'vendor-cli-cached')) {"
+  },
+  {
+    "name": "Antigravity 後備清單恢復退役 Flash",
+    "file": "src/agents/antigravity.ts",
+    "to": "  'gemini-3.5-flash-high',",
+    "expect": "尚無快取時頂層使用目前後備清單",
+    "script": "verify-catalog-source.mjs",
+    "from": "  'gemini-3.8-flash-high',"
   }
 ]

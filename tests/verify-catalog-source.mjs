@@ -44,7 +44,7 @@ const errorStub = stub('agy-models-error');
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const rowOf = (catalog) => catalog.agents.find((a) => a.agent === 'antigravity');
 const modelsOf = (catalog) => catalog.entries.filter((e) => e.agent === 'antigravity').map((e) => e.model);
-const fixture = ['gemini-3.7-flash-high', 'gemini-3.1-pro-high', 'claude-sonnet-4-6', 'gpt-oss-120b-medium'];
+const fixture = ['gemini-3.8-flash-high', 'claude-sonnet-4-6', 'gpt-oss-120b-medium'];
 const results = [];
 function check(ok, name, detail = '') {
   results.push([ok, name, detail]);
@@ -58,7 +58,10 @@ const load = (rel) => import(pathToFileURL(join(ROOT, 'dist', rel)).href);
 console.log('== 模型目錄的出處標示 ==');
 
 const { buildCatalogV2, clearCatalogCache, refreshCatalogV2, FRESH_TTL_MS } = await load('models/catalog-v2.js');
-const { getModelsPayload } = await load('models/catalog.js');
+const { getModelsPayload, isKnownModelTarget, resolveModelAlias } = await load('models/catalog.js');
+const { selectModels } = await import('../tools/acceptance/worker-identity-logic.mjs');
+const fallback = ['agy', 'agy-default', 'gemini-3.1-pro-high', 'gemini-3.8-flash-high'];
+const sameModels = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 const registry = await load('agents/registry.js');
 const { buildDoctorStatus, inspectCliBinary } = await load('core/binary-resolver.js');
 const agy = registry.getAgent('antigravity');
@@ -141,12 +144,25 @@ try {
   check(calls === 0, '同步 buildCatalogV2 不呼叫 discoverModels／spawn');
   check(rowOf(cold).source === 'builtin-fallback' && rowOf(cold).discoveryNote.includes('查詢中'),
     '冷啟動尚無快取 → builtin-fallback 並說明查詢中');
+  check(sameModels(getModelsPayload().antigravity, fallback), '尚無快取時頂層使用目前後備清單');
   const flight = refreshCatalogV2();
   check(flight === refreshCatalogV2({ force: true }), '背景與明確 refresh 共用同一個 Promise（單飛）');
   const fresh = await flight;
   process.env.AGY_STUB_DELAY_MS = '0';
   check(calls === 1 && rowOf(fresh).source === 'vendor-cli', 'refresh 成功 → vendor-cli 且只查一次');
   check(rowOf(buildCatalogV2()).source === 'vendor-cli', '隨後同步讀到記憶體 vendor-cli');
+  const payload = getModelsPayload();
+  check(sameModels(payload.antigravity, ['agy', 'agy-default', 'gemini-3.8-flash-high']),
+    '成功查詢的頂層清單不混入 vendor 未列出的後備模型');
+  check(!payload.antigravity.includes('gemini-3.5-flash-high'), '成功查詢的頂層清單不含退役模型');
+  const defaults = selectModels(payload, { families: ['antigravity'] }).map(e => e.model);
+  check(sameModels(defaults, payload.antigravity) && !defaults.includes('gemini-3.5-flash-high'),
+    '驗收預設清單使用 vendor 候選且不含退役模型');
+  check(!payload.antigravity.includes('gemini-3.1-pro-high')
+    && isKnownModelTarget('gemini-3.1-pro-high')
+    && registry.selectAgentForModel('gemini-3.1-pro-high').id === 'antigravity'
+    && registry.selectAgentForModel(resolveModelAlias('agy-ultra')).id === 'antigravity',
+    '候選清單移除名稱不影響明確模型路由與 alias');
   const verifiedAt = rowOf(fresh).verifiedAt;
   check(rowOf(buildCatalogV2()).verifiedAt === verifiedAt, '記憶體 verifiedAt 不假裝是現在');
   const persisted = JSON.parse(readFileSync(CACHE, 'utf8')).antigravity;
@@ -173,6 +189,8 @@ try {
   check(rowOf(cached).source === 'vendor-cli-cached', '磁碟快取必須標 vendor-cli-cached（不是 vendor-cli）');
   check(rowOf(cached).verifiedAt === verifiedAt && rowOf(cached).discoveryNote.includes('快取'),
     '新 process 保留原 verifiedAt 並說明快取');
+  check(sameModels(getModelsPayload().antigravity, ['agy', 'agy-default', 'gemini-3.8-flash-high']),
+    '成功磁碟快取的頂層清單不混入後備模型');
   const failedCached = await refreshCatalogV2({ force: true });
   check(rowOf(failedCached).source === 'vendor-cli-cached'
     && JSON.stringify(modelsOf(failedCached)) === JSON.stringify(fixture)
@@ -185,6 +203,10 @@ try {
   const after = await refreshCatalogV2({ force: true });
   const agyAfter = after.agents.find((a) => a.agent === 'antigravity');
   const entriesAfter = after.entries.filter((e) => e.agent === 'antigravity');
+  const failedPayload = getModelsPayload();
+  check(sameModels(failedPayload.antigravity, fallback), '查詢失敗且無快取時頂層保留後備清單');
+  check(!selectModels(failedPayload, { families: ['antigravity'] }).some(e => e.model === 'gemini-3.5-flash-high'),
+    '後備驗收預設清單不含退役模型');
 
   check(
     agyAfter.source === 'builtin-fallback',
@@ -339,7 +361,11 @@ try {
   const cli = await promisify(execFile)(process.execPath, [join(ROOT, 'dist/bin/ai-cli.js'), 'models'], {
     env: { ...process.env, AI_CLI_AUTO_UPDATE: 'off', AI_CLI_CATALOG_CACHE_PATH: join(TEMP, 'cli-cache.json') }, timeout: 10000,
   });
-  check(rowOf(JSON.parse(cli.stdout).catalogV2).source === 'vendor-cli', 'ai-cli models 等待 refresh 後回 payload');
+  const cliPayload = JSON.parse(cli.stdout);
+  check(sameModels(cliPayload.antigravity, ['agy', 'agy-default', 'gemini-3.8-flash-high', 'gemini-3.1-pro-high'])
+    && !selectModels(cliPayload).some(e => e.model === 'gemini-3.5-flash-high'),
+    'CLI stub 成功查詢與驗收預設清單不含退役模型');
+  check(rowOf(cliPayload.catalogV2).source === 'vendor-cli', 'ai-cli models 等待 refresh 後回 payload');
 
   // ★ stdout 排空回歸測試。
   //
