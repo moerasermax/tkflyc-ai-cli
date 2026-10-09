@@ -1,12 +1,12 @@
 import type { AiCliJobsJob } from '../types/index'
 import { test, expect, mock } from 'claude-code/testing'
-import { taskLabel, runPid, elapsed, eventLabel, inferAgent } from '../hooks/register'
+import { taskLabel, runPid, elapsed, eventLabel, inferAgent, POLL_MS, CALL_TIMEOUT_MS } from '../hooks/register'
 
 const tree = (text: string) => ({ type: 'Text' as const, props: {}, children: [text] })
 const ref = { plugin: 'ai-cli-jobs', key: 'jobs' } as const
 const band = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100, scroll: { offset: 0, bodyRows: 10 }, view: {} }
 
-test('polls every 3000 ms and advances the spinner each tick', async ($, on) => {
+test('polls every POLL_MS and advances the spinner each tick', async ($, on) => {
   const clock = mock.clock(on)
   let calls = 0
   on('tool.call', { tool: 'mcp__ai-cli__run' }, () => ({ result: { pid: 500 } }))
@@ -15,14 +15,14 @@ test('polls every 3000 ms and advances the spinner each tick', async ($, on) => 
     return { value: { isError: false, content: [], structuredContent: [{ pid: 500, status: 'running' }] } }
   })
   await $.tool.call({ tool: 'mcp__ai-cli__run', tool_use_id: 'poll-interval', prompt: 'task' })
-  await clock.advance(2999)
+  await clock.advance(POLL_MS - 1)
   expect(calls).toBe(0)
   await clock.advance(1)
   expect(calls).toBe(1)
   const ui = await $.ui.mount({ plugin: 'ai-cli-jobs', surface: 'terminal', component: 'AbovePrompt', props: band })
   expect((await ui.find({ type: 'Text' }))?.text).toContain('⠙')
   await ui.unmount()
-  await clock.advance(2999)
+  await clock.advance(POLL_MS - 1)
   expect(calls).toBe(1)
   await clock.advance(1)
   expect(calls).toBe(2)
@@ -44,7 +44,7 @@ test('band and status rows use Morandi backgrounds and bold dark text on both su
   ] } }))
   on('ui.render', { component: 'PromptHint' }, ($, e) => tree(e.props.tail || ''))
   for (let n = 0; n < 5; n++) await $.tool.call({ tool: 'mcp__ai-cli__run', tool_use_id: 'color-' + n, model: 'haiku', prompt: 'task' })
-  await clock.advance(3000)
+  await clock.advance(POLL_MS)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'ai-cli-jobs', surface, component: 'AbovePrompt', props: band })
     const boxes = await ui.findAll({ type: 'Box' })
@@ -83,6 +83,7 @@ test('infers initial agent from model without an agent argument', async ($, on) 
   const cases = [
     ['gpt-6.1-sol', 'codex'], ['codex-mini', 'codex'],
     ['gemini-pro', 'antigravity'], ['agy', 'antigravity'], ['agy-pro', 'antigravity'],
+    ['grok-4.7', 'grok'], ['grok-4.7-build-fast', 'grok'],
     ['nv-model', 'direct-api'], ['or-model', 'direct-api'], ['ds-model', 'direct-api'],
     ['custom-model', 'direct-api'], ['provider/model', 'direct-api'],
     ['fable', 'claude'], ['sonnet', 'claude'], ['opus', 'claude'], ['haiku', 'claude'],
@@ -122,13 +123,13 @@ test('unknown terminal statuses and invalid pids do not block other poll updates
     ] } }
   })
   for (let n = 0; n < 5; n++) await $.tool.call({ tool: 'mcp__ai-cli__run', tool_use_id: 'status-' + n, model: 'haiku', prompt: 'task' })
-  await clock.advance(3000)
+  await clock.advance(POLL_MS)
   expect(held.map(j => j.status)).toEqual(['running', 'completed', 'failed', 'failed', 'failed'])
   expect(held[0]?.agent).toBe('poll-authority')
   expect(held[0]?.lastEvent).toBe('item.completed file_change')
   expect(held[3]?.lastEvent).toBe('killed signal SIGTERM')
   expect(held[4]?.lastEvent).toBe('cancelled')
-  expect(held.slice(1).every(j => j.finishedAt === 3000)).toBe(true)
+  expect(held.slice(1).every(j => j.finishedAt === POLL_MS)).toBe(true)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'ai-cli-jobs', surface, component: 'AbovePrompt', props: band })
     expect((await ui.find({ type: 'Text', text: /killed/ }))?.text).toContain('✗')
@@ -137,7 +138,7 @@ test('unknown terminal statuses and invalid pids do not block other poll updates
     await ui.unmount()
   }
   done = true
-  await clock.advance(3000)
+  await clock.advance(POLL_MS)
   expect(held[0]?.status).toBe('completed')
   await clock.advance(120000)
   expect(held).toEqual([])
@@ -162,7 +163,7 @@ test('records dispatch, polls, renders on both surfaces, expires and stops polli
   const result = await $.tool.call({ tool: 'mcp__ai-cli__run', tool_use_id: 'run-1', agent: 'codex', model: 'gpt-6.1-sol', reasoning_effort: 'high', prompt: '【身分】worker\n\n# 任務：修驗收工具判定 bug' })
   expect(result).toEqual({ result: { content: [{ type: 'text', text: '{"pid":123}' }] }, text: 'unchanged', ref: 7 })
   expect(held).toEqual([expect.objectContaining({ pid: 123, model: 'gpt-6.1-sol', reasoningEffort: 'high', startedAt: 0, task: '修驗收工具判定 bug', status: 'running' })])
-  await clock.advance(3000)
+  await clock.advance(POLL_MS)
   expect(calls).toBe(1)
   expect(held?.[0]?.lastEvent).toBe('item.completed file_change')
   for (const surface of ['terminal', 'desktop'] as const) {
@@ -175,7 +176,7 @@ test('records dispatch, polls, renders on both surfaces, expires and stops polli
   }
   expect(await $.ui.render({ surface: 'terminal', component: 'PromptHint', requestId: 'running-hint', props: { isDraft: false, isWorking: false, hint: 'base' } })).toEqual(tree('ai-cli ▸ 1 執行中'))
   completed = true
-  await clock.advance(3000)
+  await clock.advance(POLL_MS)
   expect(held?.[0]?.status).toBe('completed')
   expect(await $.ui.render({ surface: 'terminal', component: 'PromptHint', requestId: 'hint', props: { isDraft: false, isWorking: false, hint: 'base', tail: 'existing' } })).toEqual(tree('existing · ai-cli ▸ 1 完成'))
   await clock.advance(119999)
@@ -209,18 +210,54 @@ test('mixed summary, failed/untracked retention, reconnect errors, and restart',
   })
   on('ui.render', { component: 'PromptHint' }, ($, e) => tree(e.props.tail || ''))
   for (let n = 0; n < 3; n++) await $.tool.call({ tool: 'mcp__ai-cli__run', tool_use_id: 'r' + n, prompt_file: '/tasks/job.md' })
-  await clock.advance(3000)
+  await clock.advance(POLL_MS)
   expect(held?.every(j => j.status === 'running')).toBe(true)
-  mode = 'malformed'; await clock.advance(3000)
+  mode = 'malformed'; await clock.advance(POLL_MS)
   expect(held?.length).toBe(3)
-  mode = 'ok'; await clock.advance(3000)
+  mode = 'ok'; await clock.advance(POLL_MS)
   expect(held?.map(j => j.status)).toEqual(['running', 'failed', 'untracked'])
-  mode = 'done'; await clock.advance(3000)
+  mode = 'done'; await clock.advance(POLL_MS)
   expect(await $.ui.render({ surface: 'terminal', component: 'PromptHint', requestId: 'mixed', props: { isDraft: false, isWorking: false, hint: '' } })).toEqual(tree('ai-cli ▸ 1 完成 · 1 失敗 · 1 已不追蹤'))
   await clock.advance(120000)
   expect(held).toEqual([])
   const previous = calls
   await $.tool.call({ tool: 'mcp__ai-cli__run', tool_use_id: 'restart', prompt: 'new job' })
-  await clock.advance(3000)
+  await clock.advance(POLL_MS)
   expect(calls).toBe(previous + 1)
+})
+
+test('a poll that never answers times out, shows why, and the next poll finishes the job', async ($, on) => {
+  let held: AiCliJobsJob[] = []
+  const seen: string[] = []
+  on('state.set', ref, async ($, e, next) => { held = e.value; seen.push(...held.map(j => j.lastEvent)); return next(e) })
+  const clock = mock.clock(on)
+  let calls = 0
+  on('tool.call', { tool: 'mcp__ai-cli__run' }, () => ({ result: { pid: 700 } }))
+  on('mcp.call', () => {
+    calls++
+    if (calls === 1) return new Promise<never>(() => {})
+    return { value: { isError: false, content: [], structuredContent: [{ pid: 700, agent: 'grok', status: 'completed', elapsedSec: 84 }] } }
+  })
+  await $.tool.call({ tool: 'mcp__ai-cli__run', tool_use_id: 'hang', model: 'grok-4.7', prompt: 'task' })
+  expect(held[0]?.agent).toBe('grok')
+  await clock.advance(POLL_MS)
+  await clock.advance(CALL_TIMEOUT_MS - 1)
+  // The unanswered call holds later ticks back, but only until it times out.
+  expect(calls).toBe(1)
+  expect(held[0]?.status).toBe('running')
+  await clock.advance(1 + POLL_MS)
+  expect(seen).toContain(`輪詢失敗：逾時 ${CALL_TIMEOUT_MS / 1000}s`)
+  expect(held[0]).toEqual(expect.objectContaining({ status: 'completed', agent: 'grok', elapsedSec: 84 }))
+  expect(calls).toBe(2)
+})
+
+test('an isError poll result is shown on the running row', async ($, on) => {
+  let held: AiCliJobsJob[] = []
+  on('state.set', ref, async ($, e, next) => { held = e.value; return next(e) })
+  const clock = mock.clock(on)
+  on('tool.call', { tool: 'mcp__ai-cli__run' }, () => ({ result: { pid: 800 } }))
+  on('mcp.call', () => ({ value: { isError: true, content: [{ type: 'text', text: 'server not connected' }] } }))
+  await $.tool.call({ tool: 'mcp__ai-cli__run', tool_use_id: 'err', model: 'haiku', prompt: 'task' })
+  await clock.advance(POLL_MS)
+  expect(held[0]).toEqual(expect.objectContaining({ status: 'running', lastEvent: '輪詢失敗：server not connected' }))
 })

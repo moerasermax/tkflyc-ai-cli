@@ -4,7 +4,9 @@ import type { AiCliJobsJob } from '../types/index'
 
 const jobs = atom({ plugin: 'ai-cli-jobs', key: 'jobs' } as const, [])
 const RETAIN_MS = 120_000
-const POLL_MS = 3000
+export const POLL_MS = 500
+/** A list_processes call that has not answered by then is abandoned, so it cannot hold `busy` forever. */
+export const CALL_TIMEOUT_MS = 10_000
 const COLORS = {
   list: '#E8DCB5',
   running: '#A8D5CE',
@@ -44,6 +46,7 @@ export function inferAgent(model: string): string {
   const name = model.trim().toLowerCase()
   if (/^(?:gpt-|codex-)/.test(name)) return 'codex'
   if (/^(?:gemini-|agy)/.test(name)) return 'antigravity'
+  if (/^grok(?:-|$)/.test(name)) return 'grok'
   if (name.includes('/')) return 'direct-api'
   if (/^(?:claude|fable|sonnet|opus|haiku)(?:-|$)/.test(name)) return 'claude'
   if (/^[^-\s]+-.+/.test(name)) return 'direct-api'
@@ -105,20 +108,37 @@ export function elapsed(sec: number): string {
     await update($, jobs, list => list.filter(j => j.finishedAt === undefined || now - j.finishedAt < RETAIN_MS))
     await synchronize($)
   }
+  function withTimeout<T>($: EngineInterface, call: Promise<T>): Promise<T> {
+    let timer: Timer | undefined
+    const expired = new Promise<never>((_, reject) => {
+      timer = $.clock.after(CALL_TIMEOUT_MS, () => reject(new Error(`逾時 ${CALL_TIMEOUT_MS / 1000}s`)))
+    })
+    return Promise.race([call, expired]).finally(() => timer?.cancel())
+  }
+  /** Keeps the tracked jobs running but shows why this poll told us nothing. */
+  async function noteFailure($: EngineInterface, tracked: Set<number>, why: string) {
+    const lastEvent = `輪詢失敗：${clip(why, 80) || '未知錯誤'}`
+    await update($, jobs, list => list.map(j => j.status === 'running' && tracked.has(j.pid) ? { ...j, lastEvent } : j))
+  }
   async function refresh($: EngineInterface) {
     if (busy) return
     busy = true
     const epoch = generation
+    let tracked = new Set<number>()
     try {
       const before = await read($, jobs)
-      const tracked = new Set(before.filter(j => j.status === 'running').map(j => j.pid))
-      const result = await $.mcp.call('ai-cli', 'list_processes', {})
-      if (epoch !== generation || result.isError) return
+      tracked = new Set(before.filter(j => j.status === 'running').map(j => j.pid))
+      const result = await withTimeout($, $.mcp.call('ai-cli', 'list_processes', {}))
+      if (epoch !== generation) return
+      // Connection errors/malformed results do not prove a job disappeared.
+      if (result.isError) {
+        const text = (Array.isArray(result.content) ? result.content : []).map(b => str(record(b)?.text)).join(' ')
+        return await noteFailure($, tracked, text || 'MCP 回傳錯誤')
+      }
       const p = payload(result)
       const r = record(p)
       const rows = Array.isArray(p) ? p : r?.processes ?? r?.jobs
-      // Connection errors/malformed results do not prove a job disappeared.
-      if (!Array.isArray(rows)) return
+      if (!Array.isArray(rows)) return await noteFailure($, tracked, '回傳格式無法解析')
       const entries = rows.map(record).filter((v): v is Record<string, unknown> => !!v && runPid(v) !== undefined)
       const now = await $.clock.now()
       await update($, jobs, list => list.map(j => {
@@ -136,8 +156,9 @@ export function elapsed(sec: number): string {
           ...(status === 'running' ? {} : { finishedAt: now }),
         }
       }))
-    } catch {
-      // Retry next tick while retaining the last known state.
+    } catch (err) {
+      // Retry next tick while retaining the last known state, but say why.
+      if (epoch === generation) await noteFailure($, tracked, err instanceof Error ? err.message : String(err)).catch(() => {})
     } finally {
       busy = false
       if (epoch === generation) await synchronize($)
