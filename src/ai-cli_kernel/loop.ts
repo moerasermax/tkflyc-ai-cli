@@ -6,6 +6,7 @@
  * 所有依賴都從參數傳入，測試用假執行器就能走遍每一種當機位置，不必啟動 vendor。
  */
 import { randomBytes } from 'node:crypto';
+export { aiCliKernelRunTrigger, type KernelTriggerDeps } from './triggers.js';
 import { aiCliKernelReplayReleases } from './replay.js';
 import type { KernelRelease, KernelReleaseView, ReleaseWorkspaceOps } from './types.js';
 import { existsSync, readFileSync } from 'node:fs';

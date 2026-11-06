@@ -6,10 +6,12 @@ import { readFileSync } from 'node:fs';
 import {
   aiCliKernelApprove, aiCliKernelCancel, aiCliKernelCleanup, aiCliKernelEnabled, aiCliKernelProbe, aiCliKernelResult, aiCliKernelSetEnabled,
   aiCliKernelMandateSave, aiCliKernelMandateApprove, aiCliKernelMandateList, aiCliKernelMandateShow, aiCliKernelMandateRevoke,
+  aiCliKernelTrigger, aiCliKernelTriggersSetEnabled, aiCliKernelSchedule,
   aiCliKernelStart, aiCliKernelStatus, aiCliKernelTemplates, aiCliKernelWait, aiCliKernelRollback, aiCliKernelReleaseCreate, aiCliKernelReleaseRun, type KernelRunStatus,
 } from './api.js';
 import type { KernelStartInput } from './templates.js';
 import type { KernelMandateView } from './mandates.js';
+import type { KernelScheduleDeps } from './schedule.js';
 
 export const KERNEL_HELP_TEXT = `Usage: ai-cli kernel <動作> [選項]
 
@@ -54,6 +56,11 @@ readonly-audit（預設）只讀不改。develop 會在獨立的 worktree 和分
                                          人工核准，develop 要承認未隔離；預設 30 天到期
   mandate list | show <name> | revoke <name>
                                          列表／檢視／取消核准（保留範本）
+  triggers on|off                        主動觸發總開關，預設關閉，獨立於 MCP 開關
+  trigger <name>                         檢查核准、每日帳本與鎖；不過就記原因、不重試
+  schedule <name> --daily HH:MM | --every-hours N
+      [--apply]                          預設只預覽；Windows apply 登記工作，POSIX 只印 crontab
+  schedule <name> --remove [--apply]      預覽移除；Windows apply 才真的移除
   probe --agent <codex|claude|grok>      跑權限邊界探針
   templates                              列出可用範本
   enable | disable                       開關 MCP 的 ai-cli_kernel_* 工具（CLI 不受影響）
@@ -164,7 +171,7 @@ export function formatStatus(status: KernelRunStatus): string {
   return lines.join('\n') + '\n';
 }
 
-export async function runKernelCli(argv: string[], io: Io): Promise<number> {
+export async function runKernelCli(argv: string[], io: Io, deps: { schedule?: KernelScheduleDeps; trigger?: Parameters<typeof aiCliKernelTrigger>[1] } = {}): Promise<number> {
   const [action, ...rest] = argv;
   if (!action || action === 'help' || action === '--help' || action === '-h') { io.stdout(KERNEL_HELP_TEXT); return 0; }
   const { positionals, flags } = parse(rest);
@@ -179,6 +186,27 @@ export async function runKernelCli(argv: string[], io: Io): Promise<number> {
       case 'start': {
         const status = await aiCliKernelStart(startInput(flags));
         emit(status, formatStatus(status));
+        return 0;
+      }
+      case 'triggers': case 'trigger': case 'schedule': {
+        const allowed = action === 'schedule' ? ['daily', 'every-hours', 'apply', 'remove', 'json'] : ['json'];
+        for (const flag of flags.keys()) if (!allowed.includes(flag)) throw new Error(`${action} 不接受 --${flag}`);
+        for (const flag of ['apply', 'remove', 'json']) if (flags.has(flag) && flags.get(flag) !== true) throw new Error(`--${flag} 不接受值`);
+        if (positionals.length !== 1) throw new Error(`${action} 需要一個${action === 'triggers' ? ' on|off' : '範本名稱'}`);
+        const name = positionals[0];
+        if (action === 'triggers') {
+          if (!['on', 'off'].includes(name)) throw new Error('用法：triggers on|off');
+          const value = aiCliKernelTriggersSetEnabled(name === 'on');
+          emit(value, `主動觸發已${value.enabled ? '開啟' : '關閉'}。\n`);
+          return 0;
+        }
+        if (action === 'trigger') {
+          const value = await aiCliKernelTrigger({ name }, deps.trigger);
+          emit(value, `${value.status}：${value.reason}${value.runId ? `（${value.runId}）` : ''}${value.detail ? ` ${value.detail}` : ''}\n`);
+          return value.status === 'failed' ? 1 : 0;
+        }
+        const value = aiCliKernelSchedule({ name, daily: stringFlag(flags, 'daily'), everyHours: numberFlag(flags, 'every-hours'), apply: flags.get('apply') === true, remove: flags.get('remove') === true }, deps.schedule);
+        emit(value, `${value.applied ? '已執行' : '預覽（未執行）'}\n${value.command}\n`);
         return 0;
       }
       case 'mandate': {

@@ -4205,5 +4205,229 @@
     "from": "Array.from(input[key] as unknown[]).some(item => typeof item",
     "to": "(input[key] as unknown[]).some(item => typeof item",
     "expect": "委任範本：重用 start 驗證並拒絕錯型輸入"
+  },
+  {
+    "name": "kernel triggers：預設開啟",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "code === 'ENOENT') return false",
+    "to": "code === 'ENOENT') return true",
+    "expect": "主動觸發：預設總開關關閉"
+  },
+  {
+    "name": "kernel triggers：忽略總開關",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "if (!aiCliKernelTriggersEnabled())",
+    "to": "if (false)",
+    "expect": "主動觸發：MCP 開啟不會打開觸發"
+  },
+  {
+    "name": "kernel triggers：跳過原生 worker 防線",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "    assertCanStartJob();",
+    "to": "    // disabled",
+    "expect": "主動觸發：worker 不可觸發 nested="
+  },
+  {
+    "name": "kernel triggers：允許巢狀 worker 觸發",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "if (process.env.AI_CLI_WORKER === '1') return record",
+    "to": "if (false) return record",
+    "expect": "主動觸發：worker 不可觸發 nested="
+  },
+  {
+    "name": "kernel triggers：不檢查核准",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "if (!mandate.approval) return record(result('skipped', 'mandate_unapproved'));",
+    "to": "mandate.approval ??= { digest: mandate.digest, approvedAt: new Date(now).toISOString(), expiresAt: new Date(now + 86400000).toISOString() };",
+    "expect": "主動觸發：未核准不建立 run"
+  },
+  {
+    "name": "kernel triggers：不比對 digest",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "if (mandate.approval.digest !== mandate.digest)",
+    "to": "if (false)",
+    "expect": "主動觸發：內容變動 digest 不符不跑"
+  },
+  {
+    "name": "kernel triggers：到期當刻仍生效",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "if (now >= Date.parse(mandate.approval.expiresAt))",
+    "to": "if (now > Date.parse(mandate.approval.expiresAt))",
+    "expect": "主動觸發：到期當刻不跑"
+  },
+  {
+    "name": "kernel triggers：忽略每日次數",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "if (usage.runs >= mandate.limits.maxRunsPerDay)",
+    "to": "if (false)",
+    "expect": "主動觸發：零次數上限不跑"
+  },
+  {
+    "name": "kernel triggers：忽略每日 token",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "if (usage.tokens >= mandate.limits.maxInputTokensPerDay)",
+    "to": "if (false)",
+    "expect": "主動觸發：零 token 上限不跑"
+  },
+  {
+    "name": "kernel triggers：不扣已保留名額",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "return { runs: reservations.length, tokens };",
+    "to": "return { runs: 0, tokens };",
+    "expect": "主動觸發：每日次數上限含等號"
+  },
+  {
+    "name": "kernel triggers：快取也扣帳",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "view.counters.inputTokens - view.counters.cachedTokens",
+    "to": "view.counters.inputTokens",
+    "expect": "主動觸發：只扣未快取 input 並排除 output"
+  },
+  {
+    "name": "kernel triggers：不縮減本次 token 預算",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "Math.min(mandate.input.budget?.maxInputTokens ?? Infinity, mandate.limits.maxInputTokensPerDay - usage.tokens)",
+    "to": "mandate.input.budget?.maxInputTokens ?? Infinity",
+    "expect": "主動觸發：剩餘每日 token 限制套進委任書"
+  },
+  {
+    "name": "kernel triggers：忽略活躍 run 鎖",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "if (!lock.ok)",
+    "to": "if (!lock.ok && lock.heldBy === 'never-held')",
+    "expect": "主動觸發：別的 run 佔鎖跳過且不扣次數"
+  },
+  {
+    "name": "kernel triggers：允許 checkpoint off",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "if (contract.develop?.checkpoint?.mode === 'off')",
+    "to": "if (false)",
+    "expect": "主動觸發：checkpoint off 在建 run 前拒絕"
+  },
+  {
+    "name": "kernel triggers：不記 trigger 來源",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "contract.origin = { kind: 'trigger', mandate: name, digest: mandate.digest };",
+    "to": "// no origin",
+    "expect": "主動觸發：建 run 核准與啟動且保存來源"
+  },
+  {
+    "name": "kernel triggers：不先記名額",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "    record(result('started', 'reserved'), 'reserved', mandate.digest);",
+    "to": "",
+    "expect": "主動觸發：先保留名額再啟動"
+  },
+  {
+    "name": "kernel triggers：忽略未知用量",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "view.counters.unknownUsage > 0 ||",
+    "to": "false ||",
+    "expect": "主動觸發：未知用量不視為零"
+  },
+  {
+    "name": "kernel triggers：放棄未知用量視為零",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "some(action => !action.outcome)",
+    "to": "some(action => !action.outcome && !action.abandoned)",
+    "expect": "主動觸發：放棄未知結果不退款成零用量"
+  },
+  {
+    "name": "kernel triggers：忽略帳本殘行",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "if (text && !text.endsWith('\\n'))",
+    "to": "if (false)",
+    "expect": "主動觸發：殘行帳本失敗關閉不建立 run"
+  },
+  {
+    "name": "kernel triggers：忽略日誌損毀末行",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "    for (const line of raw.split('\\n').filter(Boolean)) JSON.parse(line);",
+    "to": "",
+    "expect": "主動觸發：用量日誌損毀末行不忽略"
+  },
+  {
+    "name": "kernel triggers：失敗釋放可能還在用的鎖",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "if (active && !starting && runId)",
+    "to": "if (active && runId)",
+    "expect": "主動觸發：啟動失敗不重試且保留鎖與名額"
+  },
+  {
+    "name": "kernel triggers：忽略 Codex 專案 hook",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "const hooks = existsSync(join(root, '.codex', 'hooks.json'))",
+    "to": "const hooks = false",
+    "expect": "主動觸發整合：專案 Codex hook 註記寫進 run"
+  },
+  {
+    "name": "kernel schedule：預覽也執行",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/schedule.ts",
+    "from": "if (input.apply === true) {",
+    "to": "if (true) {",
+    "expect": "排程：預覽不呼叫執行器"
+  },
+  {
+    "name": "kernel schedule：POSIX 也執行",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/schedule.ts",
+    "from": "if (deps.platform !== 'win32')",
+    "to": "if (false)",
+    "expect": "只印 crontab 並跳脫空白引號百分號"
+  },
+  {
+    "name": "kernel schedule：不移除工作",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/schedule.ts",
+    "from": "['/Delete', '/TN', taskName, '/F']",
+    "to": "['/Query', '/TN', taskName]",
+    "expect": "排程：remove apply 精確命令與參數"
+  },
+  {
+    "name": "kernel schedule：daily 忽略時間",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/schedule.ts",
+    "from": "['/SC', 'DAILY', '/ST', input.daily]",
+    "to": "['/SC', 'DAILY', '/ST', '00:00']",
+    "expect": "排程：Windows daily apply 精確命令與參數"
+  },
+  {
+    "name": "kernel schedule：hourly 忽略間隔",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/schedule.ts",
+    "from": "['/SC', 'HOURLY', '/MO', String(input.everyHours)]",
+    "to": "['/SC', 'HOURLY', '/MO', '1']",
+    "expect": "排程：Windows hourly 參數"
+  },
+  {
+    "name": "kernel schedule：worker 可以 apply",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/schedule.ts",
+    "from": "if (process.env.AI_CLI_WORKER === '1')",
+    "to": "if (false)",
+    "expect": "排程：worker 不可 apply"
   }
 ]

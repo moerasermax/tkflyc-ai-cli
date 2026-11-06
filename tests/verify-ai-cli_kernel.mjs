@@ -1878,6 +1878,230 @@ for (const crashAt of ['intent-before', 'intent-after', 'execute', 'result']) {
   check('委任範本：全部操作不建 run 不動 repo refs 或工作樹', listRunIds().join() === namesBefore && git(repo, 'show-ref') === refs && git(repo, 'status', '--porcelain') === '' && !existsSync(join(kernelStateDir(), 'mandates', 'validation-only')));
 }
 
+/* ---- L5 主動觸發與排程：全部注入前景 runner／假的排程執行函式 ---- */
+{
+  const api = await load('api');
+  const { aiCliKernelMandateSave: save, aiCliKernelMandateApprove: approve, aiCliKernelMandateRevoke: revoke,
+    aiCliKernelTrigger: trigger, aiCliKernelTriggersEnabled: enabled, aiCliKernelTriggersSetEnabled: setEnabled,
+    aiCliKernelTriggerDay: day, aiCliKernelSchedule: schedule } = api;
+  const { kernelStateDir, listRunIds, readActiveRun } = await load('journal');
+  const { aiCliKernelHandleTool } = await load('mcp-tools');
+  const ledgerPath = join(kernelStateDir(), 'triggers.jsonl');
+  const switchPath = join(kernelStateDir(), 'triggers.json');
+  const mandatePath = name => join(kernelStateDir(), 'mandates', `${name}.json`);
+  const ledger = () => readFileSync(ledgerPath, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+  const clear = () => { rmSync(ledgerPath, { force: true }); if (readActiveRun()) releaseActiveLock(readActiveRun()); };
+  const input = { goal: 'trigger test', workFolder: WORK, allowUnverifiedBoundary: true };
+  const saveApproved = (name = 'trigger-audit', limits = {}, overrides = {}) => {
+    save({ name, input: { ...input, ...overrides }, maxRunsPerDay: 10, maxInputTokensPerDay: 1000, ...limits });
+    return approve({ name, acknowledgeUnisolated: true });
+  };
+  const completed = (usage = { input: 100, cached: 0, output: 5 }) => async store => {
+    store.append({ type: 'action_intent', action: { ...WORKER_INTENT, actionId: 'usage' } });
+    store.append({ type: 'action_result', actionId: 'usage', outcome: { ok: true, usage } });
+    store.append({ type: 'state', state: 'completed' });
+    releaseActiveLock(store.runId);
+  };
+  let calls = 0;
+  const launch = async store => { calls++; await completed()(store); };
+  const invoke = (name = 'trigger-audit', extra = {}) => trigger({ name }, { launch, ...extra });
+  clear(); rmSync(switchPath, { force: true });
+  const before = listRunIds().join();
+  check('主動觸發：預設總開關關閉', !enabled());
+  process.env.AI_CLI_KERNEL = 'on';
+  check('主動觸發：MCP 開啟不會打開觸發', (await invoke()).reason === 'triggers_disabled' && listRunIds().join() === before && calls === 0);
+  delete process.env.AI_CLI_KERNEL;
+  check('主動觸發：關閉原因持久寫入帳本', ledger().at(-1).reason === 'triggers_disabled');
+  setEnabled(true);
+  check('主動觸發：總開關持久保存', enabled() && JSON.parse(readFileSync(switchPath)).enabled === true);
+  const externalOff = spawnSync(process.execPath, [join(ROOT, 'dist', 'bin', 'ai-cli.js'), 'kernel', 'triggers', 'off', '--json'], { env: process.env, encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  check('主動觸發：跨 CLI 程序停用立即重新讀取', externalOff.status === 0 && JSON.parse(externalOff.stdout).enabled === false && !enabled());
+  setEnabled(true);
+  check('主動觸發：非法開關不能當成同意', !!failing(setEnabled, 'true'));
+  save({ name: 'trigger-audit', input });
+  check('主動觸發：未核准不建立 run', (await invoke()).reason === 'mandate_unapproved' && listRunIds().join() === before);
+  let approved = saveApproved();
+  const changed = structuredClone(approved); delete changed.status; delete changed.digest;
+  changed.input.goal += ' changed'; writeFileSync(mandatePath('trigger-audit'), JSON.stringify(changed));
+  check('主動觸發：內容變動 digest 不符不跑', (await invoke()).reason === 'mandate_changed' && calls === 0);
+  approved = saveApproved();
+  check('主動觸發：到期當刻不跑', (await invoke('trigger-audit', { now: () => Date.parse(approved.approval.expiresAt) })).reason === 'mandate_expired' && calls === 0);
+  revoke({ name: 'trigger-audit' });
+  check('主動觸發：撤銷立即生效', (await invoke()).reason === 'mandate_unapproved');
+  saveApproved();
+  save({ name: 'trigger-audit', input });
+  check('主動觸發：覆寫後必須重新核准', (await invoke()).reason === 'mandate_unapproved');
+  saveApproved();
+  for (const nested of [undefined, '1']) {
+    process.env.AI_CLI_WORKER = '1';
+    if (nested) process.env.AI_CLI_ALLOW_NESTED = nested;
+    const workerResult = await invoke();
+    check(`主動觸發：worker 不可觸發 nested=${nested}`, workerResult.reason === 'worker_forbidden' && calls === 0 && (nested === '1' || workerResult.detail.includes('AI_CLI_NESTED_DISPATCH_BLOCKED')));
+    check(`主動觸發：worker 不可開啟開關 nested=${nested}`, !!failing(setEnabled, true));
+    delete process.env.AI_CLI_WORKER; delete process.env.AI_CLI_ALLOW_NESTED;
+  }
+  check('主動觸發：缺失與非法名稱記原因不派工', (await invoke('missing-trigger')).status === 'skipped' && (await invoke('../escape')).status === 'skipped' && calls === 0);
+  saveApproved('trigger-audit', { maxRunsPerDay: 0 });
+  check('主動觸發：零次數上限不跑', (await invoke()).reason === 'daily_runs_limit');
+  saveApproved('trigger-audit', { maxInputTokensPerDay: 0 });
+  check('主動觸發：零 token 上限不跑', (await invoke()).reason === 'daily_tokens_limit');
+  saveApproved();
+  const held = newRunId(); acquireActiveLock(held);
+  check('主動觸發：別的 run 佔鎖跳過且不扣次數', (await invoke()).reason === 'active_run_locked' && !ledger().some(row => row.event === 'reserved') && calls === 0);
+  check('主動觸發：鎖佔用記錄持有者', ledger().at(-1).detail === held);
+  releaseActiveLock(held);
+  writeFileSync(join(kernelStateDir(), 'triggers.lock'), 'held');
+  check('主動觸發：觸發殘鎖不重試', (await invoke()).reason === 'trigger_busy' && calls === 0);
+  rmSync(join(kernelStateDir(), 'triggers.lock'));
+  clear(); saveApproved('trigger-audit', { maxRunsPerDay: 1 });
+  const first = await invoke();
+  const firstStore = new RunStore(kernelRunDir(first.runId));
+  check('主動觸發：建 run 核准與啟動且保存來源', first.status === 'started' && firstStore.readContract().origin.mandate === 'trigger-audit' && firstStore.readContract().origin.digest === api.aiCliKernelMandateShow({ name: 'trigger-audit' }).digest && view(firstStore).state === 'completed' && calls === 1);
+  check('主動觸發：先保留名額再啟動', ledger().filter(row => row.runId === first.runId).map(row => row.event).join() === 'reserved,attempt,result' && firstStore.read().some(event => event.type === 'approved' && event.note.includes('主動觸發')));
+  check('主動觸發：每日次數上限含等號', (await invoke()).reason === 'daily_runs_limit' && calls === 1);
+  approve({ name: 'trigger-audit' });
+  check('主動觸發：重新核准不清空每日帳本', (await invoke()).reason === 'daily_runs_limit');
+  clear(); saveApproved('trigger-audit', { maxInputTokensPerDay: 150 });
+  let cap = null;
+  const cached = await invoke('trigger-audit', { launch: async store => { cap = store.readContract().budget.maxInputTokens; await completed({ input: 1000, cached: 900, output: 999 })(store); } });
+  check('主動觸發：剩餘每日 token 限制套進委任書', cap === 150);
+  let remaining;
+  const second = await invoke('trigger-audit', { launch: async store => { remaining = store.readContract().budget.maxInputTokens; await completed({ input: 70, cached: 20, output: 900 })(store); } });
+  check('主動觸發：只扣未快取 input 並排除 output', cached.status === 'started' && second.status === 'started' && remaining === 50);
+  check('主動觸發：每日 token 用完不再派工', (await invoke()).reason === 'daily_tokens_limit');
+  const unrelated = await invoke('trigger-other', { launch });
+  check('主動觸發：缺失範本不影響既有帳本', unrelated.status === 'skipped' && ledger().filter(row => row.event === 'reserved').length === 2);
+  saveApproved('trigger-other');
+  check('主動觸發：不同範本獨立計數', (await invoke('trigger-other')).status === 'started');
+  clear(); saveApproved('trigger-audit', { maxRunsPerDay: 1 });
+  const midnight = new Date(); midnight.setHours(24, 0, 0, 0);
+  const edge = midnight.getTime();
+  await invoke('trigger-audit', { now: () => edge - 1 });
+  check('主動觸發：本機午夜前仍在同一天', (await invoke('trigger-audit', { now: () => edge - 1 })).reason === 'daily_runs_limit');
+  check('主動觸發：跨本機午夜重開當日額度', (await invoke('trigger-audit', { now: () => edge })).status === 'started' && day(edge - 1) !== day(edge));
+  check('主動觸發：帳本保留兩天的名額', new Set(ledger().filter(row => row.event === 'reserved').map(row => row.day)).size === 2);
+  check('主動觸發：本機年末日期邊界', day(new Date(2026, 11, 31, 23, 59, 59, 999).getTime()) === '2026-12-31' && day(new Date(2027, 0, 1, 0, 0).getTime()) === '2027-01-01');
+  clear(); saveApproved();
+  let clockReads = 0;
+  await invoke('trigger-audit', { now: () => { clockReads++; return clockReads === 1 ? edge - 1 : edge; } });
+  check('主動觸發：單次判斷與記帳固定同一日期', clockReads === 1 && ledger().every(row => row.day === day(edge - 1)));
+  clear(); saveApproved();
+  const unknown = await invoke('trigger-audit', { launch: completed(null) });
+  check('主動觸發：未知用量不視為零', unknown.status === 'started' && (await invoke()).reason === 'trigger_error' && ledger().at(-1).detail.includes('用量未知'));
+  clear();
+  const lost = await invoke('trigger-audit', { launch: async store => {
+    store.append({ type: 'action_intent', action: { ...WORKER_INTENT, actionId: 'lost' } });
+    store.append({ type: 'action_abandoned', actionId: 'lost', reason: 'unknown result', refund: false });
+    store.append({ type: 'state', state: 'completed' }); releaseActiveLock(store.runId);
+  } });
+  check('主動觸發：放棄未知結果不退款成零用量', lost.status === 'started' && (await invoke()).detail.includes('用量未知'));
+  clear();
+  const corruptRun = await invoke();
+  const corruptStore = new RunStore(kernelRunDir(corruptRun.runId));
+  appendFileSync(corruptStore.journalPath, '{bad}\n');
+  check('主動觸發：用量日誌損毀末行不忽略', (await invoke()).reason === 'trigger_error');
+  clear();
+  const absent = await invoke();
+  const absentStore = new RunStore(kernelRunDir(absent.runId));
+  renameSync(absentStore.contractPath, absentStore.contractPath + '.test-backup');
+  check('主動觸發：已扣名額的 run 缺失不當零用量', (await invoke()).detail.includes('run 缺失'));
+  renameSync(absentStore.contractPath + '.test-backup', absentStore.contractPath);
+  clear();
+  const crashed = await invoke('trigger-audit', { launch: async () => { throw new Error('fake launcher failed'); } });
+  check('主動觸發：啟動失敗不重試且保留鎖與名額', crashed.reason === 'start_failed' && readActiveRun() === crashed.runId && ledger().filter(row => row.event === 'reserved').length === 1);
+  const failedStore = new RunStore(kernelRunDir(crashed.runId));
+  check('主動觸發：啟動結果不明的 run 留給人對帳', view(failedStore).state === 'running' && ledger().at(-1).detail.includes('fake launcher failed'));
+  clear();
+  writeFileSync(ledgerPath, '{');
+  const countBeforeCorrupt = listRunIds().join();
+  check('主動觸發：殘行帳本失敗關閉不建立 run', (await invoke()).status === 'failed' && listRunIds().join() === countBeforeCorrupt);
+  writeFileSync(ledgerPath, '{}\n');
+  check('主動觸發：損毀帳本不當成空白', (await invoke()).status === 'failed');
+  clear();
+  writeFileSync(switchPath, '{}');
+  check('主動觸發：損毀開關不啟動且留下原因', (await invoke()).reason === 'trigger_error' && ledger().at(-1).detail.includes('開關損毀'));
+  setEnabled(true); clear();
+  mkdirSync(ledgerPath);
+  const beforeLedgerFailure = listRunIds().join();
+  check('主動觸發：帳本不能寫入就不建立 run', (await invoke()).status === 'failed' && listRunIds().join() === beforeLedgerFailure);
+  rmSync(ledgerPath, { recursive: true });
+  const repo = newRepo();
+  saveApproved('trigger-off', {}, { workFolder: repo, template: 'develop', testCommand: FEATURE_IS_GOOD, checkpoint: 'off' });
+  const beforeOff = listRunIds().join();
+  check('主動觸發：checkpoint off 在建 run 前拒絕', (await invoke('trigger-off')).reason === 'checkpoint_off_forbidden' && listRunIds().join() === beforeOff && !ledger().some(row => row.event === 'reserved'));
+  const remote = bareOrigin(repo);
+  mkdirSync(join(repo, '.codex')); writeFileSync(join(repo, '.codex', 'hooks.json'), '{}');
+  saveApproved('trigger-dev', {}, { workFolder: repo, template: 'develop', testCommand: FEATURE_IS_GOOD, checkpoint: 'push' });
+  const originalHead = git(repo, 'rev-parse', 'HEAD');
+  const originalRemote = git(remote, 'for-each-ref', '--format=%(refname)');
+  let devStore, devExecutor, pushed = [];
+  const development = await invoke('trigger-dev', { launch: async store => {
+    devStore = store;
+    const contract = store.readContract();
+    devExecutor = new FakeExecutor(writes('good\n'));
+    const workspace = { ...realWorkspace, pushCheckpoint: (spec, commit) => { pushed.push(spec.checkpoint.ref); return realWorkspace.pushCheckpoint(spec, commit); } };
+    await runKernelLoop(devDeps(store, contract, devExecutor, { workspace }));
+    releaseActiveLock(store.runId);
+  } });
+  const devContract = devStore.readContract();
+  const delivered = git(repo, 'rev-parse', devContract.develop.branch);
+  check('主動觸發整合：develop 到交付分支與報告', development.status === 'started' && view(devStore).state === 'completed' && workers(devExecutor) === 1 && existsSync(devStore.reportPath) && delivered !== originalHead);
+  check('主動觸發整合：專案 Codex hook 註記寫進 run', view(devStore).notes.some(note => note.includes('.codex/hooks.json')) && devContract.develop.notices.some(note => note.includes('.codex/hooks.json')));
+  check('主動觸發整合：只推回復點且不合併主分支', pushed.join() === devContract.develop.checkpoint.ref && git(repo, 'rev-parse', 'HEAD') === originalHead && originalRemote === '' && git(remote, 'for-each-ref', '--format=%(refname)') === `refs/heads/${devContract.develop.checkpoint.ref}`);
+  check('主動觸發整合：trigger 交付不能建立單次放行', !!failing(aiCliKernelReleaseCreate, { runId: devStore.runId, action: 'merge', target: git(repo, 'branch', '--show-current'), confirm: delivered.slice(0, 10) }));
+  clear();
+  let badStore, badExecutor, failedPushes = 0;
+  await invoke('trigger-dev', { launch: async store => {
+    badStore = store; badExecutor = new FakeExecutor(writes('good\n'));
+    const workspace = { ...realWorkspace, pushCheckpoint: () => { failedPushes++; throw new Error('fake push failed'); } };
+    await runKernelLoop(devDeps(store, store.readContract(), badExecutor, { workspace }));
+  } });
+  check('主動觸發整合：回復點推送失敗不派 worker 不降本地', view(badStore).reason === 'checkpoint_push_failed' && badExecutor.started.length === 0 && failedPushes === 1 && !view(badStore).checkpoint);
+  clear();
+  // 所有 schedule 呼叫明確注入假的 execute，包含預覽、拒絕與 POSIX。
+  const scheduled = [];
+  const fakeSchedule = { platform: 'win32', nodePath: 'C:\\Program Files\\node.exe', cliPath: 'C:\\tool dir\\ai-cli.js', execute: (file, args) => scheduled.push({ file, args }) };
+  const daily = schedule({ name: 'trigger-audit', daily: '09:07' }, fakeSchedule);
+  check('排程：預覽不呼叫執行器', !daily.applied && scheduled.length === 0 && daily.args.includes('09:07'));
+  const applied = schedule({ name: 'trigger-audit', daily: '09:07', apply: true }, fakeSchedule);
+  check('排程：Windows daily apply 精確命令與參數', applied.applied && scheduled.length === 1 && scheduled[0].file === 'schtasks' && JSON.stringify(scheduled[0].args) === JSON.stringify(['/Create', '/TN', 'ai-cli_kernel_trigger-audit', '/SC', 'DAILY', '/ST', '09:07', '/TR', '"C:\\Program Files\\node.exe" "C:\\tool dir\\ai-cli.js" "kernel" "trigger" "trigger-audit"']));
+  schedule({ name: 'trigger-audit', everyHours: 3, apply: true }, fakeSchedule);
+  check('排程：Windows hourly 參數', scheduled.length === 2 && scheduled[1].args.slice(3, 8).join() === '/SC,HOURLY,/MO,3,/TR');
+  schedule({ name: 'trigger-audit', remove: true }, fakeSchedule);
+  check('排程：remove 預覽不執行', scheduled.length === 2);
+  schedule({ name: 'trigger-audit', remove: true, apply: true }, fakeSchedule);
+  check('排程：remove apply 精確命令與參數', scheduled.length === 3 && scheduled[2].file === 'schtasks' && scheduled[2].args.join() === '/Delete,/TN,ai-cli_kernel_trigger-audit,/F');
+  for (const platform of ['linux', 'darwin']) {
+    const posix = { ...fakeSchedule, platform, nodePath: '/node path/node', cliPath: "/tool's/cli%name.js" };
+    const cron = schedule({ name: 'trigger-audit', daily: '23:59', apply: true }, posix);
+    check(`排程：${platform} 只印 crontab 並跳脫空白引號百分號`, !cron.applied && cron.command.startsWith('59 23 * * * ') && cron.command.includes("'\\''") && cron.command.includes('\\%') && scheduled.length === 3);
+    const hours = schedule({ name: 'trigger-audit', everyHours: 5, apply: true }, posix);
+    check(`排程：${platform} 五小時間隔不在午夜重置`, hours.command.includes('date +\\%s') && hours.command.includes('\\% 5') && scheduled.length === 3);
+    check(`排程：${platform} remove 不修改 crontab`, !schedule({ name: 'trigger-audit', remove: true, apply: true }, posix).applied && scheduled.length === 3);
+  }
+  for (const options of [{}, { daily: '9:00' }, { daily: '24:00' }, { daily: '09:60' }, { daily: '00:00', everyHours: 1 }, { everyHours: 0 }, { everyHours: 1.5 }, { everyHours: 1000 }, { remove: true, daily: '09:00' }, { daily: '09:00', apply: 'true' }]) {
+    check(`排程：非法參數拒絕 ${JSON.stringify(options)}`, !!failing(schedule, { name: 'trigger-audit', ...options }, fakeSchedule) && scheduled.length === 3);
+  }
+  check('排程：缺少與非法範本拒絕', !!failing(schedule, { name: 'unknown', daily: '09:00', apply: true }, fakeSchedule) && !!failing(schedule, { name: '../bad', remove: true, apply: true }, fakeSchedule) && scheduled.length === 3);
+  check('排程：執行失敗原樣回報且不重試', /fake schedule failed/.test(failing(schedule, { name: 'trigger-audit', daily: '09:00', apply: true }, { ...fakeSchedule, execute: () => { throw new Error('fake schedule failed'); } })?.message ?? ''));
+  process.env.AI_CLI_WORKER = '1';
+  check('排程：worker 不可 apply', !!failing(schedule, { name: 'trigger-audit', daily: '09:00', apply: true }, fakeSchedule) && scheduled.length === 3);
+  delete process.env.AI_CLI_WORKER;
+  let out = '', err = '';
+  const cli = args => { out = ''; err = ''; return runKernelCli(args, { stdout: text => out += text, stderr: text => err += text }, { schedule: fakeSchedule, trigger: { launch } }); };
+  check('主動觸發 CLI：off JSON', await cli(['triggers', 'off', '--json']) === 0 && JSON.parse(out).enabled === false);
+  check('主動觸發 CLI：關閉時 trigger 跳過 JSON', await cli(['trigger', 'trigger-audit', '--json']) === 0 && JSON.parse(out).reason === 'triggers_disabled');
+  check('主動觸發 CLI：on 文字', await cli(['triggers', 'on']) === 0 && out.includes('開啟'));
+  check('排程 CLI：預覽不執行', await cli(['schedule', 'trigger-audit', '--daily', '08:00', '--json']) === 0 && !JSON.parse(out).applied && scheduled.length === 3);
+  check('排程 CLI：apply 走注入執行器', await cli(['schedule', 'trigger-audit', '--every-hours', '2', '--apply', '--json']) === 0 && JSON.parse(out).applied && scheduled.length === 4);
+  check('排程 CLI：remove apply 走注入執行器', await cli(['schedule', 'trigger-audit', '--remove', '--apply']) === 0 && scheduled.length === 5);
+  for (const args of [['triggers', 'yes'], ['trigger'], ['trigger', 'a', 'b'], ['trigger', 'a', '--apply'], ['schedule', 'trigger-audit', '--daily'], ['schedule', 'trigger-audit', '--daily', '09:00', '--apply', 'false'], ['schedule', 'trigger-audit', '--remove', '--every-hours', '2']]) check(`主動觸發 CLI：錯誤參數 ${args.join(' ')}`, await cli(args) === 1 && err.length > 0);
+  process.env.AI_CLI_KERNEL = 'on';
+  for (const tool of ['trigger', 'triggers_on', 'schedule', 'mandate_approve']) check(`主動觸發 MCP：不新增人工寫入工具 ${tool}`, !aiCliKernelToolDefinitions().some(item => item.name === `ai-cli_kernel_${tool}`) && !!await rejecting(aiCliKernelHandleTool(`ai-cli_kernel_${tool}`, { name: 'trigger-audit' })));
+  delete process.env.AI_CLI_KERNEL;
+  setEnabled(false); clear();
+}
+
 /* ---- 命名與依賴方向 ---- */
 {
   const walk = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? walk(join(dir, entry.name)) : entry.name.endsWith('.ts') ? [join(dir, entry.name)] : []);

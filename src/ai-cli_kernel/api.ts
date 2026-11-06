@@ -4,7 +4,7 @@
  */
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { aiCliKernelCreateRelease, aiCliKernelRunRelease, type KernelReleaseCreateInput, type KernelReleaseDeps } from './loop.js';
+import { aiCliKernelCreateRelease, aiCliKernelRunRelease, aiCliKernelRunTrigger, type KernelTriggerDeps, type KernelReleaseCreateInput, type KernelReleaseDeps } from './loop.js';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -253,7 +253,7 @@ export function aiCliKernelRollback(input: { runId: string; apply?: boolean }): 
 
 export interface KernelApproveInput { runId: string; note?: string; reconcile?: string; acknowledgeUnisolated?: boolean }
 
-export async function aiCliKernelApprove(input: KernelApproveInput): Promise<KernelRunStatus> {
+export async function aiCliKernelApprove(input: KernelApproveInput, deps: { launch?: (store: RunStore) => Promise<void> } = {}): Promise<KernelRunStatus> {
   assertCanStartJob();
   const store = storeFor(input.runId);
   const contract = store.readContract();
@@ -296,7 +296,7 @@ export async function aiCliKernelApprove(input: KernelApproveInput): Promise<Ker
     store.append({ type: 'approved', contractDigest: digest, kind: 'continue', ...(input.note ? { note: input.note } : {}), ...(overrides.length ? { overrides } : {}) });
   }
   store.append({ type: 'state', state: 'running' });
-  await spawnRunner(store);
+  await (deps.launch ?? spawnRunner)(store);
   return statusOf(store);
 }
 
@@ -433,3 +433,13 @@ export { nextStep };
 
 // 委任範本由 CLI 共用；核准不註冊 MCP。
 export { aiCliKernelMandateSave, aiCliKernelMandateApprove, aiCliKernelMandateList, aiCliKernelMandateShow, aiCliKernelMandateRevoke } from './mandates.js';
+
+/** 一次性觸發；測試可注入前景 runner，絕不啟動真正模型。 */
+export function aiCliKernelTrigger(input: { name: string }, deps: { now?: KernelTriggerDeps['now']; launch?: (store: RunStore) => Promise<void> } = {}) {
+  return aiCliKernelRunTrigger(input.name, {
+    now: deps.now ?? Date.now,
+    approveAndStart: (store, note) => aiCliKernelApprove({ runId: store.runId, acknowledgeUnisolated: true, note }, { launch: deps.launch }),
+  });
+}
+export { aiCliKernelTriggersEnabled, aiCliKernelTriggersSetEnabled, aiCliKernelTriggerDay } from './triggers.js';
+export { aiCliKernelSchedule } from './schedule.js';
