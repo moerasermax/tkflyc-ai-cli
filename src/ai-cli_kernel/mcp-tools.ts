@@ -3,7 +3,7 @@
  * 和原生的 run、wait 等工具分得開。
  */
 import {
-  aiCliKernelApprove, aiCliKernelCancel, aiCliKernelEnabled, aiCliKernelProbe, aiCliKernelResult, aiCliKernelStart, aiCliKernelStatus,
+  aiCliKernelMandateList, aiCliKernelApprove, aiCliKernelCancel, aiCliKernelEnabled, aiCliKernelProbe, aiCliKernelResult, aiCliKernelStart, aiCliKernelStatus,
 } from './api.js';
 
 export const KERNEL_TOOL_PREFIX = 'ai-cli_kernel_';
@@ -11,6 +11,11 @@ export const KERNEL_TOOL_PREFIX = 'ai-cli_kernel_';
 const RUN_ID = { type: 'string', description: 'run id，例如 kr-20261106-012345-ab12。' };
 
 const TOOLS = [
+  {
+    name: 'ai-cli_kernel_mandate_list',
+    description: 'List saved mandate templates with input, daily limits, digest and current approval state. Read-only: cannot approve or start them. Approval is only available via the human CLI.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
   {
     name: 'ai-cli_kernel_start',
     description: 'Create a mandate for a supervised agent run. Nothing executes until ai-cli_kernel_approve. The kernel plans with a tool-less model call, dispatches workers through ai-cli, verifies the deliverable with deterministic checks, and recovers across restarts. Template readonly-audit (default) is read-only: tool-limited, not isolated. Template develop can change code: workers run with full user permissions in a dedicated git worktree and branch, the kernel itself runs testCommand and only accepts a commit that passes it. It never merges or pushes the delivery branch; it may push a dedicated checkpoint branch before work. develop is NOT isolated: show the mandate to the user first.',
@@ -109,6 +114,9 @@ function optionalString(args: Record<string, unknown>, name: string): string | u
 export async function aiCliKernelHandleTool(name: string, args: Record<string, unknown>): Promise<unknown> {
   if (!aiCliKernelEnabled()) throw new Error('ai-cli_kernel 尚未開啟。請先執行 ai-cli kernel enable');
   switch (name) {
+    case 'ai-cli_kernel_mandate_list':
+      if (Object.keys(args).length) throw new Error('mandate list 不接受參數');
+      return aiCliKernelMandateList();
     case 'ai-cli_kernel_start':
       return aiCliKernelStart({
         goal: requireString(args, 'goal'), workFolder: requireString(args, 'workFolder'), template: optionalString(args, 'template'),

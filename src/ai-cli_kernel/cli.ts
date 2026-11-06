@@ -5,8 +5,11 @@
 import { readFileSync } from 'node:fs';
 import {
   aiCliKernelApprove, aiCliKernelCancel, aiCliKernelCleanup, aiCliKernelEnabled, aiCliKernelProbe, aiCliKernelResult, aiCliKernelSetEnabled,
+  aiCliKernelMandateSave, aiCliKernelMandateApprove, aiCliKernelMandateList, aiCliKernelMandateShow, aiCliKernelMandateRevoke,
   aiCliKernelStart, aiCliKernelStatus, aiCliKernelTemplates, aiCliKernelWait, aiCliKernelRollback, aiCliKernelReleaseCreate, aiCliKernelReleaseRun, type KernelRunStatus,
 } from './api.js';
+import type { KernelStartInput } from './templates.js';
+import type { KernelMandateView } from './mandates.js';
 
 export const KERNEL_HELP_TEXT = `Usage: ai-cli kernel <動作> [選項]
 
@@ -45,6 +48,12 @@ readonly-audit（預設）只讀不改。develop 會在獨立的 worktree 和分
        [--remote origin] [--hours 1] [--allow-default-branch]
                                          人的單次放行，只有 completed develop；推遠端預設分支可能等於部署
   release run <id>                       重新驗證後執行一次；結果不明絕不自動重試
+  mandate save <name> [start 的選項] [--max-runs-per-day 1] [--max-tokens-per-day 2000000]
+                                         只儲存委任範本；覆寫一律取消核准
+  mandate approve <name> [--acknowledge-unisolated] [--days 30]
+                                         人工核准，develop 要承認未隔離；預設 30 天到期
+  mandate list | show <name> | revoke <name>
+                                         列表／檢視／取消核准（保留範本）
   probe --agent <codex|claude|grok>      跑權限邊界探針
   templates                              列出可用範本
   enable | disable                       開關 MCP 的 ai-cli_kernel_* 工具（CLI 不受影響）
@@ -89,6 +98,31 @@ function listFlag(flags: Map<string, string | true>, name: string): string[] | u
 /** 沒給的欄位不能傳 undefined：readonly-audit 會把「有這個欄位」當成用錯範本。 */
 function optionalFields<T extends object>(fields: T): Partial<T> {
   return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) as Partial<T>;
+}
+
+function startInput(flags: Map<string, string | true>): KernelStartInput {
+  const goalFile = stringFlag(flags, 'goal-file');
+  const goal = goalFile ? readFileSync(goalFile, 'utf8') : stringFlag(flags, 'goal') ?? '';
+  const budget = Object.fromEntries(Object.entries({
+    maxWorkerSteps: numberFlag(flags, 'max-steps'), maxDecides: numberFlag(flags, 'max-decides'),
+    maxWallMinutes: numberFlag(flags, 'max-minutes'), maxInputTokens: numberFlag(flags, 'max-tokens'),
+    maxTestFailures: numberFlag(flags, 'max-test-failures'),
+  }).filter(([, value]) => value !== undefined));
+  return {
+    goal, workFolder: stringFlag(flags, 'cwd') ?? process.cwd(), template: stringFlag(flags, 'template'),
+    model: stringFlag(flags, 'model'), effort: stringFlag(flags, 'effort'),
+    decideModel: stringFlag(flags, 'decide-model'), decideEffort: stringFlag(flags, 'decide-effort'),
+    budget, allowUnverifiedBoundary: flags.get('allow-unverified') === true,
+    ...optionalFields({
+      workerModels: listFlag(flags, 'worker-models'), testCommand: stringFlag(flags, 'test'), setupCommand: stringFlag(flags, 'setup'),
+      allowedPaths: listFlag(flags, 'allow-path'), mandateHours: numberFlag(flags, 'mandate-hours'),
+      checkpoint: stringFlag(flags, 'checkpoint'),
+    }),
+  };
+}
+
+function formatMandate(mandate: KernelMandateView): string {
+  return `${mandate.name}  ${mandate.status}\n${JSON.stringify(mandate, null, 2)}\n`;
 }
 
 const STEP_LABEL = { passed: '通過', failed: '未通過', running: '執行中', pending: '等待' } as const;
@@ -143,25 +177,30 @@ export async function runKernelCli(argv: string[], io: Io): Promise<number> {
   try {
     switch (action) {
       case 'start': {
-        const goalFile = stringFlag(flags, 'goal-file');
-        const goal = goalFile ? readFileSync(goalFile, 'utf8') : stringFlag(flags, 'goal') ?? '';
-        const budget = Object.fromEntries(Object.entries({
-          maxWorkerSteps: numberFlag(flags, 'max-steps'), maxDecides: numberFlag(flags, 'max-decides'),
-          maxWallMinutes: numberFlag(flags, 'max-minutes'), maxInputTokens: numberFlag(flags, 'max-tokens'),
-          maxTestFailures: numberFlag(flags, 'max-test-failures'),
-        }).filter(([, value]) => value !== undefined));
-        const status = await aiCliKernelStart({
-          goal, workFolder: stringFlag(flags, 'cwd') ?? process.cwd(), template: stringFlag(flags, 'template'),
-          model: stringFlag(flags, 'model'), effort: stringFlag(flags, 'effort'),
-          decideModel: stringFlag(flags, 'decide-model'), decideEffort: stringFlag(flags, 'decide-effort'),
-          budget, allowUnverifiedBoundary: flags.get('allow-unverified') === true,
-          ...optionalFields({
-            workerModels: listFlag(flags, 'worker-models'), testCommand: stringFlag(flags, 'test'), setupCommand: stringFlag(flags, 'setup'),
-            allowedPaths: listFlag(flags, 'allow-path'), mandateHours: numberFlag(flags, 'mandate-hours'),
-            checkpoint: stringFlag(flags, 'checkpoint'),
-          }),
-        });
+        const status = await aiCliKernelStart(startInput(flags));
         emit(status, formatStatus(status));
+        return 0;
+      }
+      case 'mandate': {
+        const [operation, name] = positionals;
+        if (!['save', 'approve', 'list', 'show', 'revoke'].includes(operation) ||
+          positionals.length !== (operation === 'list' ? 1 : 2)) throw new Error('用法：mandate save|approve|show|revoke <name>，或 mandate list');
+        const startFlags = ['goal', 'goal-file', 'cwd', 'template', 'model', 'effort', 'decide-model', 'decide-effort', 'worker-models', 'test', 'setup', 'allow-path', 'mandate-hours', 'checkpoint', 'max-steps', 'max-decides', 'max-minutes', 'max-tokens', 'max-test-failures', 'allow-unverified'];
+        const allowed = operation === 'save' ? [...startFlags, 'max-runs-per-day', 'max-tokens-per-day', 'json']
+          : operation === 'approve' ? ['acknowledge-unisolated', 'days', 'json'] : ['json'];
+        for (const flag of flags.keys()) if (!allowed.includes(flag)) throw new Error(`mandate ${operation} 不接受 --${flag}`);
+        for (const flag of ['acknowledge-unisolated', 'allow-unverified', 'json']) {
+          if (flags.has(flag) && flags.get(flag) !== true) throw new Error(`--${flag} 不接受值`);
+        }
+        if (operation === 'list') {
+          const mandates = aiCliKernelMandateList();
+          emit(mandates, mandates.length ? mandates.map(item => `${item.name}  ${item.status}`).join('\n') + '\n' : '還沒有委任範本。\n');
+          return 0;
+        }
+        const mandate = operation === 'save' ? aiCliKernelMandateSave({ name, input: startInput(flags), maxRunsPerDay: numberFlag(flags, 'max-runs-per-day'), maxInputTokensPerDay: numberFlag(flags, 'max-tokens-per-day') })
+          : operation === 'approve' ? aiCliKernelMandateApprove({ name, acknowledgeUnisolated: flags.get('acknowledge-unisolated') === true, days: numberFlag(flags, 'days') })
+          : operation === 'revoke' ? aiCliKernelMandateRevoke({ name }) : aiCliKernelMandateShow({ name });
+        emit(mandate, formatMandate(mandate));
         return 0;
       }
       case 'approve': {

@@ -430,3 +430,6 @@ export function aiCliKernelTemplates(): Array<{ name: string; description: strin
 
 export function aiCliKernelBoundaryKey(agent: string) { return boundaryKey(agent); }
 export { nextStep };
+
+// 委任範本由 CLI 共用；核准不註冊 MCP。
+export { aiCliKernelMandateSave, aiCliKernelMandateApprove, aiCliKernelMandateList, aiCliKernelMandateShow, aiCliKernelMandateRevoke } from './mandates.js';

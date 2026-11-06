@@ -49,6 +49,20 @@ try {
   const help = cli(['help']);
   check('help 列出動作', help.code === 0 && help.out.includes('approve') && help.out.includes('probe'), help.err);
 
+  /* ---- L5 委任範本：跨 CLI 程序持久保存，不啟動模型 ---- */
+  const savedMandate = json(['mandate', 'save', 'e2e-audit', ...START.slice(1), '--max-runs-per-day', '2']);
+  check('委任範本 E2E：save 尚未核准且沒有模型執行', savedMandate.code === 0 && savedMandate.data?.status === 'unapproved' && savedMandate.data?.limits?.maxRunsPerDay === 2 && logCount('decide') === 0, savedMandate.out + savedMandate.err);
+  const approvedMandate = json(['mandate', 'approve', 'e2e-audit']);
+  const shownMandate = json(['mandate', 'show', 'e2e-audit']);
+  check('委任範本 E2E：另一程序看得到核准 digest', approvedMandate.code === 0 && shownMandate.code === 0 && shownMandate.data?.status === 'approved' && shownMandate.data?.approval?.digest === approvedMandate.data?.digest, shownMandate.out + shownMandate.err);
+  const workerMandate = cli(['mandate', 'approve', 'e2e-audit'], { AI_CLI_WORKER: '1', AI_CLI_ALLOW_NESTED: '1' });
+  check('委任範本 E2E：worker 即使允許巢狀派工仍拒絕核准', workerMandate.code === 1 && workerMandate.err.includes('worker'), workerMandate.out + workerMandate.err);
+  const overwrittenMandate = json(['mandate', 'save', 'e2e-audit', ...START.slice(1)]);
+  check('委任範本 E2E：覆寫取消核准', overwrittenMandate.code === 0 && overwrittenMandate.data?.approval === null, overwrittenMandate.out + overwrittenMandate.err);
+  json(['mandate', 'approve', 'e2e-audit']);
+  const revokedMandate = json(['mandate', 'revoke', 'e2e-audit']);
+  check('委任範本 E2E：撤銷保留範本且列表立即反映', revokedMandate.code === 0 && json(['mandate', 'list']).data?.some(m => m.name === 'e2e-audit' && m.status === 'unapproved') && logCount('decide') === 0, revokedMandate.out + revokedMandate.err);
+
   /* ---- 委任書與探針 ---- */
   const created = json(START);
   check('start 只建立委任書，不執行', created.code === 0 && created.data?.state === 'awaiting_approval' && logCount('decide') === 0, created.out + created.err);
@@ -173,7 +187,11 @@ try {
   check('enable 寫入開關', enable.code === 0, enable.err);
   const [onTools, statusCall] = await callMcp({}, [{ method: 'tools/list' }, { method: 'tools/call', params: { name: 'ai-cli_kernel_status', arguments: { runId } } }]);
   const onNames = (onTools?.result?.tools ?? []).map(tool => tool.name);
-  check('開啟後多出帶前綴的工具，原生工具都還在', onNames.length === 18 && offNames.every(name => onNames.includes(name)) && onNames.filter(name => !offNames.includes(name)).every(name => name.startsWith('ai-cli_kernel_')), onNames.join(','));
+  check('開啟後多出帶前綴的工具，原生工具都還在', onNames.length === offNames.length + 7 && offNames.every(name => onNames.includes(name)) && onNames.filter(name => !offNames.includes(name)).every(name => name.startsWith('ai-cli_kernel_')), onNames.join(','));
+  check('委任範本 E2E：MCP 只提供列表不提供核准', onNames.includes('ai-cli_kernel_mandate_list') && !onNames.includes('ai-cli_kernel_mandate_approve'));
+  const [mandateListCall] = await callMcp({}, [{ method: 'tools/call', params: { name: 'ai-cli_kernel_mandate_list', arguments: {} } }]);
+  const mandateListText = mandateListCall?.result?.content?.[0]?.text ?? '';
+  check('委任範本 E2E：MCP 列表看到 CLI 保存的範本', !mandateListCall?.result?.isError && mandateListText.includes('e2e-audit') && mandateListText.includes('unapproved'), mandateListText.slice(0, 300));
   const statusText = statusCall?.result?.content?.[0]?.text ?? '';
   check('MCP 查得到 CLI 建立的 run', statusText.includes(runId) && statusText.includes('completed'), statusText.slice(0, 300));
 

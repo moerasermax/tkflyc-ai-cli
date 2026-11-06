@@ -4029,5 +4029,181 @@
     "from": "if (!sameDir(commonDir, repoCommonDir)) throw new Error(",
     "to": "if (false as boolean) throw new Error(",
     "expect": "別的 repo 的 linked worktree 也不能碰"
+  },
+  {
+    "name": "kernel mandate：名稱驗證移除",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(name)) {",
+    "to": "if (false) {",
+    "expect": "委任範本：拒絕非法名稱"
+  },
+  {
+    "name": "kernel mandate：未知欄位放行",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "if (Object.keys(value).some(key => !allowed.includes(key)))",
+    "to": "if (false)",
+    "expect": "委任範本：重用 start 驗證並拒絕錯型輸入"
+  },
+  {
+    "name": "kernel mandate：每日上限接受負數與小數",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "if (!Number.isSafeInteger(value) || value < 0)",
+    "to": "if (false)",
+    "expect": "委任範本：拒絕非法每日上限"
+  },
+  {
+    "name": "kernel mandate：digest 漏名稱",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "return digestText(canonical({ name: mandate.name, input: mandate.input, limits: mandate.limits }));",
+    "to": "return digestText(canonical({ input: mandate.input, limits: mandate.limits }));",
+    "expect": "委任範本：digest 綁定名稱"
+  },
+  {
+    "name": "kernel mandate：digest 漏 input",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "return digestText(canonical({ name: mandate.name, input: mandate.input, limits: mandate.limits }));",
+    "to": "return digestText(canonical({ name: mandate.name, limits: mandate.limits }));",
+    "expect": "委任範本：digest 綁定 input."
+  },
+  {
+    "name": "kernel mandate：digest 漏上限",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "return digestText(canonical({ name: mandate.name, input: mandate.input, limits: mandate.limits }));",
+    "to": "return digestText(canonical({ name: mandate.name, input: mandate.input }));",
+    "expect": "委任範本：變更 maxRunsPerDay 失去授權"
+  },
+  {
+    "name": "kernel mandate：digest 不符仍核准",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "if (mandate.approval.digest !== aiCliKernelMandateDigest(mandate)) return 'changed';",
+    "to": "if (false) return 'changed';",
+    "expect": "委任範本：digest 綁定 input."
+  },
+  {
+    "name": "kernel mandate：到期邊界多放一刻",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "return now >= Date.parse(mandate.approval.expiresAt) ? 'expired' : 'approved';",
+    "to": "return now > Date.parse(mandate.approval.expiresAt) ? 'expired' : 'approved';",
+    "expect": "委任範本：期限之前有效到期當刻失效"
+  },
+  {
+    "name": "kernel mandate：連結目錄可穿透",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "if (lstatSync(path).isSymbolicLink())",
+    "to": "if (false)",
+    "expect": "委任範本：拒絕符號連結目錄"
+  },
+  {
+    "name": "kernel mandate：同名鎖可覆寫",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "const fd = openSync(lock, 'wx', 0o600);",
+    "to": "const fd = openSync(lock, 'w', 0o600);",
+    "expect": "委任範本：同名寫入鎖阻止 save approve revoke"
+  },
+  {
+    "name": "kernel mandate：覆寫沿用舊同意",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "return mutate(record.name, () => write(record));",
+    "to": "return mutate(record.name, () => { try { record.approval = read(record.name).approval; } catch {} return write(record); });",
+    "expect": "委任範本：相同內容覆寫也清掉核准"
+  },
+  {
+    "name": "kernel mandate：預設每日次數放大",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "request.maxRunsPerDay ?? 1",
+    "to": "request.maxRunsPerDay ?? 10",
+    "expect": "委任範本：每日上限預設一次"
+  },
+  {
+    "name": "kernel mandate：預設每日 token 放大",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "request.maxInputTokensPerDay ?? 2000000",
+    "to": "request.maxInputTokensPerDay ?? 20000000",
+    "expect": "委任範本：每日上限預設一次"
+  },
+  {
+    "name": "kernel mandate：worker 可核准",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "if (process.env.AI_CLI_WORKER === '1')",
+    "to": "if (false)",
+    "expect": "委任範本：worker 即使允許巢狀派工仍不能核准"
+  },
+  {
+    "name": "kernel mandate：預設授權變長期",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "const days = request.days ?? 30;",
+    "to": "const days = request.days ?? 36500;",
+    "expect": "委任範本：唯讀核准不需未隔離旗標且預設三十天"
+  },
+  {
+    "name": "kernel mandate：days 不驗證",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "if (!Number.isFinite(days) || days <= 0 || !Number.isFinite(new Date(expires).getTime()) || new Date(expires).getTime() <= now)",
+    "to": "if (false)",
+    "expect": "委任範本：拒絕非法有效天數"
+  },
+  {
+    "name": "kernel mandate：未隔離承認取消",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "if (record.input.template === 'develop' && request.acknowledgeUnisolated !== true)",
+    "to": "if (false)",
+    "expect": "委任範本：develop 未承認未隔離不能核准"
+  },
+  {
+    "name": "kernel mandate：未隔離同意接受 truthy",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "request.acknowledgeUnisolated !== true",
+    "to": "!request.acknowledgeUnisolated",
+    "expect": "委任範本：字串 true 不能充當未隔離同意"
+  },
+  {
+    "name": "kernel mandate：核准不重驗 start",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "    buildContract(record.input, new Date(), { runId: 'kr-20000101-000000-0000', worktree: join(directory(), 'validation-only') });",
+    "to": "",
+    "expect": "委任範本：核准前重新驗證 start 輸入"
+  },
+  {
+    "name": "kernel mandate：revoke 沒取消同意",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "const record = read(request.name); record.approval = null; return write(record);",
+    "to": "const record = read(request.name); return write(record);",
+    "expect": "委任範本：revoke 立即取消核准但保留內容"
+  },
+  {
+    "name": "kernel mandate：檔名錯配仍可讀",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "if (record.name !== name)",
+    "to": "if (false)",
+    "expect": "委任範本：損毀記錄拒絕讀取"
+  },
+  {
+    "name": "kernel mandate：稀疏字串陣列未驗證",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "Array.from(input[key] as unknown[]).some(item => typeof item",
+    "to": "(input[key] as unknown[]).some(item => typeof item",
+    "expect": "委任範本：重用 start 驗證並拒絕錯型輸入"
   }
 ]

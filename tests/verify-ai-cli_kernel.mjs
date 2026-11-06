@@ -4,7 +4,7 @@
  */
 import '../tools/stubs/catalog-test-env.mjs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, appendFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, appendFileSync, writeFileSync, renameSync, symlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -1760,6 +1760,122 @@ for (const crashAt of ['intent-before', 'intent-after', 'execute', 'result']) {
   check('身分查詢失敗不能當成 runner 死了', await aiCliKernelRunnerAlive(store, noIdentity) === null);
   writeFileSync(store.runnerPath, JSON.stringify({ pid: 999999, started: 'x', name: 'node' }));
   check('pid 確實不在才算 runner 不在', await aiCliKernelRunnerAlive(store, noIdentity) === false);
+}
+
+/* ---- L5 第一部分：委任範本（不啟動 run） ---- */
+{
+  const { aiCliKernelMandateSave: save, aiCliKernelMandateApprove: approve, aiCliKernelMandateList: list,
+    aiCliKernelMandateShow: show, aiCliKernelMandateRevoke: revoke } = await load('api');
+  const { aiCliKernelMandateDigest: digest, aiCliKernelMandateState: state } = await load('mandates');
+  const { kernelStateDir, listRunIds } = await load('journal');
+  const { aiCliKernelHandleTool } = await load('mcp-tools');
+  const namesBefore = listRunIds().join();
+  check('委任範本：空列表不建立狀態目錄', list().length === 0 && !existsSync(join(kernelStateDir(), 'mandates')));
+  const input = { goal: '  唯讀查核  ', workFolder: WORK };
+  const first = save({ name: 'audit', input });
+  const file = name => join(kernelStateDir(), 'mandates', `${name}.json`);
+  const raw = name => JSON.parse(readFileSync(file(name), 'utf8'));
+  const put = (name, record) => writeFileSync(file(name), JSON.stringify(record));
+  check('委任範本：save 正規化 start 輸入且未核准', first.name === 'audit' && first.status === 'unapproved' && first.approval === null && first.input.goal === '唯讀查核' && first.input.template === 'readonly-audit' && first.input.model === 'gpt-6.1-sol' && first.input.budget.maxInputTokens === DEFAULT_BUDGET.maxInputTokens);
+  check('委任範本：每日上限預設一次與兩百萬未快取 input', first.limits.maxRunsPerDay === 1 && first.limits.maxInputTokensPerDay === 2000000);
+  check('委任範本：存放 mandates 名稱 json 且只有規格四欄', Object.keys(raw('audit')).sort().join() === 'approval,input,limits,name');
+  check('委任範本：show 持久讀取與 save 相同', JSON.stringify(show({ name: 'audit' })) === JSON.stringify(first));
+  const accepted = approve({ name: 'audit' });
+  check('委任範本：唯讀核准不需未隔離旗標且預設三十天', accepted.status === 'approved' && accepted.approval.digest === accepted.digest && Date.parse(accepted.approval.expiresAt) - Date.parse(accepted.approval.approvedAt) === 30 * 86400000);
+  check('委任範本：期限之前有效到期當刻失效', state(accepted, Date.parse(accepted.approval.expiresAt) - 1) === 'approved' && state(accepted, Date.parse(accepted.approval.expiresAt)) === 'expired');
+  const reverseKeys = object => Object.fromEntries(Object.entries(object).reverse());
+  check('委任範本：digest 不受排版與鍵順序影響', digest(accepted) === digest({ ...accepted, input: reverseKeys(accepted.input), limits: reverseKeys(accepted.limits) }));
+  for (const key of Object.keys(accepted.input)) {
+    const changed = structuredClone(accepted);
+    const value = changed.input[key];
+    changed.input[key] = typeof value === 'boolean' ? !value : Array.isArray(value) ? [...value, 'extra'] : typeof value === 'object' ? { ...value, maxInputTokens: value.maxInputTokens + 1 } : `${value}changed`;
+    check(`委任範本：digest 綁定 input.${key}`, state(changed) === 'changed');
+  }
+  for (const key of ['maxRunsPerDay', 'maxInputTokensPerDay']) {
+    const changed = structuredClone(accepted); changed.limits[key]++;
+    put('audit', changed && { name: changed.name, input: changed.input, limits: changed.limits, approval: changed.approval });
+    check(`委任範本：變更 ${key} 失去授權`, show({ name: 'audit' }).status === 'changed');
+  }
+  check('委任範本：digest 綁定名稱', state({ ...accepted, name: 'different' }) === 'changed');
+  put('audit', { ...raw('audit'), input: accepted.input, limits: accepted.limits, approval: { ...accepted.approval, approvedAt: '2000-01-01T00:00:00.000Z', expiresAt: '2000-01-02T00:00:00.000Z' } });
+  check('委任範本：過期狀態從磁碟計算', show({ name: 'audit' }).status === 'expired');
+  approve({ name: 'audit', days: 2 });
+  const overwritten = save({ name: 'audit', input });
+  check('委任範本：相同內容覆寫也清掉核准', overwritten.approval === null && overwritten.status === 'unapproved');
+  approve({ name: 'audit' });
+  const revoked = revoke({ name: 'audit' });
+  check('委任範本：revoke 立即取消核准但保留內容', revoked.approval === null && revoked.status === 'unapproved' && existsSync(file('audit')) && revoked.digest === first.digest);
+  check('委任範本：重複 revoke 安全', revoke({ name: 'audit' }).status === 'unapproved');
+  const custom = save({ name: 'zero', input, maxRunsPerDay: 0, maxInputTokensPerDay: 0 });
+  check('委任範本：每日上限可設零', custom.limits.maxRunsPerDay === 0 && custom.limits.maxInputTokensPerDay === 0);
+  for (const value of [-1, 1.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1, '2']) {
+    check(`委任範本：拒絕非法每日上限 ${String(value)}`, !!failing(save, { name: 'bad-limit', input, maxRunsPerDay: value }) && !!failing(save, { name: 'bad-limit', input, maxInputTokensPerDay: value }) && !existsSync(file('bad-limit')));
+  }
+  for (const days of [0, -1, Infinity, NaN, 1e30, 1e-100, '2']) check(`委任範本：拒絕非法有效天數 ${String(days)}`, !!failing(approve, { name: 'audit', days }) && show({ name: 'audit' }).approval === null);
+  for (const name of [undefined, null, 42, {}, '', '../escape', 'a/b', 'a\\b', 'C:bad', '.', 'UPPER', 'con', 'lpt1', 'x'.repeat(65)]) {
+    check(`委任範本：拒絕非法名稱 ${name}`, [() => save({ name, input }), () => approve({ name }), () => show({ name }), () => revoke({ name })].every(fn => !!failing(fn)));
+  }
+  check('委任範本：名稱長度邊界', save({ name: 'a'.repeat(64), input }).name.length === 64);
+  for (const operation of [show, approve, revoke]) check(`委任範本：缺少範本拒絕 ${operation.name}`, !!failing(operation, { name: 'missing' }) && !existsSync(file('missing')));
+  const badInputs = [{ ...input, goal: '' }, { ...input, workFolder: join(WORK, 'missing') }, { ...input, template: 'unknown' }, { ...input, budget: { maxInputTokens: -1 } }, { ...input, budget: { surprise: 1 } }, { ...input, workerModels: [7] }, { ...input, workerModels: new Array(1) }, { ...input, allowUnverifiedBoundary: 'true' }, { ...input, extra: 'ignored?' }, { ...input, testCommand: 'x' }];
+  for (let i = 0; i < badInputs.length; i++) check(`委任範本：重用 start 驗證並拒絕錯型輸入 ${i}`, !!failing(save, { name: 'bad-input', input: badInputs[i] }) && !existsSync(file('bad-input')));
+  const repo = newRepo();
+  const devInput = { ...input, workFolder: repo, template: 'develop', testCommand: ' node -e "process.exit(0)" ', setupCommand: ' npm ci ', allowedPaths: ['src'], checkpoint: 'local', mandateHours: 2, workerModels: ['sonnet'] };
+  const refs = git(repo, 'show-ref');
+  const dev = save({ name: 'dev', input: devInput, maxRunsPerDay: 3, maxInputTokensPerDay: 12345 });
+  check('委任範本：develop 保存指令範圍模型與上限不保存 run ref', dev.input.testCommand === devInput.testCommand.trim() && dev.input.setupCommand === 'npm ci' && dev.input.checkpoint === 'local' && dev.input.allowedPaths.join() === 'src' && dev.input.workerModels.length === 2 && dev.limits.maxRunsPerDay === 3 && dev.limits.maxInputTokensPerDay === 12345 && !('develop' in dev.input));
+  check('委任範本：develop 未承認未隔離不能核准', /acknowledge-unisolated/.test(failing(approve, { name: 'dev' })?.message ?? '') && show({ name: 'dev' }).approval === null);
+  check('委任範本：字串 true 不能充當未隔離同意', !!failing(approve, { name: 'dev', acknowledgeUnisolated: 'true' }));
+  const devApproved = approve({ name: 'dev', acknowledgeUnisolated: true, days: 0.5 });
+  check('委任範本：develop 明確同意且支援自訂期限', devApproved.status === 'approved' && Date.parse(devApproved.approval.expiresAt) - Date.parse(devApproved.approval.approvedAt) === 43200000);
+  process.env.AI_CLI_WORKER = '1'; process.env.AI_CLI_ALLOW_NESTED = '1';
+  check('委任範本：worker 即使允許巢狀派工仍不能核准', /worker/.test(failing(approve, { name: 'dev', acknowledgeUnisolated: true })?.message ?? ''));
+  delete process.env.AI_CLI_WORKER; delete process.env.AI_CLI_ALLOW_NESTED;
+  check('委任範本：列表穩定排序且包含核准狀態', list().map(m => m.name).join() === list().map(m => m.name).sort().join() && list().find(m => m.name === 'dev').status === 'approved');
+  const original = raw('audit');
+  for (const corrupt of [[], { ...original, name: 'other' }, { ...original, approval: {} }, { ...original, approval: { digest: 'a'.repeat(64), approvedAt: 'bad', expiresAt: 'bad' } }, { ...original, limits: {} }, { ...original, extra: true }]) {
+    put('audit', corrupt);
+    check('委任範本：損毀記錄拒絕讀取', !!failing(show, { name: 'audit' }) && !!failing(list));
+  }
+  writeFileSync(file('audit'), '{');
+  check('委任範本：截斷 JSON 不當成未核准空記錄', !!failing(show, { name: 'audit' }));
+  put('audit', original);
+  writeFileSync(file('audit') + '.lock', 'held');
+  check('委任範本：同名寫入鎖阻止 save approve revoke', !!failing(save, { name: 'audit', input }) && !!failing(approve, { name: 'audit' }) && !!failing(revoke, { name: 'audit' }) && JSON.stringify(raw('audit')) === JSON.stringify(original));
+  rmSync(file('audit') + '.lock');
+  const invalidRecord = { ...original, input: { ...original.input, template: 'invalid' } };
+  put('audit', invalidRecord);
+  check('委任範本：核准前重新驗證 start 輸入', !!failing(approve, { name: 'audit' }) && raw('audit').approval === null);
+  put('audit', original);
+  const linkedDir = join(kernelStateDir(), 'mandates');
+  const actualDir = join(kernelStateDir(), 'mandates-real');
+  renameSync(linkedDir, actualDir);
+  try {
+    symlinkSync(actualDir, linkedDir, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      check('委任範本：拒絕符號連結目錄', !!failing(list) && !!failing(save, { name: 'linked', input }) && !existsSync(join(actualDir, 'linked.json')));
+    } finally { unlinkSync(linkedDir); }
+  } finally { renameSync(actualDir, linkedDir); }
+  let out = '', err = '';
+  const cli = async args => { out = ''; err = ''; return runKernelCli(args, { stdout: text => out += text, stderr: text => err += text }); };
+  const options = ['--goal', 'CLI goal', '--cwd', WORK, '--max-runs-per-day', '2', '--max-tokens-per-day', '123', '--json'];
+  check('委任範本 CLI：save JSON 與 start 共用輸入', await cli(['mandate', 'save', 'cli-audit', ...options]) === 0 && JSON.parse(out).limits.maxInputTokensPerDay === 123);
+  check('委任範本 CLI：develop 完整選項不執行指令', await cli(['mandate', 'save', 'cli-dev', '--goal', 'dev', '--cwd', repo, '--template', 'develop', '--test', 'never-run-test', '--setup', 'never-run-setup', '--allow-path', 'src', '--worker-models', 'sonnet', '--mandate-hours', '2', '--checkpoint', 'local', '--max-test-failures', '2', '--json']) === 0 && JSON.parse(out).input.testCommand === 'never-run-test' && JSON.parse(out).input.setupCommand === 'never-run-setup' && JSON.parse(out).input.allowedPaths.join() === 'src' && JSON.parse(out).input.budget.maxTestFailures === 2 && JSON.parse(out).input.mandateHours === 2);
+  check('委任範本 CLI：approve JSON', await cli(['mandate', 'approve', 'cli-audit', '--days', '2', '--json']) === 0 && JSON.parse(out).status === 'approved');
+  check('委任範本 CLI：show 文字含完整輸入與期限', await cli(['mandate', 'show', 'cli-audit']) === 0 && out.includes('CLI goal') && out.includes('expiresAt') && out.includes('approved'));
+  check('委任範本 CLI：list JSON', await cli(['mandate', 'list', '--json']) === 0 && JSON.parse(out).some(m => m.name === 'cli-audit'));
+  check('委任範本 CLI：revoke JSON', await cli(['mandate', 'revoke', 'cli-audit', '--json']) === 0 && JSON.parse(out).approval === null);
+  for (const args of [['mandate'], ['mandate', 'wat'], ['mandate', 'show'], ['mandate', 'list', 'extra'], ['mandate', 'approve', 'dev', '--acknowledge-unisolated', 'false'], ['mandate', 'approve', 'audit', '--days'], ['mandate', 'approve', 'audit', '--unknown'], ['mandate', 'revoke', 'audit', '--days', '3']]) check(`委任範本 CLI：拒絕錯誤參數 ${args.join(' ')}`, await cli(args) === 1 && err.length > 0);
+  process.env.AI_CLI_KERNEL = 'on';
+  const definitions = aiCliKernelToolDefinitions().filter(tool => tool.name.includes('mandate'));
+  check('委任範本 MCP：僅提供唯讀列表', definitions.length === 1 && definitions[0].name === 'ai-cli_kernel_mandate_list');
+  check('委任範本 MCP：列表實際讀取', (await aiCliKernelHandleTool('ai-cli_kernel_mandate_list', {})).some(m => m.name === 'dev'));
+  check('委任範本 MCP：核准工具不可呼叫', /不認識/.test((await rejecting(aiCliKernelHandleTool('ai-cli_kernel_mandate_approve', { name: 'audit' })))?.message ?? ''));
+  check('委任範本 MCP：列表拒絕額外參數', !!await rejecting(aiCliKernelHandleTool('ai-cli_kernel_mandate_list', { approve: true })));
+  process.env.AI_CLI_KERNEL = 'off';
+  check('委任範本 MCP：停用時列表不可呼叫', !!await rejecting(aiCliKernelHandleTool('ai-cli_kernel_mandate_list', {})));
+  delete process.env.AI_CLI_KERNEL;
+  check('委任範本：全部操作不建 run 不動 repo refs 或工作樹', listRunIds().join() === namesBefore && git(repo, 'show-ref') === refs && git(repo, 'status', '--porcelain') === '' && !existsSync(join(kernelStateDir(), 'mandates', 'validation-only')));
 }
 
 /* ---- 命名與依賴方向 ---- */
