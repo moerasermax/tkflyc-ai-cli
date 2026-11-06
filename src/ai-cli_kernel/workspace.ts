@@ -8,7 +8,7 @@ import { execFile, spawn, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { sameIdentity } from '../core/job-store.js';
+import { mayBeAlive, sameIdentity } from '../core/job-store.js';
 import { lookupIdentities } from '../core/live-jobs.js';
 import type { CheckHandle, DevelopSpec, WorkspaceOps, WorkspaceState } from './types.js';
 
@@ -80,6 +80,8 @@ function assertOwnWorktree(spec: DevelopSpec): void {
   const gitDir = resolve(spec.worktree, mustGit(spec.worktree, 'rev-parse', '--git-dir').trim());
   const commonDir = resolve(spec.worktree, mustGit(spec.worktree, 'rev-parse', '--git-common-dir').trim());
   if (sameDir(gitDir, commonDir)) throw new Error(`${spec.worktree} 不是 linked worktree，拒絕操作`);
+  const repoCommonDir = resolve(spec.repoRoot, mustGit(spec.repoRoot, 'rev-parse', '--git-common-dir').trim());
+  if (!sameDir(commonDir, repoCommonDir)) throw new Error(`${spec.worktree} 不屬於 ${spec.repoRoot}，拒絕操作`);
 }
 
 function readTail(path: string): string {
@@ -114,7 +116,8 @@ export const realWorkspace: WorkspaceOps = {
     const branch = git(spec.worktree, 'symbolic-ref', '--short', '-q', 'HEAD');
     const head = mustGit(spec.worktree, 'rev-parse', 'HEAD').trim();
     const dirty = parseStatusZ(mustGit(spec.worktree, 'status', '--porcelain=v1', '-z', '--untracked-files=all'));
-    const committed = mustGit(spec.worktree, 'diff', '--name-only', '-z', spec.baseCommit, 'HEAD').split('\0').filter(Boolean);
+    // --no-renames：重新命名偵測開著時只會列出新路徑，把範圍外的檔案搬進範圍內就查不到來源端了。
+    const committed = mustGit(spec.worktree, 'diff', '--no-renames', '--name-only', '-z', spec.baseCommit, 'HEAD').split('\0').filter(Boolean);
     return {
       branch: branch.status === 0 ? branch.stdout.trim() : null, head, dirty,
       changed: [...new Set([...committed, ...dirty])],
@@ -152,7 +155,7 @@ export const realWorkspace: WorkspaceOps = {
     return text.length > maxChars ? `${text.slice(0, maxChars)}\n…（diff 太長，只附前 ${maxChars} 字元）` : text;
   },
 
-  async startCheck(command, cwd, logPath) {
+  startCheck(command, cwd, logPath) {
     mkdirSync(dirname(logPath), { recursive: true });
     const fd = openSync(logPath, 'a', 0o600);
     // 輸出直接寫檔不走 pipe：runner 當掉時指令不會因為 pipe 斷掉而異常。
@@ -165,9 +168,17 @@ export const realWorkspace: WorkspaceOps = {
       child.once('exit', code => { settled = { exitCode: code }; resolve(); });
       child.once('error', () => { settled = { exitCode: null }; resolve(); });
     });
-    const identity = (await lookupIdentities([pid]).catch(() => new Map())).get(pid);
     const handle: CheckHandle = {
-      pid, started: identity?.started ?? '', name: identity?.name ?? '',
+      pid,
+      // 身分查詢有逾時，機器忙的時候會失敗。多試幾次，真的查不到就老實回空的，由呼叫端當成「認不出來」。
+      async identify() {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const identity = (await lookupIdentities([pid]).catch(() => new Map())).get(pid);
+          if (identity?.started) return { started: identity.started, name: identity.name };
+          if (settled) break;
+        }
+        return { started: '', name: '' };
+      },
       async wait(ms) {
         if (!settled) await Promise.race([done, new Promise(resolve => setTimeout(resolve, ms))]);
         return settled ? { exitCode: (settled as { exitCode: number | null }).exitCode, tail: readTail(logPath) } : null;
@@ -175,6 +186,7 @@ export const realWorkspace: WorkspaceOps = {
       async kill() {
         await killTree(pid);
         await Promise.race([done, new Promise(resolve => setTimeout(resolve, 10000))]);
+        return settled !== null;
       },
       tail: () => readTail(logPath),
     };
@@ -182,13 +194,18 @@ export const realWorkspace: WorkspaceOps = {
   },
 
   async stopOrphanCheck(check) {
-    const live = (await lookupIdentities([check.pid]).catch(() => null))?.get(check.pid);
-    // pid 不在、或已經被別的程序重用，都不是我們要找的那個。
-    if (!live || !sameIdentity(check, live)) return true;
+    const lookup = async () => (await lookupIdentities([check.pid]).catch(() => new Map())).get(check.pid);
+    const live = await lookup();
+    // 身分查詢失敗也會查不到。pid 還在就不能說它停了，不然舊程序會和接手的人同時動工作目錄。
+    if (!live) return !mayBeAlive(check.pid);
+    // 當初沒查到身分：認不出來，不能殺（可能是別人的程序），也不能說它停了。
+    if (!check.started) return false;
+    // 已經被別的程序重用了，不是我們要找的那個。
+    if (!sameIdentity(check, live)) return true;
     await killTree(check.pid);
     for (let attempt = 0; attempt < 20; attempt++) {
-      const current = (await lookupIdentities([check.pid]).catch(() => null))?.get(check.pid);
-      if (!current || !sameIdentity(check, current)) return true;
+      const current = await lookup();
+      if (current ? !sameIdentity(check, current) : !mayBeAlive(check.pid)) return true;
       await new Promise(resolve => setTimeout(resolve, 500));
     }
     return false;

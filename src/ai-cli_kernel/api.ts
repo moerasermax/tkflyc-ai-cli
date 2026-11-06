@@ -230,6 +230,7 @@ export async function aiCliKernelApprove(input: KernelApproveInput): Promise<Ker
       // 使用者放棄的是結果，不代表它沒有執行過，所以名額不退。
       store.append({ type: 'action_abandoned', actionId: action.spec.actionId, reason: '使用者確認後放棄', refund: false });
     }
+    if (view.openCheck) store.append({ type: 'check_finished', pid: view.openCheck.pid });
   } else if (input.reconcile !== undefined) {
     throw new Error('這個狀態不需要 --reconcile');
   }
@@ -288,7 +289,8 @@ export async function cancelWithoutRunner(store: RunStore, executor: KernelExecu
   const before = replayJournal(store.read());
   if (before.openCheck) {
     if (!await stopCheck(before.openCheck).catch(() => false)) {
-      store.append({ type: 'state', state: 'stop_pending', reason: 'check_still_alive', detail: `檢查指令（pid ${before.openCheck.pid}）還沒確認停止` });
+      if (before.openCheck.started) store.append({ type: 'state', state: 'stop_pending', reason: 'check_still_alive', detail: `檢查指令（pid ${before.openCheck.pid}）還沒確認停止` });
+      else store.append({ type: 'state', state: 'needs_reconcile', reason: 'check_identity_unknown', detail: `檢查指令 pid ${before.openCheck.pid} 還在，但認不出是不是當初那個。確認後執行 ai-cli kernel approve ${store.runId} --reconcile abandon` });
       return;
     }
     store.append({ type: 'check_finished', pid: before.openCheck.pid });

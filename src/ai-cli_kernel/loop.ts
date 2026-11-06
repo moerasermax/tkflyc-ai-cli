@@ -199,8 +199,13 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
     if (state.dirty.length === 0 && state.head === view.headCommit) return { passed: false, failureClass: 'check_failed', findings: ['worker 回報完成，但工作目錄沒有任何改動'] };
     if (state.dirty.length === 0) return { passed: true, commit: state.head };
     const title = view.plan?.steps.find(step => step.id === record.spec.stepId)?.title ?? record.spec.stepId;
-    try { return { passed: true, commit: ws!.commit(develop!, `ai-cli_kernel(${store.runId}): ${title}`) }; }
+    let commit: string;
+    try { commit = ws!.commit(develop!, `ai-cli_kernel(${store.runId}): ${title}`); }
     catch (error) { return { passed: false, failureClass: 'commit_failed', findings: [(error as Error).message] }; }
+    // commit hook 是 repo 自己的規矩，kernel 不跳過，但它可能在檢查之後才加東西。commit 完要再查一次。
+    const outsideAfter = outOfScope(ws!.inspect(develop!).changed, develop!.allowedPaths);
+    if (outsideAfter.length > 0) return { passed: false, failureClass: 'scope_violation', findings: [`commit 之後多了範圍外的路徑（可能是 commit hook 加的）：${outsideAfter.slice(0, 8).join('、')}`] };
+    return { passed: true, commit };
   };
 
   /** job 回報結束不等於程序停了。還活著就不能 commit：它之後寫的東西會混進來。 */
@@ -245,21 +250,31 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
 
   /** kernel 自己跑指令。回傳 null 表示 run 被取消或被接手，呼叫端要停。 */
   const runCheck = async (kind: 'setup' | 'test', command: string, seq: number): Promise<{ exitCode: number | null; timedOut: boolean; tail: string } | null> => {
-    const handle = await ws!.startCheck(command, workDir, join(store.dir, 'checks', `${kind}-${seq}.log`));
-    try { commit({ type: 'check_started', kind, pid: handle.pid, started: handle.started, name: handle.name }); }
-    catch (error) { await handle.kill(); throw error; }
-    const deadline = deps.now() + contract.budget.maxActionMinutes * 60000;
+    const handle = ws!.startCheck(command, workDir, join(store.dir, 'checks', `${kind}-${seq}.log`));
+    /** 確認真的停了才算數。送出訊號不等於停了，舊程序可能還在動工作目錄。 */
+    const stopConfirmed = async (): Promise<boolean> => {
+      if (await handle.kill()) { commit({ type: 'check_finished', pid: handle.pid }); return true; }
+      setState('stop_pending', 'check_still_alive', `kernel 跑的檢查指令（pid ${handle.pid}）還沒確認停止`);
+      return false;
+    };
+    try {
+      // spawn 完馬上記 pid，查身分要好幾秒，不能等。這樣當機時最多只漏掉幾毫秒的窗口。
+      commit({ type: 'check_started', kind, pid: handle.pid, started: '', name: '' });
+      const identity = await handle.identify();
+      commit({ type: 'check_started', kind, pid: handle.pid, started: identity.started, name: identity.name });
+    } catch (error) { await handle.kill(); throw error; }
+    // 總時間也要算進來：測試跑得比剩下的預算久時，不能等它自己跑完。
+    const startedAt = deps.now();
+    const wallLeftMs = (contract.budget.maxWallMinutes - activeMinutes(read(), startedAt)) * 60000;
+    const deadline = startedAt + Math.min(contract.budget.maxActionMinutes * 60000, wallLeftMs);
     for (;;) {
       if (superseded(read())) { await handle.kill(); return null; }
       if (store.cancelRequested()) {
-        await handle.kill();
-        commit({ type: 'check_finished', pid: handle.pid });
-        setState('cancelled', 'user_cancelled');
+        if (await stopConfirmed()) setState('cancelled', 'user_cancelled');
         return null;
       }
       if (deps.now() > deadline) {
-        await handle.kill();
-        commit({ type: 'check_finished', pid: handle.pid });
+        if (!await stopConfirmed()) return null;
         return { exitCode: null, timedOut: true, tail: handle.tail() };
       }
       // 用真的計時器等：只靠 deps.sleep 的話，測試的假 sleep 不會讓出 I/O，結束事件永遠進不來。
@@ -273,12 +288,24 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
 
   /** 上一個 runner 留下的檢查指令。舊程序還在跑就不能接著動工作目錄。 */
   const clearOrphanCheck = async (view: RunView): Promise<boolean> => {
-    if (!view.openCheck) return true;
-    if (!await ws!.stopOrphanCheck(view.openCheck).catch(() => false)) {
-      setState('stop_pending', 'check_still_alive', `kernel 跑的檢查指令（pid ${view.openCheck.pid}）還沒確認停止`);
+    const check = view.openCheck;
+    if (!check) return true;
+    if (!await ws!.stopOrphanCheck(check).catch(() => false)) {
+      // 當初沒查到身分就認不出來，重查也沒用，要人確認。不開這條路的話，pid 剛好被重用時會永遠卡住。
+      if (!check.started) setState('needs_reconcile', 'check_identity_unknown', `kernel 跑的檢查指令 pid ${check.pid} 還在，但認不出是不是當初那個。確認後執行 ai-cli kernel approve ${store.runId} --reconcile abandon`);
+      else setState('stop_pending', 'check_still_alive', `kernel 跑的檢查指令（pid ${check.pid}）還沒確認停止`);
       return false;
     }
-    commit({ type: 'check_finished', pid: view.openCheck.pid });
+    // 測試開始時工作目錄一定是乾淨的，所以留下的只會是副產物。正常路徑跑完也會清，這裡補當機那條路。
+    if (check.kind === 'test' && view.workspaceReady) {
+      try {
+        ws!.restore(develop!);
+      } catch (error) {
+        setState('waiting_human', 'workspace_failed', `接回時還原工作目錄失敗：${(error as Error).message}`);
+        return false;
+      }
+    }
+    commit({ type: 'check_finished', pid: check.pid });
     return true;
   };
 
@@ -347,7 +374,8 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
           commit({ type: 'decide_processed', actionId, ok: false, reason: `finish 指定的步驟 ${decision.reportStep} 不存在或沒有通過` });
           return;
         }
-        commit({ type: 'decide_processed', actionId, ok: true, decision: 'finish' });
+        // 要結案哪一步和處理標記寫在同一筆：當在中間時，接回還知道要驗收，不會多花一次 decide。
+        commit({ type: 'decide_processed', actionId, ok: true, decision: 'finish', finishStep: decision.reportStep });
         runAcceptance(decision.reportStep, step.messageFile);
         return;
       }
@@ -357,6 +385,11 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
   /** 所有檢查都過了才走到這裡。 */
   const finalize = (view: RunView): void => {
     const stepId = view.acceptance!.stepId;
+    // 驗收和交付之間可能隔著一次暫停，這段時間分支可能又動過。當初的驗收不能替現在的 HEAD 背書。
+    if (develop) {
+      const findings = developFindings(view);
+      if (findings.length > 0) { commit({ type: 'acceptance', stepId, passed: false, findings }); return; }
+    }
     const step = view.stepResults.get(stepId)!;
     let readOnly: 'unchanged' | 'changed_accepted' | 'not_git' | 'unverifiable' = 'not_git';
     if (view.baseline) {
@@ -509,7 +542,18 @@ ${stat}
     const stop = derivedStop(view);
     if (stop) { setState(stop.state, stop.reason, stop.detail); return stop.state; }
 
-    if (view.acceptance?.passed) { finalize(view); return read().state; }
+    if (view.acceptance?.passed) {
+      finalize(view);
+      const after = read();
+      if (after.state === 'running') continue; // 交付前發現分支又動過，回去重來。
+      return after.state;
+    }
+    if (view.pendingFinish) { runAcceptance(view.pendingFinish, view.stepResults.get(view.pendingFinish)?.messageFile ?? null); continue; }
+    if (!develop && view.plan?.reportStep && view.stepResults.get(view.plan.reportStep)?.passed && !view.acceptance) {
+      // 報告步驟通過、驗收還沒寫就當掉了。develop 要先跑測試，在下面處理。
+      runAcceptance(view.plan.reportStep, view.stepResults.get(view.plan.reportStep)!.messageFile);
+      continue;
+    }
 
     const { budget } = contract;
     if (activeMinutes(view, deps.now()) >= budget.maxWallMinutes) { setState('budget_exhausted', 'wall_clock', `已用滿 ${budget.maxWallMinutes} 分鐘`); return 'budget_exhausted'; }

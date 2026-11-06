@@ -36,7 +36,9 @@ export interface RunView {
   verification: { commit: string; passed: boolean; exitCode: number | null; timedOut: boolean; tail: string } | null;
   testFailures: number;
   /** kernel 自己跑的指令還沒回報結束。當掉後要先確認它停了才能動工作目錄。 */
-  openCheck: { pid: number; started: string; name: string } | null;
+  openCheck: { kind: 'setup' | 'test'; pid: number; started: string; name: string } | null;
+  /** decide 要結案，但驗收可能還沒寫（當在兩次寫入之間）。 */
+  pendingFinish: string | null;
   counters: { decides: number; workerSteps: number; inputTokens: number; cachedTokens: number; outputTokens: number; unknownUsage: number; quotaUnknownDispatches: number };
   failureStreak: { failureClass: FailureClass | null; count: number; detail: string };
   rejectedDecides: number;
@@ -57,7 +59,7 @@ export function replayJournal(events: KernelEvent[]): RunView {
     state: 'awaiting_approval', contractDigest: null, approvedDigest: null, versionId: null, runnerToken: null,
     baselineRecorded: false, baseline: null, actions: new Map(), plan: null, planCount: 0,
     stepResults: new Map(), stepOrder: [], acceptance: null, acceptanceFailures: 0,
-    workspaceReady: false, headCommit: null, verification: null, testFailures: 0, openCheck: null,
+    workspaceReady: false, headCommit: null, verification: null, testFailures: 0, openCheck: null, pendingFinish: null,
     counters: { decides: 0, workerSteps: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, unknownUsage: 0, quotaUnknownDispatches: 0 },
     failureStreak: { failureClass: null, count: 0, detail: '' }, rejectedDecides: 0, lastRejection: '', pendingStop: null, humanStop: null,
     overrides: new Set(), notes: [], activeMs: 0, activeSince: null, lastSeq: 0,
@@ -118,6 +120,7 @@ export function replayJournal(events: KernelEvent[]): RunView {
           view.rejectedDecides = 0;
           if (event.plan) { view.plan = event.plan; view.planCount += 1; view.acceptance = null; }
           if (event.stop) view.pendingStop = event.stop;
+          if (event.finishStep) view.pendingFinish = event.finishStep;
         } else if (a?.outcome && !a.outcome.ok) {
           fail(a.outcome.failureClass ?? 'process_failed', event.reason ?? a.outcome.detail);
         } else {
@@ -139,11 +142,13 @@ export function replayJournal(events: KernelEvent[]): RunView {
         break;
       }
       case 'acceptance':
+        view.pendingFinish = null;
         view.acceptance = { stepId: event.stepId, passed: event.passed, findings: event.findings };
         if (!event.passed) { view.plan = null; view.acceptanceFailures += 1; }
         break;
       case 'workspace_ready': view.workspaceReady = true; view.headCommit = event.head; break;
-      case 'check_started': view.openCheck = { pid: event.pid, started: event.started, name: event.name }; break;
+      // 同一個檢查會記兩次：spawn 完先記 pid，查到身分再補。
+      case 'check_started': view.openCheck = { kind: event.kind, pid: event.pid, started: event.started, name: event.name }; break;
       case 'check_finished': view.openCheck = null; break;
       case 'verification':
         view.verification = { commit: event.commit, passed: event.passed, exitCode: event.exitCode, timedOut: event.timedOut, tail: event.tail };

@@ -899,9 +899,10 @@ const rejecting = async promise => { try { await promise; return null; } catch (
 }
 {
   const logPath = join(mkdtempSync(join(tmpdir(), 'kernel-check-')), 'check.log');
-  const handle = await realWorkspace.startCheck('node -e "console.log(1);setInterval(()=>{},1000)"', WORK, logPath);
-  check('檢查指令記得下身分，當掉後才認得出來', handle.pid > 0 && !!handle.started, JSON.stringify({ pid: handle.pid, started: handle.started }));
-  const stopped = await realWorkspace.stopOrphanCheck({ pid: handle.pid, started: handle.started, name: handle.name });
+  const handle = realWorkspace.startCheck('node -e "console.log(1);setInterval(()=>{},1000)"', WORK, logPath);
+  const identity = await handle.identify();
+  check('檢查指令記得下身分，當掉後才認得出來', handle.pid > 0 && !!identity.started, JSON.stringify({ pid: handle.pid, ...identity }));
+  const stopped = await realWorkspace.stopOrphanCheck({ pid: handle.pid, ...identity });
   await handle.wait(3000);
   let alive = true;
   try { process.kill(handle.pid, 0); } catch { alive = false; }
@@ -1094,6 +1095,163 @@ const rejecting = async promise => { try { await promise; return null; } catch (
   check('commit 也拒絕碰主目錄', /不能是 repo 主目錄|linked worktree/.test(failing(realWorkspace.commit, mainTree, 'x')?.message ?? ''));
   check('prepare 可以重複呼叫', !failing(realWorkspace.prepare, spec));
   void contract; void store;
+}
+
+/* ---- develop：獨立稽核找到的問題 ---- */
+{
+  // F1：驗收通過後暫停，暫停期間分支又多了 commit。
+  const { store, contract, repo, spec } = newDevRun();
+  let moved = false;
+  const executor = new FakeExecutor(action => {
+    if (action.kind === 'decide') return ok(DEV_PLAN);
+    writeFileSync(join(action.cwd, 'feature.txt'), moved ? 'good\n' : 'good\n');
+    if (!moved) git(repo, 'commit', '-q', '--allow-empty', '-m', '別的 session 讓交付前暫停');
+    return ok(DEV_REPORT);
+  });
+  const paused = await runKernelLoop(devDeps(store, contract, executor));
+  check('稽核 F1 前提：驗收通過後因主目錄變動暫停', paused === 'waiting_human' && view(store).reason === 'worktree_changed' && view(store).acceptance?.passed === true, `${paused} ${view(store).reason}`);
+  moved = true;
+  git(spec.worktree, 'commit', '-q', '--allow-empty', '-m', '暫停期間多出來、沒測過的 commit');
+  const untested = git(spec.worktree, 'rev-parse', 'HEAD');
+  const digest = store.contractDigest();
+  store.append({ type: 'approved', contractDigest: digest, kind: 'continue', overrides: ['worktree_changed', 'repo_refs_changed'] });
+  store.append({ type: 'state', state: 'running' });
+  const resumed = await runKernelLoop(devDeps(store, contract, executor));
+  const verdict = existsSync(store.verdictPath) ? JSON.parse(readFileSync(store.verdictPath, 'utf8')) : null;
+  check('接回不沿用舊驗收：交付的 commit 一定是測過的那個', !verdict || verdict.develop?.testPassedOn === verdict.develop?.headCommit, JSON.stringify(verdict?.develop));
+  check('暫停期間多出來的 commit 會重測才交付', resumed === 'completed' && verdict?.develop?.headCommit === untested && store.read().some(event => event.type === 'verification' && event.commit === untested && event.passed), `${resumed} ${view(store).detail}`);
+}
+{
+  // F2：kill 失敗不能當成停了。
+  const { store, contract } = newDevRun({ testCommand: 'node -e "setInterval(()=>{},1000)"', budget: { maxActionMinutes: 0.01 } });
+  let realKill = null;
+  const workspace = { ...realWorkspace, startCheck(...args) { const handle = realWorkspace.startCheck(...args); realKill = handle.kill; return { ...handle, kill: async () => false }; } };
+  const state = await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n')), { workspace }));
+  await realKill?.();
+  check('檢查指令停不掉就是 stop_pending，不會當成逾時繼續', state === 'stop_pending' && view(store).reason === 'check_still_alive' && view(store).openCheck !== null && !view(store).verification, `${state} ${view(store).reason}`);
+}
+{
+  const { store, contract } = newDevRun({ testCommand: 'node -e "fs.writeFileSync(process.env.KERNEL_CANCEL_FILE,\'x\');setInterval(()=>{},1000)"' });
+  process.env.KERNEL_CANCEL_FILE = store.cancelPath;
+  let realKill = null;
+  const workspace = { ...realWorkspace, startCheck(...args) { const handle = realWorkspace.startCheck(...args); realKill = handle.kill; return { ...handle, kill: async () => false }; } };
+  const state = await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n')), { workspace }));
+  delete process.env.KERNEL_CANCEL_FILE;
+  await realKill?.();
+  check('取消時檢查指令停不掉，不能宣告已取消', state === 'stop_pending' && view(store).openCheck !== null, state);
+}
+{
+  const aliveUnknown = await realWorkspace.stopOrphanCheck({ pid: process.pid, started: '', name: '' });
+  check('pid 還在但當初沒查到身分：不能說它停了，也不能殺', aliveUnknown === false);
+  const deadUnknown = await realWorkspace.stopOrphanCheck({ pid: 999999, started: '', name: '' });
+  check('pid 已經不在就是停了', deadUnknown === true);
+  const { store, contract } = newDevRun();
+  store.append({ type: 'check_started', kind: 'setup', pid: process.pid, started: '', name: '' });
+  const state = await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n'))));
+  check('認不出身分要人確認，不會永遠卡在 stop_pending', state === 'needs_reconcile' && view(store).reason === 'check_identity_unknown', `${state} ${view(store).reason}`);
+  store.requestCancel();
+  await cancelWithoutRunner(store, new FakeExecutor(standard), 5, async () => false);
+  check('取消時認不出身分也是要人確認', view(store).state === 'needs_reconcile', view(store).state);
+}
+{
+  // F3：pid 要在查身分之前就落盤。
+  class IdentifyCrash extends Error {}
+  const { store, contract } = newDevRun({ setupCommand: 'node -e "setInterval(()=>{},1000)"' });
+  let realKill = null;
+  const workspace = { ...realWorkspace, startCheck(...args) { const handle = realWorkspace.startCheck(...args); realKill = handle.kill; return { ...handle, identify: async () => { throw new IdentifyCrash('查身分時當掉'); } }; } };
+  let thrown = null;
+  try { await rawLoop(devDeps(store, contract, new FakeExecutor(writes('good\n')), { workspace })); } catch (error) { thrown = error; }
+  await realKill?.();
+  check('檢查指令的 pid 在查身分之前就落盤', thrown instanceof IdentifyCrash && store.read().some(event => event.type === 'check_started' && event.pid > 0), thrown?.message);
+}
+{
+  // F4：commit hook 在檢查之後才加東西。
+  const repo = newRepo();
+  writeFileSync(join(repo, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\necho x > hook-added.txt\ngit add hook-added.txt\n', { mode: 0o755 });
+  const { store, contract } = newDevRun({ repo, allowedPaths: ['src'], testCommand: 'node -e "process.exit(0)"' });
+  const executor = new FakeExecutor(action => {
+    if (action.kind === 'decide') return ok(DEV_PLAN);
+    writeFileSync(join(action.cwd, 'src', 'b.txt'), 'b\n');
+    return ok(DEV_REPORT);
+  });
+  await runKernelLoop(devDeps(store, contract, executor));
+  check('commit hook 加進範圍外的檔案會被抓到', view(store).stepResults.get('p1-s1')?.findings.join().includes('hook-added.txt') && !existsSync(store.reportPath), JSON.stringify(view(store).stepResults.get('p1-s1')?.findings));
+}
+{
+  // F5：測試當掉留下副產物，接回要先清掉。
+  const { store, contract, spec } = newDevRun();
+  realWorkspace.prepare(spec);
+  store.append({ type: 'baseline', git: gitSnapshot(contract.workFolder) });
+  store.writeOutput('refs-baseline', realWorkspace.refs(spec).join('\n'));
+  store.append({ type: 'workspace_ready', head: spec.baseCommit });
+  writeFileSync(join(spec.worktree, 'junk.txt'), '上次測試留下的');
+  store.append({ type: 'check_started', kind: 'test', pid: 999999, started: 'x', name: 'x' });
+  let cleanWhenWorkerStarted = null;
+  const executor = new FakeExecutor(action => {
+    if (action.kind === 'decide') return ok(DEV_PLAN);
+    cleanWhenWorkerStarted = !existsSync(join(action.cwd, 'junk.txt'));
+    writeFileSync(join(action.cwd, 'feature.txt'), 'good\n');
+    return ok(DEV_REPORT);
+  });
+  const state = await runKernelLoop(devDeps(store, contract, executor, { workspace: { ...realWorkspace, stopOrphanCheck: async () => true } }));
+  check('測試當掉留下的副產物，接回時會先清掉', cleanWhenWorkerStarted === true && state === 'completed' && JSON.parse(readFileSync(store.verdictPath, 'utf8')).develop.changedFiles.join() === 'feature.txt', `${state} ${cleanWhenWorkerStarted} ${view(store).detail}`);
+}
+{
+  // F6：檢查指令也受總時間限制。
+  const { store, contract } = newDevRun({ setupCommand: 'node -e "setInterval(()=>{},1000)"', budget: { maxWallMinutes: 0.01, maxActionMinutes: 45 } });
+  const started = Date.now();
+  const state = await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n'))));
+  check('檢查指令也受總時間限制，不會等到單一 job 的時限', state === 'waiting_human' && view(store).detail.includes('逾時') && Date.now() - started < 30000, `${state} ${Date.now() - started}ms ${view(store).detail}`);
+}
+{
+  // F7：finish 當在處理標記和驗收之間。
+  class CrashOnAcceptance extends RunStore {
+    append(body) { if (body.type === 'acceptance') throw new Crash('驗收還沒寫'); return super.append(body); }
+  }
+  const { store, contract } = newRun();
+  let round = 0;
+  const first = new FakeExecutor(action => {
+    if (action.kind === 'decide') { round += 1; return ok(round === 1 ? JSON.stringify({ action: 'plan', steps: [{ id: 's1', title: 't', prompt: 'p' }] }) : JSON.stringify({ action: 'finish', report_step: 'p1-s1' })); }
+    return ok(REPORT);
+  });
+  let crashed = false;
+  try { await rawLoop(deps(new CrashOnAcceptance(store.dir), contract, first)); } catch (error) { crashed = error instanceof Crash; }
+  const second = new FakeExecutor(standard);
+  const state = await runKernelLoop(deps(store, contract, second));
+  check('finish 當在兩次寫入之間，接回會直接驗收，不多花 decide', crashed && state === 'completed' && second.started.length === 0, `${crashed} ${state} ${second.started.length}`);
+}
+{
+  class CrashOnAcceptance extends RunStore {
+    append(body) { if (body.type === 'acceptance') throw new Crash('驗收還沒寫'); return super.append(body); }
+  }
+  const { store, contract } = newRun();
+  let crashed = false;
+  try { await rawLoop(deps(new CrashOnAcceptance(store.dir), contract, new FakeExecutor(standard))); } catch (error) { crashed = error instanceof Crash; }
+  const second = new FakeExecutor(standard);
+  const state = await runKernelLoop(deps(store, contract, second));
+  check('報告步驟通過、驗收沒寫就當掉，接回直接驗收', crashed && state === 'completed' && second.started.length === 0, `${crashed} ${state} ${second.started.length}`);
+}
+{
+  // 稽核尚待確認：已 commit 的重新命名。
+  const { store, contract } = newDevRun({ allowedPaths: ['src'], testCommand: 'node -e "process.exit(0)"' });
+  const executor = new FakeExecutor(action => {
+    if (action.kind === 'decide') return ok(DEV_PLAN);
+    // 第一次失敗後 decide 會再派一次，那時檔案已經搬過了。
+    if (existsSync(join(action.cwd, 'README.md'))) {
+      git(action.cwd, 'mv', 'README.md', 'src/README.md');
+      git(action.cwd, 'commit', '-q', '-m', '把範圍外的檔案搬進範圍內');
+    }
+    return ok(DEV_REPORT);
+  });
+  await runKernelLoop(devDeps(store, contract, executor));
+  check('把範圍外的檔案搬進範圍內也會被抓到', view(store).stepResults.get('p1-s1')?.findings.join().includes('README.md'), JSON.stringify(view(store).stepResults.get('p1-s1')?.findings));
+}
+{
+  // 稽核尚待確認：worktree 的所有權。
+  const owner = newDevRun();
+  realWorkspace.prepare(owner.spec);
+  const other = newRepo();
+  check('別的 repo 的 linked worktree 也不能碰', /不屬於/.test(failing(realWorkspace.restore, { ...owner.spec, repoRoot: other })?.message ?? ''), failing(realWorkspace.restore, { ...owner.spec, repoRoot: other })?.message);
 }
 
 /* ---- 命名與依賴方向 ---- */
