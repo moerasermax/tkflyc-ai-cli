@@ -8,8 +8,19 @@
 
 ## [Unreleased]
 
+### 修復
+
+- **`ai-cli_kernel`：接回 run 時可能把舊的 `runner.json` 當成新 runner 已經起來。** runner 被殺會留下這個檔案，`spawnRunner` 一看到就回傳，呼叫端馬上查狀態會看到「runner 中斷了」，`wait` 也會提早返回。第一版就有這個競態，先前的測試只是時機剛好沒踩到，寫入模式的端到端測試才撞出來。改成比對內容，判斷基準也移到 spawn 之前。（Claude Opus 5.5）
+
 ### 新增
 
+- **`ai-cli_kernel` 能動手開發了：新範本 `develop`。** 每個 run 開自己的 git worktree 和分支，worker 在裡面改檔，kernel 自己跑呼叫端給的測試指令，最新 commit 通過才算完成。不合併、不 push。（Claude Opus 5.5）
+  - 為什麼沒有隔離：L2 只能換文字、不能跑測試，滿足不了開發；Docker 要處理訂閱 CLI 的登入憑證，也沒實測過。這是藍圖討論過的「明示未隔離」模式，所以委任書要寫明範圍、預算、期限，核准時要明確承認（`--acknowledge-unisolated`）。worker 權限等於使用者本人，風險和直接用 `run` 派寫入工作一樣。
+  - 為什麼查完才 commit：範圍外的改動不會進分支。測試結果綁定 commit，HEAD 一動就失效，所以模型沒辦法拿舊結果結案。
+  - 為什麼測試要自己跑：模型說測過了不算數。
+  - 每一步可以挑不同模型（`workerModels`），例如一個寫、另一個唯讀審查，全部算進預算和日誌。worker 自己再呼叫 ai-cli 是刻意不開的。
+  - 第一次真實 run 抓到兩個 stub 測不出來的問題，已修：審查跑在測試之前，報告因此自相矛盾；唯讀審查者沒有 shell，只能去翻 `.git`，現在由 kernel 直接附 diff。
+  - 已知限制：worker 會載入使用者完整的 CLI 設定，包含 MCP server。實測在沒登記過的 repo 上，planner MCP 自動註冊了專案，並在主目錄寫了 `.planner-id`。只驗過一台 Windows。
 - **`ai-cli_kernel`：第一版受監督唯讀 agent（L1）。** 給目標和委任書，它自己規劃、派唯讀 worker、驗收，做到有證據的結果；當掉可以接回，已完成的步驟不會重做。既有 `run`／`exec` 行為不變，`core/`、`agents/`、`models/`、`plugins/` 沒有改動，也不能反過來依賴它（有測試釘住）。入口是 `ai-cli kernel` 子命令，MCP 工具 `ai-cli_kernel_*` 預設關閉，`ai-cli kernel enable` 後才出現。（@moerasermax）
   - 為什麼模型只提案：迴圈由確定性程式控制，模型只回 JSON 計畫，每一步能不能做由閘決定，所以 worker 輸出裡夾帶的指令沒有授權效力。
   - 為什麼先記意圖：有意圖、沒結果的動作分不出做了沒，不能直接重跑。用 marker 到 JobStore 查，查到就接回，確認沒啟動才重派，查不了就停下來等人對帳。

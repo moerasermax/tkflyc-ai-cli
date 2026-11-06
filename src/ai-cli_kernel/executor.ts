@@ -3,7 +3,7 @@
  * JobStore 全部照原本的路走，kernel 不另開旁路。
  */
 import { existsSync, openSync, readdirSync, readSync, closeSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { FileProcessService } from '../core/file-process-service.js';
 import { jobStateDir, lookupIdentities } from '../core/live-jobs.js';
 import { mayBeAlive, readJobMetas, sameIdentity } from '../core/job-store.js';
@@ -32,10 +32,18 @@ export class FileJobExecutor implements KernelExecutor {
   private readonly service = new FileProcessService();
 
   async start(action: ActionSpec, contract: KernelContract): Promise<JobRef> {
-    // decide 只需要產出文字；worker 多一個讀檔。兩者都走 strict builder，沒有 strict builder 的 agent 會被拒絕。
-    const capabilities = action.kind === 'decide' ? ['analysis/produce'] : ['fs/read', 'analysis/produce'];
+    // decide 只需要產出文字；唯讀 worker 多一個讀檔。兩者都走 strict builder，沒有 strict builder 的 agent 會被拒絕。
+    const write = action.kind === 'worker' && action.mode === 'write';
+    const cwd = action.cwd ?? contract.workFolder;
+    if (write) {
+      // 不帶 capabilities 就是全權限。這是唯一會走到全權限的路，條件要寫死：一定是 develop 範本，而且在它自己的 worktree 裡。
+      if (!contract.develop) throw new Error(`範本 ${contract.template} 不能派會寫檔的 worker`);
+      const within = relative(contract.develop.worktree, cwd);
+      if (within.startsWith('..') || isAbsolute(within)) throw new Error(`會寫檔的 worker 只能在 ${contract.develop.worktree} 裡執行，收到 ${cwd}`);
+    }
+    const capabilities = write ? undefined : action.kind === 'decide' ? ['analysis/produce'] : ['fs/read', 'analysis/produce'];
     const started = await this.service.startProcess({
-      prompt: action.prompt, cwd: contract.workFolder, model: action.model, capabilities,
+      prompt: action.prompt, cwd, model: action.model, ...(capabilities ? { capabilities } : {}),
       ...(action.effort ? { reasoning_effort: action.effort } : {}),
     }) as { pid: number; jobId?: string };
     if (!started.jobId) throw new Error(`${action.model} 沒有可接回的 jobId，kernel 不能追蹤它`);

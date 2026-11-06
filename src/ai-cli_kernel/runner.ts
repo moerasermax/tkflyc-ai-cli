@@ -11,6 +11,7 @@ import { boundaryStatus } from './probe.js';
 import { acquireRunnerLock, releaseRunnerLock } from './runner-lock.js';
 import { agentForModel, kernelVersionId, readQuota } from './runtime.js';
 import { gitSnapshot } from './verdict.js';
+import { realWorkspace } from './workspace.js';
 import { isTerminalState } from './types.js';
 
 async function main(): Promise<void> {
@@ -24,7 +25,7 @@ async function main(): Promise<void> {
       store, contract: store.readContract(), executor: new FileJobExecutor(),
       boundary: async agent => boundaryStatus(agent), quota: readQuota, agentFor: agentForModel,
       versionId: kernelVersionId, snapshot: gitSnapshot, now: () => Date.now(),
-      sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), pollMs: 2000, killConfirmMs: 20000, pid: process.pid,
+      sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), pollMs: 2000, killConfirmMs: 20000, pid: process.pid, workspace: realWorkspace,
     });
     if (isTerminalState(state)) releaseActiveLock(store.runId);
   } catch (error) {

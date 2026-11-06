@@ -4,30 +4,41 @@
  */
 import { readFileSync } from 'node:fs';
 import {
-  aiCliKernelApprove, aiCliKernelCancel, aiCliKernelEnabled, aiCliKernelProbe, aiCliKernelResult, aiCliKernelSetEnabled,
+  aiCliKernelApprove, aiCliKernelCancel, aiCliKernelCleanup, aiCliKernelEnabled, aiCliKernelProbe, aiCliKernelResult, aiCliKernelSetEnabled,
   aiCliKernelStart, aiCliKernelStatus, aiCliKernelTemplates, aiCliKernelWait, type KernelRunStatus,
 } from './api.js';
 
 export const KERNEL_HELP_TEXT = `Usage: ai-cli kernel <動作> [選項]
 
-ai-cli_kernel：給目標和委任書，它自己規劃、派唯讀 worker、驗收，做到有證據的結果。
-第一版只跑唯讀任務，不會改你的檔案。
+ai-cli_kernel：給目標和委任書，它自己規劃、派 worker、驗收，做到有證據的結果。
+readonly-audit（預設）只讀不改。develop 會在獨立的 worktree 和分支裡改程式、跑測試，不合併也不 push；
+它的 worker 權限等於你本人，也會載入你完整的 CLI 設定，沒有隔離。
 
 第一次使用：
   ai-cli kernel probe --agent codex      確認這支 CLI 的唯讀限制真的有效（會用掉一點額度）
 
 動作：
   start --goal <文字> --cwd <路徑>       建立委任書，先不執行
-      [--goal-file <檔案>] [--template readonly-audit]
+      [--goal-file <檔案>] [--template readonly-audit|develop]
       [--model <模型>] [--effort <等級>] [--decide-model <模型>] [--decide-effort <等級>]
+      [--worker-models <a,b>]            另外允許 decide 挑選的 worker 模型
       [--max-steps <數>] [--max-decides <數>] [--max-minutes <數>] [--max-tokens <數>]
       [--allow-unverified]               探針沒過也照跑，標籤會寫「未驗證」
-  approve <run> [--note <文字>] [--reconcile abandon]
-                                         核准委任書，或接回停住的 run
+    develop 範本：
+      --test <指令>                      kernel 自己跑的驗收指令（必填），模型不能改
+      [--setup <指令>]                   新 worktree 要先跑的準備指令，例如 npm ci
+      [--allow-path <a,b>]               只能改這些路徑（相對 --cwd），不給就是整個 repo
+      [--mandate-hours <數>]             委任書幾小時後失效（預設 24）
+      [--max-test-failures <數>]         測試失敗幾次就停（預設 4）
+  approve <run> [--note <文字>] [--reconcile abandon] [--acknowledge-unisolated]
+                                         核准委任書，或接回停住的 run。
+                                         develop 第一次核准要加 --acknowledge-unisolated：
+                                         worker 權限等於你本人，不是隔離環境
   wait <run> [--timeout <秒>]            等它停下來（預設 600 秒，逾時不算錯誤）
   status [run]                           看狀態；不給 run 就列出最近的
   result <run>                           看最終報告與裁決
   cancel <run>                           取消，並確認程序真的停了
+  cleanup <run>                          清掉 develop 的 worktree；分支沒合併就留著
   probe --agent <codex|claude|grok>      跑權限邊界探針
   templates                              列出可用範本
   enable | disable                       開關 MCP 的 ai-cli_kernel_* 工具（CLI 不受影響）
@@ -65,6 +76,15 @@ function numberFlag(flags: Map<string, string | true>, name: string): number | u
   return parsed;
 }
 
+function listFlag(flags: Map<string, string | true>, name: string): string[] | undefined {
+  return stringFlag(flags, name)?.split(',').map(item => item.trim()).filter(Boolean);
+}
+
+/** 沒給的欄位不能傳 undefined：readonly-audit 會把「有這個欄位」當成用錯範本。 */
+function optionalFields<T extends object>(fields: T): Partial<T> {
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) as Partial<T>;
+}
+
 const STEP_LABEL = { passed: '通過', failed: '未通過', running: '執行中', pending: '等待' } as const;
 
 export function formatStatus(status: KernelRunStatus): string {
@@ -77,7 +97,16 @@ export function formatStatus(status: KernelRunStatus): string {
     `目錄     ${status.workFolder}`,
     `範本     ${status.template}`,
     `模型     決策 ${status.models.decide.model}（${status.models.decide.effort}）、worker ${status.models.worker.model}（${status.models.worker.effort}）`,
+    ...(status.models.allowedWorkers.length > 1 ? [`可用模型 ${status.models.allowedWorkers.join('、')}`] : []),
     `權限     ${status.boundaryLabel}${Object.keys(status.boundary).length ? `（${Object.entries(status.boundary).map(([agent, state]) => `${agent}: ${state}`).join('、')}）` : ''}`,
+    ...(status.develop ? [
+      `來源     ${status.develop.repoRoot}（這裡不會被改動）`,
+      `分支     ${status.develop.branch}（基準 ${status.develop.baseCommit.slice(0, 10)}）`,
+      `測試     ${status.develop.testCommand}${status.develop.setupCommand ? `（先跑 ${status.develop.setupCommand}）` : ''}${status.develop.verifiedCommit ? `，${status.develop.verifiedCommit.slice(0, 10)} 已通過` : ''}${status.develop.testFailures ? `，失敗 ${status.develop.testFailures} 次` : ''}`,
+      `範圍     ${status.develop.allowedPaths.length ? status.develop.allowedPaths.join('、') : '整個 repo（沒有限制路徑）'}`,
+      `期限     委任書到 ${status.develop.expiresAt} 失效`,
+      ...(status.develop.dirtyAtStart ? [`注意     主目錄有 ${status.develop.dirtyAtStart} 筆未提交的變更，不會帶進 worktree`] : []),
+    ] : []),
     `進度     決策 ${p.decides.used}/${p.decides.max}、worker ${p.workerSteps.used}/${p.workerSteps.max}、input tokens ${p.inputTokens.used.toLocaleString('en-US')}/${p.inputTokens.max.toLocaleString('en-US')}${p.unknownUsage ? `（另有 ${p.unknownUsage} 個 job 量不到）` : ''}、執行 ${p.activeMinutes.used}/${p.activeMinutes.max} 分鐘`,
   ];
   if (status.steps.length > 0) {
@@ -111,18 +140,23 @@ export async function runKernelCli(argv: string[], io: Io): Promise<number> {
         const budget = Object.fromEntries(Object.entries({
           maxWorkerSteps: numberFlag(flags, 'max-steps'), maxDecides: numberFlag(flags, 'max-decides'),
           maxWallMinutes: numberFlag(flags, 'max-minutes'), maxInputTokens: numberFlag(flags, 'max-tokens'),
+          maxTestFailures: numberFlag(flags, 'max-test-failures'),
         }).filter(([, value]) => value !== undefined));
         const status = await aiCliKernelStart({
           goal, workFolder: stringFlag(flags, 'cwd') ?? process.cwd(), template: stringFlag(flags, 'template'),
           model: stringFlag(flags, 'model'), effort: stringFlag(flags, 'effort'),
           decideModel: stringFlag(flags, 'decide-model'), decideEffort: stringFlag(flags, 'decide-effort'),
           budget, allowUnverifiedBoundary: flags.get('allow-unverified') === true,
+          ...optionalFields({
+            workerModels: listFlag(flags, 'worker-models'), testCommand: stringFlag(flags, 'test'), setupCommand: stringFlag(flags, 'setup'),
+            allowedPaths: listFlag(flags, 'allow-path'), mandateHours: numberFlag(flags, 'mandate-hours'),
+          }),
         });
         emit(status, formatStatus(status));
         return 0;
       }
       case 'approve': {
-        const status = await aiCliKernelApprove({ runId: needRun(), note: stringFlag(flags, 'note'), reconcile: stringFlag(flags, 'reconcile') });
+        const status = await aiCliKernelApprove({ runId: needRun(), note: stringFlag(flags, 'note'), reconcile: stringFlag(flags, 'reconcile'), acknowledgeUnisolated: flags.get('acknowledge-unisolated') === true });
         emit(status, formatStatus(status));
         return 0;
       }
@@ -150,6 +184,11 @@ export async function runKernelCli(argv: string[], io: Io): Promise<number> {
         const status = await aiCliKernelCancel({ runId: needRun() });
         emit(status, formatStatus(status));
         return 0;
+      }
+      case 'cleanup': {
+        const result = await aiCliKernelCleanup({ runId: needRun() });
+        emit(result, `${result.detail}\n`);
+        return result.worktreeRemoved ? 0 : 1;
       }
       case 'probe': {
         const agent = stringFlag(flags, 'agent');

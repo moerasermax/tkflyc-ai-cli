@@ -3333,5 +3333,213 @@
     "from": "if (next.status !== 'UNKNOWN' || !previous || previous.status === 'UNKNOWN') return next;\n  return previous;",
     "to": "return next;",
     "expect": "沒結論的結果不能蓋掉 PASS"
+  },
+  {
+    "name": "kernel develop：唯讀範本也能派寫入 worker",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "if (!contract.develop) throw new Error(`範本 ${contract.template} 不能派會寫檔的 worker`);",
+    "to": "",
+    "expect": "唯讀範本的委任書不可能派出會寫檔的 worker"
+  },
+  {
+    "name": "kernel develop：寫入 worker 可以跑在 worktree 外",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "if (within.startsWith('..') || isAbsolute(within)) throw",
+    "to": "if (false as boolean) throw",
+    "expect": "會寫檔的 worker 不能跑在 worktree 外面"
+  },
+  {
+    "name": "kernel develop：所有 job 都拿全權限",
+    "script": "verify-ai-cli_kernel-e2e.mjs",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "const capabilities = write ? undefined : action.kind === 'decide' ? ['analysis/produce'] : ['fs/read', 'analysis/produce'];",
+    "to": "const capabilities = undefined as string[] | undefined;",
+    "expect": "只有 write 步驟拿到全權限旗標"
+  },
+  {
+    "name": "kernel develop：寫入步驟拿不到寫入權",
+    "script": "verify-ai-cli_kernel-e2e.mjs",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "const capabilities = write ? undefined : action.kind === 'decide'",
+    "to": "const capabilities = action.kind === 'decide'",
+    "expect": "只有 write 步驟拿到全權限旗標"
+  },
+  {
+    "name": "kernel develop：唯讀範本的計畫可以要求寫入",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "if (step.mode === 'write' && !contract.develop) throw new Error(`範本 ${contract.template} 不能派會寫檔的步驟`);",
+    "to": "",
+    "expect": "唯讀範本不能提會寫檔的步驟"
+  },
+  {
+    "name": "kernel develop：驗收不看測試結果",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (!view.verification?.passed || view.verification.commit !== state.head) findings.push(",
+    "to": "if (false as boolean) findings.push(",
+    "expect": "測試沒過時 decide 硬要結案也過不了"
+  },
+  {
+    "name": "kernel develop：測試失敗也當通過",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "passed: result.exitCode === 0 && !result.timedOut && !moved",
+    "to": "passed: true",
+    "expect": "模型說做完了但測試沒過，不算完成"
+  },
+  {
+    "name": "kernel develop：不查改動範圍",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (outside.length > 0) return { passed: false",
+    "to": "if (false as boolean) return { passed: false",
+    "expect": "改到範圍外的路徑不算通過"
+  },
+  {
+    "name": "kernel develop：沒改動也算完成",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (state.dirty.length === 0 && state.head === view.headCommit) return { passed: false",
+    "to": "if (false as boolean) return { passed: false",
+    "expect": "worker 說做完了但沒有改動，不算通過"
+  },
+  {
+    "name": "kernel develop：已 commit 的被當成沒改動",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (state.dirty.length === 0) return { passed: true, commit: state.head };",
+    "to": "if (state.dirty.length === 0) return { passed: false, failureClass: 'check_failed', findings: ['沒有改動'] };",
+    "expect": "接回後不會把已經 commit 的誤判成沒改動"
+  },
+  {
+    "name": "kernel develop：worker 還活著就 commit",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (develop && record.spec.mode === 'write' && record.job && !await confirmWorkerGone(record.job)) {",
+    "to": "if (develop && record.spec.mode === 'write' && record.job && (false as boolean)) {",
+    "expect": "worker 回報結束但程序還在，不會 commit"
+  },
+  {
+    "name": "kernel develop：worker 離開分支不管",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (state.branch !== develop!.branch) return { passed: false",
+    "to": "if (false as boolean) return { passed: false",
+    "expect": "worker 切換分支會被抓到"
+  },
+  {
+    "name": "kernel develop：worker 改寫歷史不管",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (!state.ancestorOk) return { passed: false",
+    "to": "if (false as boolean) return { passed: false",
+    "expect": "worker 改寫歷史會被抓到"
+  },
+  {
+    "name": "kernel develop：唯讀步驟改檔不管",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (record.spec.cleanAtStart && (state.dirty.length > 0 || state.head !== view.headCommit)) {",
+    "to": "if (false as boolean) {",
+    "expect": "唯讀步驟改了檔案會被抓到"
+  },
+  {
+    "name": "kernel develop：不查 ref 變動",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "return [...new Set([...[...before].filter(line => !after.has(line)), ...now.filter(line => !before.has(line))].map(name))];",
+    "to": "return [];",
+    "expect": "工作樹沒變但 ref 動了也抓得到"
+  },
+  {
+    "name": "kernel develop：委任書過期照派",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (deps.now() > Date.parse(develop.expiresAt) && !view.overrides.has('mandate_expired')) {",
+    "to": "if (false as boolean) {",
+    "expect": "委任書過期就不再派 worker"
+  },
+  {
+    "name": "kernel develop：測試副產物不還原",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "try { ws!.restore(develop!); }",
+    "to": "try { /* 不還原 */ }",
+    "expect": "測試的副產物不會混進分支"
+  },
+  {
+    "name": "kernel develop：準備指令的產物混進交付",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (ready.dirty.length > 0) {",
+    "to": "if (false as boolean) {",
+    "expect": "準備指令留下沒被忽略的檔案就停下來"
+  },
+  {
+    "name": "kernel develop：不理會上次留下的檢查指令",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (develop && !await clearOrphanCheck(view)) return read().state;",
+    "to": "",
+    "expect": "上次的檢查指令還活著就不動工作目錄"
+  },
+  {
+    "name": "kernel develop：未隔離的 run 也要過探針",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (!develop && !contract.allowUnverifiedBoundary) {",
+    "to": "if (!contract.allowUnverifiedBoundary) {",
+    "expect": "明示未隔離的 run 不靠探針放行"
+  },
+  {
+    "name": "kernel develop：可以動到使用者的主目錄",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "from": "function assertOwnWorktree(spec: DevelopSpec): void {",
+    "to": "function assertOwnWorktree(spec: DevelopSpec): void {\n  if (spec) return;",
+    "expect": "還原工作目錄的操作拒絕碰主目錄"
+  },
+  {
+    "name": "kernel develop：不用承認未隔離就能核准",
+    "script": "verify-ai-cli_kernel-e2e.mjs",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "if (input.acknowledgeUnisolated !== true) throw new Error(",
+    "to": "if (false as boolean) throw new Error(",
+    "expect": "沒有明確承認未隔離就不能核准"
+  },
+  {
+    "name": "kernel develop：舊 runner.json 被當成新 runner",
+    "script": "verify-ai-cli_kernel-e2e.mjs",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "if ((holder !== null && holder !== staleHolder) || replayJournal(store.read()).lastSeq > startSeq) return;",
+    "to": "if (holder !== null || replayJournal(store.read()).lastSeq > startSeq) return;",
+    "expect": "接回時等到新 runner 起來才回報"
+  },
+  {
+    "name": "kernel develop：審查前不跑測試",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (view.plan && (reportPassed || !upcoming || upcoming.mode !== 'write')) {",
+    "to": "if (view.plan && (reportPassed || !upcoming)) {",
+    "expect": "測試沒過就不浪費額度派審查"
+  },
+  {
+    "name": "kernel develop：連續寫入也跑測試",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (view.plan && (reportPassed || !upcoming || upcoming.mode !== 'write')) {",
+    "to": "if (view.plan) {",
+    "expect": "連續寫入時，改到一半的狀態不跑測試"
+  },
+  {
+    "name": "kernel develop：審查者拿不到 diff",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "const review = develop && mode !== 'write' ? { verification: view.verification, diff: ws!.diffText(develop, REVIEW_DIFF_CHARS) } : undefined;",
+    "to": "const review = undefined;",
+    "expect": "審查者拿到 kernel 產生的 diff"
   }
 ]

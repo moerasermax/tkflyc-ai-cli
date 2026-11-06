@@ -13,22 +13,27 @@ const RUN_ID = { type: 'string', description: 'run id，例如 kr-20261106-01234
 const TOOLS = [
   {
     name: 'ai-cli_kernel_start',
-    description: 'Create a mandate for a supervised read-only agent run. Nothing executes until ai-cli_kernel_approve. The kernel then plans with a tool-less model call, dispatches read-only workers, verifies the deliverable with deterministic checks (including that cited path:line references exist), and recovers across restarts. Tool-limited, not isolated.',
+    description: 'Create a mandate for a supervised agent run. Nothing executes until ai-cli_kernel_approve. The kernel plans with a tool-less model call, dispatches workers through ai-cli, verifies the deliverable with deterministic checks, and recovers across restarts. Template readonly-audit (default) is read-only: tool-limited, not isolated. Template develop can change code: workers run with full user permissions in a dedicated git worktree and branch, the kernel itself runs testCommand and only accepts a commit that passes it, and it never merges or pushes. develop is NOT isolated: show the mandate to the user first.',
     inputSchema: {
       type: 'object',
       properties: {
         goal: { type: 'string', description: '要達成什麼。' },
         workFolder: { type: 'string', description: '工作目錄的絕對路徑。' },
-        template: { type: 'string', description: '範本，預設 readonly-audit。' },
+        template: { type: 'string', enum: ['readonly-audit', 'develop'], description: '範本，預設 readonly-audit。develop 會改程式，未隔離。' },
         model: { type: 'string', description: 'worker 模型，預設 gpt-6.1-sol。' },
         effort: { type: 'string', description: 'worker effort，預設 medium。' },
         decideModel: { type: 'string', description: '決策模型，預設同 worker。' },
         decideEffort: { type: 'string', description: '決策 effort，預設同 worker。' },
+        workerModels: { type: 'array', items: { type: 'string' }, description: '另外允許 decide 每一步挑選的 worker 模型，例如一個寫、另一個唯讀審查。' },
+        testCommand: { type: 'string', description: 'develop 必填：kernel 自己跑的驗收指令，模型不能改。' },
+        setupCommand: { type: 'string', description: 'develop：新 worktree 要先跑的準備指令，例如 npm ci。新 worktree 沒有 node_modules。' },
+        allowedPaths: { type: 'array', items: { type: 'string' }, description: 'develop：只能改這些路徑（相對 workFolder）。不給就是整個 repo。' },
+        mandateHours: { type: 'number', description: 'develop：委任書幾小時後失效，預設 24。' },
         budget: {
           type: 'object',
           properties: {
             maxWorkerSteps: { type: 'number' }, maxDecides: { type: 'number' }, maxWallMinutes: { type: 'number' }, maxActionMinutes: { type: 'number' },
-            maxInputTokens: { type: 'number' }, quotaUnknownMaxDispatches: { type: 'number' }, minQuotaRemainingPercent: { type: 'number' },
+            maxInputTokens: { type: 'number' }, quotaUnknownMaxDispatches: { type: 'number' }, minQuotaRemainingPercent: { type: 'number' }, maxTestFailures: { type: 'number' },
           },
         },
         allowUnverifiedBoundary: { type: 'boolean', description: '只有明確傳 true 才生效：權限探針沒過也照跑，標籤會寫未驗證。' },
@@ -45,6 +50,7 @@ const TOOLS = [
         runId: RUN_ID,
         note: { type: 'string', description: '給決策模型的補充或問題的答案。' },
         reconcile: { type: 'string', enum: ['abandon'], description: '狀態是 needs_reconcile 時，確認後放棄未知動作的結果。' },
+        acknowledgeUnisolated: { type: 'boolean', description: 'develop 第一次核准必須傳 true：使用者知道 worker 權限等於本人、不是隔離環境。沒有使用者同意不可以傳。' },
       },
       required: ['runId'],
     },
@@ -85,6 +91,13 @@ function requireString(args: Record<string, unknown>, name: string): string {
   return value;
 }
 
+function optionalStrings(args: Record<string, unknown>, name: string): string[] | undefined {
+  const value = args[name];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) throw new Error(`${name} 必須是字串陣列`);
+  return value as string[];
+}
+
 function optionalString(args: Record<string, unknown>, name: string): string | undefined {
   const value = args[name];
   if (value === undefined) return undefined;
@@ -102,9 +115,13 @@ export async function aiCliKernelHandleTool(name: string, args: Record<string, u
         decideModel: optionalString(args, 'decideModel'), decideEffort: optionalString(args, 'decideEffort'),
         ...(args.budget && typeof args.budget === 'object' ? { budget: args.budget as Record<string, number> } : {}),
         allowUnverifiedBoundary: args.allowUnverifiedBoundary === true,
+        ...Object.fromEntries(Object.entries({
+          workerModels: optionalStrings(args, 'workerModels'), testCommand: optionalString(args, 'testCommand'), setupCommand: optionalString(args, 'setupCommand'),
+          allowedPaths: optionalStrings(args, 'allowedPaths'), mandateHours: typeof args.mandateHours === 'number' ? args.mandateHours : undefined,
+        }).filter(([, value]) => value !== undefined)),
       });
     case 'ai-cli_kernel_approve':
-      return aiCliKernelApprove({ runId: requireString(args, 'runId'), note: optionalString(args, 'note'), reconcile: optionalString(args, 'reconcile') });
+      return aiCliKernelApprove({ runId: requireString(args, 'runId'), note: optionalString(args, 'note'), reconcile: optionalString(args, 'reconcile'), acknowledgeUnisolated: args.acknowledgeUnisolated === true });
     case 'ai-cli_kernel_status':
       return aiCliKernelStatus({ runId: optionalString(args, 'runId') });
     case 'ai-cli_kernel_result':

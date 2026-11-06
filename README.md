@@ -609,6 +609,8 @@ ai-cli kernel wait <run>
 ai-cli kernel result <run>
 ```
 
+Two templates exist. `readonly-audit` (default) only reads. `develop` changes code: each run gets its own git worktree and branch, the kernel itself runs your test command and only accepts a commit that passes it, and it never merges or pushes. Workers in `develop` run with your full user permissions and your full CLI configuration, including MCP servers. **It is not isolated**, and approving it requires an explicit acknowledgement. Only use it on projects you trust.
+
 The MCP tools (`ai-cli_kernel_*`) are off by default; `ai-cli kernel enable` turns them on. Existing tools are unaffected. Docs (Traditional Chinese): [tutorial](docs/ai-cli_kernel/教學手冊.md), [technical manual](docs/ai-cli_kernel/技術手冊.md).
 
 ## Adding an AI agent

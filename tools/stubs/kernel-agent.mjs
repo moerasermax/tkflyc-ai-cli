@@ -15,8 +15,12 @@ if (!process.argv.includes('exec')) process.exit(1);
 let prompt = '';
 for await (const chunk of process.stdin) prompt += chunk;
 const mode = process.env.KERNEL_STUB_MODE ?? 'normal';
-const kind = prompt.includes('K-probe-') ? 'probe' : prompt.includes('你是 ai-cli_kernel 的決策者') ? 'decide' : 'worker';
-if (process.env.KERNEL_STUB_LOG) appendFileSync(process.env.KERNEL_STUB_LOG, `${kind}\n`);
+const kind = prompt.includes('K-probe-') ? 'probe' : prompt.includes('你是 ai-cli_kernel 的決策者') ? 'decide' : prompt.includes('開發工作者') ? 'write' : 'worker';
+if (process.env.KERNEL_STUB_LOG) {
+  appendFileSync(process.env.KERNEL_STUB_LOG, `${kind}\n`);
+  // 記下實際拿到的權限旗標：寫入權是不是真的只給了 write，要看這裡，不是看 kernel 怎麼說。
+  appendFileSync(process.env.KERNEL_STUB_LOG, `args:${kind}:${process.argv.includes('--dangerously-bypass-approvals-and-sandbox') ? 'bypass' : 'strict'}\n`);
+}
 
 const emit = value => console.log(JSON.stringify(value));
 const finish = text => {
@@ -40,6 +44,15 @@ if (kind === 'probe') {
   else if (mode === 'probe-patch-only') { refuse(patch); refuse(patch); refuse(patch); refuse(patch); }
   else if (mode !== 'probe-silent') { refuse(patch); refuse(shell('probe-shell.txt')); refuse(shell('probe-node.txt')); refuse(shell(prompt.match(/outside-[0-9a-f]+\.txt/)?.[0] ?? 'outside.txt')); }
   finish('全部都沒有成功。\nPROBE_DONE');
+} else if (kind === 'write') {
+  await new Promise(resolve => setTimeout(resolve, Number(process.env.KERNEL_STUB_DELAY_MS ?? 0)));
+  // dev-fix：第一次寫出會讓測試失敗的內容，第二次才修好。
+  const first = mode === 'dev-fix' && !existsSync('feature.txt');
+  if (mode === 'dev-out-of-scope') writeFileSync('outside.txt', 'x');
+  else if (mode !== 'dev-no-change') writeFileSync('feature.txt', first ? 'bad\n' : 'good\n');
+  finish('## 結論\n這是 stub 改出來的結果，內容要足夠通過長度檢查，所以多寫幾句。\n## 改動\n加了 feature.txt。\n## 尚待確認\n無');
+} else if (kind === 'decide' && prompt.includes('kernel 為這個任務開的 worktree')) {
+  finish(JSON.stringify({ action: 'plan', reason: '一步就夠', steps: [{ id: 's1', title: '加功能', prompt: '加 feature.txt', mode: 'write' }], report_step: 's1' }));
 } else if (kind === 'decide') {
   finish(JSON.stringify({ action: 'plan', reason: '一步就夠', steps: [{ id: 's1', title: '讀 README', prompt: '讀 README.md 並回報' }], report_step: 's1' }));
 } else {

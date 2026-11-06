@@ -10,7 +10,7 @@ import { digestText } from './journal.js';
 
 const WATCHED = [
   '../core/job-store.js', '../core/job-runner.js', '../core/file-process-service.js', '../core/command-builder.js',
-  './loop.js', './runner.js', './executor.js', './journal.js', './replay.js', './verdict.js', './plan.js', './probe.js',
+  './loop.js', './runner.js', './executor.js', './journal.js', './replay.js', './verdict.js', './plan.js', './probe.js', './workspace.js',
 ];
 
 /** dist 被原地重建時這個值會變。查不到的檔案也算進指紋，不會誤判成沒變。 */

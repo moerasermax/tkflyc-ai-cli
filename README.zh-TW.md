@@ -416,6 +416,8 @@ ai-cli kernel wait <run>
 ai-cli kernel result <run>
 ```
 
+有兩個範本。`readonly-audit`（預設）只讀不改。`develop` 會改程式：每個 run 有自己的 git worktree 和分支，kernel 自己跑你給的測試指令，通過才算完成，不會合併也不會 push。`develop` 的 worker 權限等於你本人，也會載入你完整的 CLI 設定，包含 MCP server。**它沒有隔離**，核准時要明確承認，只用在你信任的專案。
+
 MCP 工具 `ai-cli_kernel_*` 預設關閉，`ai-cli kernel enable` 後才出現，原生工具不受影響。手把手教學看[教學手冊](docs/ai-cli_kernel/教學手冊.md)，內部設計看[技術手冊](docs/ai-cli_kernel/技術手冊.md)。
 
 ## 新增一個 AI agent

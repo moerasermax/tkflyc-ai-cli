@@ -28,6 +28,15 @@ export interface RunView {
   stepOrder: string[];
   acceptance: { stepId: string; passed: boolean; findings: string[] } | null;
   acceptanceFailures: number;
+  /** develop：worktree 開好、準備指令也跑完了。 */
+  workspaceReady: boolean;
+  /** develop：kernel 最後確認過的 commit。worker 的改動是相對它算的。 */
+  headCommit: string | null;
+  /** develop：最新一次測試。只有 commit 等於目前 HEAD 才算數。 */
+  verification: { commit: string; passed: boolean; exitCode: number | null; timedOut: boolean; tail: string } | null;
+  testFailures: number;
+  /** kernel 自己跑的指令還沒回報結束。當掉後要先確認它停了才能動工作目錄。 */
+  openCheck: { pid: number; started: string; name: string } | null;
   counters: { decides: number; workerSteps: number; inputTokens: number; cachedTokens: number; outputTokens: number; unknownUsage: number; quotaUnknownDispatches: number };
   failureStreak: { failureClass: FailureClass | null; count: number; detail: string };
   rejectedDecides: number;
@@ -48,6 +57,7 @@ export function replayJournal(events: KernelEvent[]): RunView {
     state: 'awaiting_approval', contractDigest: null, approvedDigest: null, versionId: null, runnerToken: null,
     baselineRecorded: false, baseline: null, actions: new Map(), plan: null, planCount: 0,
     stepResults: new Map(), stepOrder: [], acceptance: null, acceptanceFailures: 0,
+    workspaceReady: false, headCommit: null, verification: null, testFailures: 0, openCheck: null,
     counters: { decides: 0, workerSteps: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, unknownUsage: 0, quotaUnknownDispatches: 0 },
     failureStreak: { failureClass: null, count: 0, detail: '' }, rejectedDecides: 0, lastRejection: '', pendingStop: null, humanStop: null,
     overrides: new Set(), notes: [], activeMs: 0, activeSince: null, lastSeq: 0,
@@ -117,6 +127,7 @@ export function replayJournal(events: KernelEvent[]): RunView {
       }
       case 'step_checked': {
         const a = view.actions.get(event.actionId); if (a) a.processed = true;
+        if (event.commit) view.headCommit = event.commit;
         const title = view.plan?.steps.find(s => s.id === event.stepId)?.title ?? event.stepId;
         if (!view.stepResults.has(event.stepId)) view.stepOrder.push(event.stepId);
         view.stepResults.set(event.stepId, {
@@ -130,6 +141,14 @@ export function replayJournal(events: KernelEvent[]): RunView {
       case 'acceptance':
         view.acceptance = { stepId: event.stepId, passed: event.passed, findings: event.findings };
         if (!event.passed) { view.plan = null; view.acceptanceFailures += 1; }
+        break;
+      case 'workspace_ready': view.workspaceReady = true; view.headCommit = event.head; break;
+      case 'check_started': view.openCheck = { pid: event.pid, started: event.started, name: event.name }; break;
+      case 'check_finished': view.openCheck = null; break;
+      case 'verification':
+        view.verification = { commit: event.commit, passed: event.passed, exitCode: event.exitCode, timedOut: event.timedOut, tail: event.tail };
+        // 測試沒過，這段計畫就算走完了也不算數，回去問 decide。
+        if (!event.passed) { view.plan = null; view.testFailures += 1; }
         break;
       case 'quota_unknown': view.counters.quotaUnknownDispatches += 1; break;
       case 'state':

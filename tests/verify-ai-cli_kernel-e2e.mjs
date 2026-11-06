@@ -190,6 +190,102 @@ try {
   const afterKill = json(['wait', survivor.data?.runId, '--timeout', '120']);
   check('server 整棵行程樹被砍之後，run 仍然跑到完成', afterKill.data?.state === 'completed', afterKill.out + afterKill.err);
   check('沒有因為 server 被砍而重派 worker', logCount('worker') === workersBefore + 1, `${workersBefore} -> ${logCount('worker')}`);
+
+  /* ---- develop：真的走 CLI、runner、git worktree ---- */
+  const git = (cwd, ...args) => {
+    const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true });
+    if (result.status !== 0) throw new Error(`git ${args.join(' ')}: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+  const REPO = mkdtempSync(join(tmpdir(), 'kernel-e2e-repo-'));
+  git(REPO, 'init', '-q');
+  git(REPO, 'config', 'user.name', 'kernel test');
+  git(REPO, 'config', 'user.email', 'kernel-test@example.invalid');
+  writeFileSync(join(REPO, 'README.md'), 'line one\n');
+  git(REPO, 'add', '-A');
+  git(REPO, 'commit', '-q', '-m', 'init');
+  const baseHead = git(REPO, 'rev-parse', 'HEAD');
+  const TEST = `node -e "process.exit(require('fs').readFileSync('feature.txt','utf8').trim()==='good'?0:1)"`;
+  const DEV = ['start', '--template', 'develop', '--goal', '加 feature.txt', '--cwd', REPO, '--test', TEST, '--max-steps', '4', '--max-decides', '4'];
+
+  const noTest = cli(['start', '--template', 'develop', '--goal', 'x', '--cwd', REPO]);
+  check('develop 沒給測試指令就建不了委任書', noTest.code === 1 && noTest.err.includes('testCommand'), noTest.out + noTest.err);
+  const devCreated = cli(DEV);
+  check('委任書講清楚未隔離、分支和測試', devCreated.code === 0 && devCreated.out.includes('未隔離') && devCreated.out.includes('ai-cli_kernel/') && devCreated.out.includes('--acknowledge-unisolated'), devCreated.out + devCreated.err);
+  const devId = json(['status']).data?.runs?.[0]?.runId;
+  const noAck = cli(['approve', devId]);
+  check('沒有明確承認未隔離就不能核准', noAck.code === 1 && noAck.err.includes('--acknowledge-unisolated'), noAck.out + noAck.err);
+  const argsBefore = { decide: logCount('args:decide:strict'), write: logCount('args:write:bypass') };
+  const devStarted = json(['approve', devId, '--acknowledge-unisolated']);
+  check('承認後開始執行，而且探針不擋', devStarted.code === 0, devStarted.out + devStarted.err);
+  const devDone = json(['wait', devId, '--timeout', '120']);
+  check('develop 跑到 completed', devDone.data?.state === 'completed', devDone.out);
+  const devSpec = devDone.data?.develop;
+  check('改動在 run 自己的分支上', git(REPO, 'show', `${devSpec?.branch}:feature.txt`) === 'good');
+  check('主目錄完全沒被動到', !existsSync(join(REPO, 'feature.txt')) && git(REPO, 'rev-parse', 'HEAD') === baseHead && git(REPO, 'status', '--porcelain') === '');
+  check('只有 write 步驟拿到全權限旗標', logCount('args:write:bypass') === argsBefore.write + 1 && logCount('args:decide:strict') === argsBefore.decide + 1 && logCount('args:decide:bypass') === 0 && logCount('args:worker:bypass') === 0, readFileSync(LOG, 'utf8').slice(-400));
+  const devResult = json(['result', devId]);
+  check('報告附上 kernel 產生的交付段落', (devResult.data?.report ?? '').includes('交付（由 kernel 產生）') && (devResult.data?.verdict?.develop?.testPassedOn ?? 'x') === git(REPO, 'rev-parse', devSpec?.branch), devResult.out);
+  const running = cli(['cleanup', json(['start', '--goal', '檢查', '--cwd', WORK]).data?.runId]);
+  check('唯讀的 run 沒有 worktree 可以清', running.code === 1 && running.err.includes('develop'), running.err);
+  const cleaned = cli(['cleanup', devId]);
+  check('清理移除 worktree，沒合併的分支留著', cleaned.code === 0 && cleaned.out.includes('留著') && !existsSync(devSpec?.worktree ?? 'x') && git(REPO, 'rev-parse', devSpec?.branch).length > 0, cleaned.out + cleaned.err);
+
+  /** stub 量不到額度，派工幾次就會照規則停下來問人。這裡像真人一樣回答後接著走。 */
+  const waitThroughQuota = (runId, env = {}) => {
+    let seen = 0;
+    for (;;) {
+      const result = json(['wait', runId, '--timeout', '120']);
+      if (result.data?.reason !== 'quota_unknown' || result.data?.state !== 'waiting_human') return { ...result, quotaStops: seen };
+      seen += 1;
+      json(['approve', runId], env);
+    }
+  };
+  const writesBeforeFix = logCount('write');
+  const fixRun = json([...DEV]);
+  json(['approve', fixRun.data?.runId, '--acknowledge-unisolated'], { KERNEL_STUB_MODE: 'dev-fix' });
+  const fixDone = waitThroughQuota(fixRun.data?.runId, { KERNEL_STUB_MODE: 'dev-fix' });
+  check('測試失敗後 kernel 會回去問 decide，修好才完成', fixDone.data?.state === 'completed' && logCount('write') === writesBeforeFix + 2 && fixDone.data?.develop?.testFailures === 1, fixDone.out);
+  check('額度量不到時 develop 一樣會停下來問人，不會一直派', fixDone.quotaStops >= 1, fixDone.quotaStops);
+  cli(['cleanup', fixRun.data?.runId]);
+
+  const scoped = json([...DEV, '--allow-path', 'src']);
+  json(['approve', scoped.data?.runId, '--acknowledge-unisolated']);
+  const scopedDone = waitThroughQuota(scoped.data?.runId);
+  check('改到範圍外會失敗，不會交付', scopedDone.data?.state === 'failed' && scopedDone.data?.reason === 'repeated_failure:scope_violation' && !existsSync(scopedDone.data?.runDir ? join(scopedDone.data.runDir, 'report.md') : 'x'), scopedDone.out);
+  check('範圍外的改動沒有進分支', git(REPO, 'rev-parse', scopedDone.data?.develop?.branch) === baseHead);
+
+  const killed = json([...DEV]);
+  const writesBeforeKill = logCount('write');
+  json(['approve', killed.data?.runId, '--acknowledge-unisolated'], { KERNEL_STUB_DELAY_MS: '6000' });
+  let killedStatus = null;
+  for (let i = 0; i < 100; i++) {
+    killedStatus = json(['status', killed.data?.runId]).data;
+    if (killedStatus?.currentAction?.kind === 'worker' && killedStatus?.currentAction?.job) break;
+    await sleep(300);
+  }
+  const killedRunner = JSON.parse(readFileSync(join(killedStatus.runDir, 'runner.json'), 'utf8'));
+  process.kill(killedRunner.pid, 'SIGKILL');
+  await sleep(500);
+  const reattached = json(['approve', killed.data?.runId]);
+  check('寫到一半 runner 被殺，接回不用再承認一次', reattached.code === 0, reattached.out + reattached.err);
+  check('接回時等到新 runner 起來才回報，不會被舊的 runner.json 騙到', reattached.data?.effectiveState === 'running', reattached.data?.effectiveState);
+  const reattachedDone = json(['wait', killed.data?.runId, '--timeout', '120']);
+  check('接回後走到 completed', reattachedDone.data?.state === 'completed', reattachedDone.out);
+  check('接回時沒有重派會寫檔的 worker', logCount('write') === writesBeforeKill + 1, `${writesBeforeKill} -> ${logCount('write')}`);
+  check('接回後改動只 commit 一次', git(REPO, 'rev-list', '--count', `${baseHead}..${reattachedDone.data?.develop?.branch}`) === '1');
+
+  const toolText = reply => reply?.result?.content?.[0]?.text ?? JSON.stringify(reply ?? null);
+  const [viaMcp] = await callMcp({}, [{ method: 'tools/call', params: { name: 'ai-cli_kernel_start', arguments: { goal: '加 feature.txt', workFolder: REPO, template: 'develop', testCommand: TEST, allowedPaths: ['feature.txt'], workerModels: ['sonnet'] } } }]);
+  const mcpRun = /kr-\d{8}-\d{6}-[0-9a-f]{4}/.exec(toolText(viaMcp))?.[0];
+  const mcpStatus = json(['status', mcpRun]).data;
+  check('MCP 帶得到 develop 的參數', mcpStatus?.develop?.testCommand === TEST && mcpStatus?.develop?.allowedPaths?.join() === 'feature.txt' && mcpStatus?.models?.allowedWorkers?.includes('sonnet'), toolText(viaMcp));
+  const [mcpNoAck] = await callMcp({}, [{ method: 'tools/call', params: { name: 'ai-cli_kernel_approve', arguments: { runId: mcpRun } } }]);
+  check('MCP 沒傳 acknowledgeUnisolated 也不能核准', toolText(mcpNoAck).includes('--acknowledge-unisolated') && json(['status', mcpRun]).data?.state === 'awaiting_approval', toolText(mcpNoAck));
+  const [mcpAck] = await callMcp({}, [{ method: 'tools/call', params: { name: 'ai-cli_kernel_approve', arguments: { runId: mcpRun, acknowledgeUnisolated: true } } }]);
+  check('MCP 明確承認才開始執行', toolText(mcpAck).includes('running') || toolText(mcpAck).includes('completed'), toolText(mcpAck));
+  const mcpDone = waitThroughQuota(mcpRun);
+  check('透過 MCP 核准的 develop 一樣跑到完成', mcpDone.data?.state === 'completed', mcpDone.out);
 } catch (error) {
   check('測試沒有丟例外', false, error.stack);
 }
