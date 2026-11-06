@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_DIR } from '../core/user-config.js';
 import { lookupIdentities } from '../core/live-jobs.js';
-import { sameIdentity } from '../core/job-store.js';
+import { mayBeAlive, sameIdentity } from '../core/job-store.js';
 import { assertCanStartJob } from '../core/worker-env.js';
 import { FileJobExecutor } from './executor.js';
 import { acquireActiveLock, atomicWrite, kernelRunDir, listRunIds, newRunId, readActiveRun, releaseActiveLock, RunStore } from './journal.js';
@@ -127,12 +127,14 @@ function developNextAction(contract: KernelContract, state: EffectiveState, runI
   return null;
 }
 
-async function runnerAlive(store: RunStore): Promise<boolean | null> {
+/** true＝活著；false＝確定不在；null＝查不出來。只有 false 才能當成中斷，否則機器忙的時候會多開一個 runner。 */
+export async function aiCliKernelRunnerAlive(store: RunStore, lookup: typeof lookupIdentities = lookupIdentities): Promise<boolean | null> {
   if (!existsSync(store.runnerPath)) return false;
   let holder: { pid: number; started: string; name: string };
   try { holder = JSON.parse(readFileSync(store.runnerPath, 'utf8')); } catch { return null; }
-  const live = (await lookupIdentities([holder.pid])).get(holder.pid);
-  if (!live) return false;
+  const live = (await lookup([holder.pid])).get(holder.pid);
+  // 身分查詢有逾時，失敗時也是查不到。pid 還在就不能說它死了。
+  if (!live) return mayBeAlive(holder.pid) ? null : false;
   return holder.started ? sameIdentity(holder, live) : true;
 }
 
@@ -162,7 +164,7 @@ function boundaries(contract: KernelContract): Record<string, BoundaryStatus> {
 async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRunStatus> {
   const contract = store.readContract();
   const view = replayJournal(store.read());
-  const alive = view.state === 'running' ? await runnerAlive(store) : null;
+  const alive = view.state === 'running' ? await aiCliKernelRunnerAlive(store) : null;
   const effectiveState: EffectiveState = view.state === 'running' && alive === false ? 'interrupted' : view.state;
   const open = openActions(view)[0];
   const boundary = withBoundary ? boundaries(contract) : {};
@@ -183,7 +185,7 @@ async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRun
     progress: {
       decides: { used: view.counters.decides, max: contract.budget.maxDecides },
       workerSteps: { used: view.counters.workerSteps, max: contract.budget.maxWorkerSteps },
-      inputTokens: { used: view.counters.inputTokens, max: contract.budget.maxInputTokens },
+      inputTokens: { used: view.counters.inputTokens - view.counters.cachedTokens, max: contract.budget.maxInputTokens },
       cachedTokens: view.counters.cachedTokens, outputTokens: view.counters.outputTokens, unknownUsage: view.counters.unknownUsage,
       activeMinutes: { used: Math.round(activeMinutes(view, Date.now()) * 10) / 10, max: contract.budget.maxWallMinutes },
       quotaUnknownDispatches: view.counters.quotaUnknownDispatches,
@@ -260,7 +262,7 @@ export async function aiCliKernelApprove(input: KernelApproveInput): Promise<Ker
   if (digest !== view.contractDigest) throw new Error('委任書內容和建立時不一致，拒絕核准');
   if (isTerminalState(view.state)) throw new Error(`這個 run 已經結束（${view.state}），不能再核准`);
   if (view.state === 'stop_pending') throw new Error(`舊程序還沒確認停止，不能接回。請執行 ai-cli kernel cancel ${input.runId} 重新檢查`);
-  if (view.state === 'running' && await runnerAlive(store) !== false) throw new Error('這個 run 已經在執行中');
+  if (view.state === 'running' && await aiCliKernelRunnerAlive(store) !== false) throw new Error('這個 run 已經在執行中');
 
   if (view.state === 'needs_reconcile') {
     if (input.reconcile !== 'abandon') throw new Error(`這個 run 有分不出結果的動作。確認實際情況後，加上 --reconcile abandon 放棄那個動作的結果`);
@@ -385,7 +387,7 @@ export async function aiCliKernelCancel(input: { runId: string; timeoutSec?: num
   const view = replayJournal(store.read());
   if (isTerminalState(view.state)) { releaseActiveLock(input.runId); return statusOf(store); }
   store.requestCancel();
-  if (view.state === 'running' && await runnerAlive(store) !== false) {
+  if (view.state === 'running' && await aiCliKernelRunnerAlive(store) !== false) {
     // runner 活著就交給它：只有一個程序寫日誌，比較不會打架。
     const deadline = Date.now() + (input.timeoutSec ?? 45) * 1000;
     while (Date.now() < deadline) {

@@ -32,7 +32,11 @@ export interface KernelBudget {
   maxWallMinutes: number;
   /** 單一 job 的時間上限，超過就停掉該 job。 */
   maxActionMinutes: number;
-  /** 所有 job 回報的 input tokens 總和上限（含快取）。用完後不再新增派工，進行中的 job 不會被中斷。 */
+  /**
+   * 未快取的 input tokens 總和上限。用完後不再新增派工，進行中的 job 不會被中斷。
+   * 不算快取：長任務每次工具呼叫都重送上下文，總量會被灌大幾十倍。實測一步 767 萬 input 裡有 742 萬是快取，
+   * Codex 週額度只動了約 1%。算進去的話，真實的開發任務一步就會把預算用完。
+   */
   maxInputTokens: number;
   /** 額度量不到時，最多再派幾次。未知不等於還夠，這是事先核准的保守上限。 */
   quotaUnknownMaxDispatches: number;

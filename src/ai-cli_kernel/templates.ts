@@ -17,7 +17,7 @@ export const DEFAULT_BUDGET: KernelBudget = {
 };
 
 /** 開發任務要改、要測、可能要重來，預設放寬；但額度門檻和額度未知的上限不放寬。 */
-const DEVELOP_BUDGET: Partial<KernelBudget> = { maxWorkerSteps: 10, maxDecides: 8, maxWallMinutes: 180, maxActionMinutes: 45, maxInputTokens: 4000000 };
+const DEVELOP_BUDGET: Partial<KernelBudget> = { maxWorkerSteps: 10, maxDecides: 8, maxWallMinutes: 180, maxActionMinutes: 45, maxInputTokens: 2000000 };
 const DEFAULT_MANDATE_HOURS = 24;
 
 export interface KernelStartInput {

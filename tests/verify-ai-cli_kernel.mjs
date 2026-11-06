@@ -1737,6 +1737,31 @@ for (const crashAt of ['intent-before', 'intent-after', 'execute', 'result']) {
   delete process.env.AI_CLI_KERNEL;
 }
 
+/* ---- 真實 run 才發現的問題 ---- */
+{
+  const { store, contract } = newRun({}, { maxInputTokens: 1000 });
+  const heavy = { usage: { input: 5000000, cached: 4999900, output: 1 } };
+  const executor = new FakeExecutor(action => action.kind === 'decide' ? ok(PLAN(['s1']), heavy) : ok(REPORT, heavy));
+  const state = await runKernelLoop(deps(store, contract, executor));
+  check('快取不算進 token 預算：真實任務才跑得完', state === 'completed', `${state} ${view(store).reason} ${view(store).detail}`);
+}
+{
+  const { store, contract } = newRun({}, { maxInputTokens: 1000 });
+  const heavy = { usage: { input: 5000, cached: 100, output: 1 } };
+  const executor = new FakeExecutor(action => action.kind === 'decide' ? ok(PLAN(['s1']), heavy) : ok(REPORT, heavy));
+  const state = await runKernelLoop(deps(store, contract, executor));
+  check('未快取的超過預算一樣會停', state === 'budget_exhausted' && view(store).reason === 'input_tokens' && view(store).detail.includes('未快取'), `${state} ${view(store).detail}`);
+}
+{
+  const { aiCliKernelRunnerAlive } = await load('api');
+  const { store } = newRun();
+  const noIdentity = async () => new Map();
+  writeFileSync(store.runnerPath, JSON.stringify({ pid: process.pid, started: 'x', name: 'node' }));
+  check('身分查詢失敗不能當成 runner 死了', await aiCliKernelRunnerAlive(store, noIdentity) === null);
+  writeFileSync(store.runnerPath, JSON.stringify({ pid: 999999, started: 'x', name: 'node' }));
+  check('pid 確實不在才算 runner 不在', await aiCliKernelRunnerAlive(store, noIdentity) === false);
+}
+
 /* ---- 命名與依賴方向 ---- */
 {
   const walk = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? walk(join(dir, entry.name)) : entry.name.endsWith('.ts') ? [join(dir, entry.name)] : []);

@@ -3949,5 +3949,85 @@
     "from": "      : git(spec.repoRoot, '-c', `remote.${release.remote!}.mirror=false`, 'push', '--no-follow-tags', '--no-mirror', '--recurse-submodules=no', release.remote!, `${release.commit}:refs/heads/${release.target}`);",
     "to": "      : git(spec.repoRoot, '-c', `remote.${release.remote!}.mirror=true`, 'push', '--no-follow-tags', '--no-mirror', '--recurse-submodules=no', release.remote!, `${release.commit}:refs/heads/${release.target}`);",
     "expect": "放行：push 不受 followTags 或 mirror 擴大範圍"
+  },
+  {
+    "name": "kernel：快取算進 token 預算",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "const uncachedTokens = view.counters.inputTokens - view.counters.cachedTokens;",
+    "to": "const uncachedTokens = view.counters.inputTokens;",
+    "expect": "快取不算進 token 預算"
+  },
+  {
+    "name": "kernel：身分查詢失敗當成 runner 死了",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "if (!live) return mayBeAlive(holder.pid) ? null : false;",
+    "to": "if (!live) return false;",
+    "expect": "身分查詢失敗不能當成 runner 死了"
+  },
+  {
+    "name": "kernel develop：接回沿用舊驗收",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (findings.length > 0) { commit({ type: 'acceptance', stepId, passed: false, findings }); return; }",
+    "to": "void findings;",
+    "expect": "接回不沿用舊驗收"
+  },
+  {
+    "name": "kernel develop：kill 失敗也當停了",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (await handle.kill()) { commit({ type: 'check_finished', pid: handle.pid }); return true; }",
+    "to": "await handle.kill(); commit({ type: 'check_finished', pid: handle.pid }); return true;",
+    "expect": "檢查指令停不掉就是 stop_pending"
+  },
+  {
+    "name": "kernel develop：commit hook 加料不查",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (outsideAfter.length > 0) return { passed: false",
+    "to": "if (false as boolean) return { passed: false",
+    "expect": "commit hook 加進範圍外的檔案會被抓到"
+  },
+  {
+    "name": "kernel develop：當掉後不清副產物",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (check.kind === 'test' && view.workspaceReady) {",
+    "to": "if (false as boolean) {",
+    "expect": "測試當掉留下的副產物，接回時會先清掉"
+  },
+  {
+    "name": "kernel develop：檢查指令不算總時間",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "const deadline = startedAt + Math.min(contract.budget.maxActionMinutes * 60000, wallLeftMs);",
+    "to": "const deadline = startedAt + contract.budget.maxActionMinutes * 60000; void wallLeftMs;",
+    "expect": "檢查指令也受總時間限制"
+  },
+  {
+    "name": "kernel：finish 當掉就遺失",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "commit({ type: 'decide_processed', actionId, ok: true, decision: 'finish', finishStep: decision.reportStep });",
+    "to": "commit({ type: 'decide_processed', actionId, ok: true, decision: 'finish' });",
+    "expect": "finish 當在兩次寫入之間"
+  },
+  {
+    "name": "kernel develop：重新命名查不到來源端",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "from": "mustGit(spec.worktree, 'diff', '--no-renames', '--name-only', '-z', spec.baseCommit, 'HEAD')",
+    "to": "mustGit(spec.worktree, 'diff', '--name-only', '-z', spec.baseCommit, 'HEAD')",
+    "expect": "把範圍外的檔案搬進範圍內也會被抓到"
+  },
+  {
+    "name": "kernel develop：別的 repo 的 worktree 也能碰",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "from": "if (!sameDir(commonDir, repoCommonDir)) throw new Error(",
+    "to": "if (false as boolean) throw new Error(",
+    "expect": "別的 repo 的 linked worktree 也不能碰"
   }
 ]

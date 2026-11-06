@@ -707,7 +707,8 @@ ${stat}
 
     const { budget } = contract;
     if (activeMinutes(view, deps.now()) >= budget.maxWallMinutes) { setState('budget_exhausted', 'wall_clock', `已用滿 ${budget.maxWallMinutes} 分鐘`); return 'budget_exhausted'; }
-    if (view.counters.inputTokens >= budget.maxInputTokens) { setState('budget_exhausted', 'input_tokens', `已用 ${view.counters.inputTokens} input tokens`); return 'budget_exhausted'; }
+    const uncachedTokens = view.counters.inputTokens - view.counters.cachedTokens;
+    if (uncachedTokens >= budget.maxInputTokens) { setState('budget_exhausted', 'input_tokens', `已用 ${uncachedTokens} 未快取的 input tokens（另有 ${view.counters.cachedTokens} 快取）`); return 'budget_exhausted'; }
     // 更新會原地換掉 dist：停下來，不讓舊的探針結果替新程式背書。
     if (deps.versionId() !== startVersion) { setState('version_drift', 'dist_changed', '執行中偵測到 ai-cli 程式被更新'); return 'version_drift'; }
 
