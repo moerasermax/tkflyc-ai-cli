@@ -3,6 +3,8 @@
  * 匯出函式一律以 aiCliKernel 開頭，讓原生程式碼裡一眼看得出這是延伸功能。
  */
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { aiCliKernelCreateRelease, aiCliKernelRunRelease, type KernelReleaseCreateInput, type KernelReleaseDeps } from './loop.js';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +22,27 @@ import { isTerminalState, workDirOf, type ActionOutcome, type BoundaryStatus, ty
 import { aiCliKernelRestoreCheckpointBranch, cleanupWorkspace, realWorkspace } from './workspace.js';
 
 export type { KernelStartInput } from './templates.js';
+
+function releaseDeps(store: RunStore): KernelReleaseDeps {
+  return {
+    store, workspace: realWorkspace, now: Date.now,
+    newId: () => `${store.runId}-rel-${randomBytes(8).toString('hex')}`,
+    assertHuman: () => {
+      if (process.env.AI_CLI_WORKER === '1') throw new Error('worker 不能建立或執行放行；放行只能由人使用 CLI 決定');
+    },
+  };
+}
+
+/** 僅供 CLI 呼叫，不註冊 MCP 工具。 */
+export function aiCliKernelReleaseCreate(input: KernelReleaseCreateInput & { runId: string }) {
+  return aiCliKernelCreateRelease(releaseDeps(storeFor(input.runId)), input);
+}
+
+export function aiCliKernelReleaseRun(input: { id: string }) {
+  const runId = input.id.match(/^(kr-[0-9]{8}-[0-9]{6}-[0-9a-f]{4})-rel-[0-9a-f]{16}$/)?.[1];
+  if (!runId) throw new Error('不是有效的放行 id');
+  return aiCliKernelRunRelease(releaseDeps(storeFor(runId)), input.id);
+}
 
 const OVERRIDABLE_REASONS = new Set(['quota_low', 'quota_unknown', 'worktree_changed', 'repo_refs_changed', 'mandate_expired', 'checkpoint_push_failed']);
 
@@ -100,7 +123,7 @@ function nextActionFor(state: EffectiveState, runId: string, reason?: string): s
 function developNextAction(contract: KernelContract, state: EffectiveState, runId: string): string | null {
   if (!contract.develop) return null;
   if (state === 'awaiting_approval') return `worker 會拿到等於你本人的權限，只靠 worktree 隔開正常路徑的寫入。讀完委任書後，同意就執行 ai-cli kernel approve ${runId} --acknowledge-unisolated，不要就執行 ai-cli kernel cancel ${runId}`;
-  if (state === 'completed') return `看報告：ai-cli kernel result ${runId}。沒問題就自己合併 git merge ${contract.develop.branch}，之後用 ai-cli kernel cleanup ${runId} 清掉 worktree。kernel 不會替你合併或推交付分支。`;
+  if (state === 'completed') return `看報告：ai-cli kernel result ${runId}。確認交付版本後，用 ai-cli kernel release create ${runId} --action merge|push --target <branch> --confirm <commit 前 10 碼> 建立單次放行，再用 release run <id> 執行；之後用 cleanup 清掉 worktree。`;
   return null;
 }
 

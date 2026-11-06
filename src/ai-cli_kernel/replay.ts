@@ -5,6 +5,30 @@
  * 預算不會因為 runner 重啟而歸零，人工閘也不會因為當在中間而漏掉。
  */
 import { NEEDS_HUMAN_FAILURES, type ActionOutcome, type ActionSpec, type CheckpointRecord, type FailureClass, type GitSnapshot, type JobRef, type KernelEvent, type PlanStep, type RunState, type StopDecision } from './types.js';
+import type { KernelReleaseEvent, KernelReleaseView } from './types.js';
+
+/** 純重播：意圖後沒有結果就是 unknown，不可能再變成 available。損毀紀錄直接拒絕。 */
+export function aiCliKernelReplayReleases(events: KernelReleaseEvent[]): Map<string, KernelReleaseView> {
+  const releases = new Map<string, KernelReleaseView>();
+  for (const event of events) {
+    if (event.type === 'release_created') {
+      if (releases.has(event.id)) throw new Error('放行紀錄重複建立');
+      const { type: _type, at: _at, ...release } = event;
+      releases.set(event.id, { release, status: 'available', attempted: false, detail: '' });
+      continue;
+    }
+    const view = releases.get(event.id);
+    if (!view) throw new Error('放行紀錄沒有建立事件');
+    if (event.type === 'release_intent') {
+      if (view.attempted) throw new Error('放行紀錄重複意圖');
+      view.attempted = true; view.status = 'unknown'; view.detail = '意圖已記錄，結果不明，絕不自動重試';
+    } else if (event.type === 'release_result') {
+      if (!view.attempted || view.status !== 'unknown') throw new Error('放行結果順序不合法');
+      view.status = event.status; view.detail = event.detail;
+    } else throw new Error('不認識的放行事件');
+  }
+  return releases;
+}
 
 export interface ActionRecord { spec: ActionSpec; job?: JobRef; startedAt?: number; outcome?: ActionOutcome; abandoned?: string; processed: boolean }
 export interface StepResult { stepId: string; title: string; actionId: string; passed: boolean; failureClass?: FailureClass; findings: string[]; preview: string; messageFile: string | null }

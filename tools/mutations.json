@@ -3693,5 +3693,261 @@
     "from": "        return line && ref !== `refs/heads/${spec.branch}` && !ref.startsWith('refs/heads/ai-cli_kernel/checkpoints/') && !/^refs\\/remotes\\/[^/]+\\/ai-cli_kernel\\/checkpoints\\//.test(ref);",
     "to": "        return line && ref !== `refs/heads/${spec.branch}`;",
     "expect": "develop：改完而且測試通過才走到 completed"
+  },
+  {
+    "name": "kernel release 1：contract.template !== 'develop'",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "  if (contract.template !== 'develop' || !contract.develop || view.state !== 'completed') throw new Error('只能放行 completed 的 develop run');",
+    "to": "  if (contract.template !== 'develop' || !contract.develop || false) throw new Error('只能放行 completed 的 develop run');",
+    "expect": "放行：非 completed 拒絕"
+  },
+  {
+    "name": "kernel release 2：throw new Error('觸發的 run 不能",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "  if (contract.origin?.kind === 'trigger') throw new Error('觸發的 run 不能建立或執行放行');",
+    "to": "  if (false) throw new Error('觸發的 run 不能建立或執行放行');",
+    "expect": "放行：觸發 run 不可建立放行"
+  },
+  {
+    "name": "kernel release 3：throw new Error('委任書與核准 digest",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "  if (!view.approvedDigest || view.contractDigest !== view.approvedDigest || store.contractDigest() !== view.approvedDigest) throw new Error('委任書與核准 digest 不符，拒絕放行');",
+    "to": "  if (!view.approvedDigest || view.contractDigest !== view.approvedDigest || false) throw new Error('委任書與核准 digest 不符，拒絕放行');",
+    "expect": "放行：執行前重驗 contract"
+  },
+  {
+    "name": "kernel release 4：throw new Error('confirm 必須",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    if (input.confirm !== commit.slice(0, 10)) throw new Error('confirm 必須等於交付 commit 前 10 碼');",
+    "to": "    if (false) throw new Error('confirm 必須等於交付 commit 前 10 碼');",
+    "expect": "放行：confirm 不符拒絕"
+  },
+  {
+    "name": "kernel release 5：throw new Error('hours 必須",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    if (!Number.isFinite(hours) || hours <= 0 || !Number.isFinite(deps.now() + hours * 3600000)) throw new Error('hours 必須是大於零的有限數字');",
+    "to": "    if (!Number.isFinite(hours) || false || !Number.isFinite(deps.now() + hours * 3600000)) throw new Error('hours 必須是大於零的有限數字');",
+    "expect": "放行：拒絕無效 hours 0"
+  },
+  {
+    "name": "kernel release 6：throw new Error('交付 commit 沒有",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "  if (!commit || !view.acceptance?.passed || !view.verification?.passed || view.verification.commit !== commit || view.verification.exitCode !== 0 || view.verification.timedOut || view.openCheck || openActions(view).length) throw new Error('交付 commit 沒有通過測試／驗收，拒絕放行');",
+    "to": "  if (!commit || !view.acceptance?.passed || !view.verification?.passed || false || view.verification.exitCode !== 0 || view.verification.timedOut || view.openCheck || openActions(view).length) throw new Error('交付 commit 沒有通過測試／驗收，拒絕放行');",
+    "expect": "放行：執行前重驗 verification"
+  },
+  {
+    "name": "kernel release 7：throw new Error('交付 commit 沒有",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "  if (!commit || !view.acceptance?.passed || !view.verification?.passed || view.verification.commit !== commit || view.verification.exitCode !== 0 || view.verification.timedOut || view.openCheck || openActions(view).length) throw new Error('交付 commit 沒有通過測試／驗收，拒絕放行');",
+    "to": "  if (!commit || !view.acceptance?.passed || !view.verification || view.verification.commit !== commit || view.verification.exitCode !== 0 || view.verification.timedOut || view.openCheck || openActions(view).length) throw new Error('交付 commit 沒有通過測試／驗收，拒絕放行');",
+    "expect": "放行：執行前重驗 test-failed"
+  },
+  {
+    "name": "kernel release 8：throw new Error('交付 commit 沒有",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "  if (!commit || !view.acceptance?.passed || !view.verification?.passed || view.verification.commit !== commit || view.verification.exitCode !== 0 || view.verification.timedOut || view.openCheck || openActions(view).length) throw new Error('交付 commit 沒有通過測試／驗收，拒絕放行');",
+    "to": "  if (!commit || !view.acceptance?.passed || !view.verification?.passed || view.verification.commit !== commit || view.verification.exitCode !== 0 || false || view.openCheck || openActions(view).length) throw new Error('交付 commit 沒有通過測試／驗收，拒絕放行');",
+    "expect": "放行：執行前重驗 test-timeout"
+  },
+  {
+    "name": "kernel release 9：throw new Error('交付分支 HEAD",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "  if (workspace.releaseBranchHead(spec) !== commit) throw new Error('交付分支 HEAD 已變動，拒絕放行');",
+    "to": "  if (false) throw new Error('交付分支 HEAD 已變動，拒絕放行');",
+    "expect": "放行：執行前重驗 branch"
+  },
+  {
+    "name": "kernel release 10：throw new Error('回復點 ref 已變動，拒絕放行",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "  if (spec.checkpoint && spec.checkpoint.mode !== 'off' && (!view.checkpoint || !workspace.checkpointValid(spec, view.checkpoint))) throw new Error('回復點 ref 已變動，拒絕放行');",
+    "to": "  if (false && (!view.checkpoint || !workspace.checkpointValid(spec, view.checkpoint))) throw new Error('回復點 ref 已變動，拒絕放行');",
+    "expect": "放行：執行前重驗 checkpoint"
+  },
+  {
+    "name": "kernel release 11：target 是遠端預設分支，這可能等於部署",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    if (remote && deps.workspace.releaseDefaultBranch(spec, remote) === input.target && input.allowDefaultBranch !== true) throw new Error('target 是遠端預設分支，這可能等於部署；請另外加 --allow-default-branch');",
+    "to": "    if (remote && deps.workspace.releaseDefaultBranch(spec, remote) === input.target && false) throw new Error('target 是遠端預設分支，這可能等於部署；請另外加 --allow-default-branch');",
+    "expect": "放行：預設分支需額外同意且說明可能部署"
+  },
+  {
+    "name": "kernel release 12：放行已使用或結果不明",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    if (view.attempted || view.status !== 'available') throw new Error(`放行已使用或結果不明（${view.status}），絕不自動重試`);",
+    "to": "    if (false) throw new Error(`放行已使用或結果不明（${view.status}），絕不自動重試`);",
+    "expect": "放行：成功後重複使用拒絕"
+  },
+  {
+    "name": "kernel release 13：!Number.isFinite(Date.parse(release.expiresAt))",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    if (!Number.isFinite(Date.parse(release.expiresAt)) || deps.now() >= Date.parse(release.expiresAt)) throw new Error('放行已過期');",
+    "to": "    if (false) throw new Error('放行已過期');",
+    "expect": "放行：過期在查詢前拒絕"
+  },
+  {
+    "name": "kernel release 14：throw new Error('遠端 URL 已變動",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "      if (!release.remote || deps.workspace.releaseRemoteUrl(spec, release.remote) !== release.remoteUrl) throw new Error('遠端 URL 已變動，拒絕放行');",
+    "to": "      if (!release.remote || false) throw new Error('遠端 URL 已變動，拒絕放行');",
+    "expect": "放行：push 拒絕 url"
+  },
+  {
+    "name": "kernel release 15：target 現為遠端預設分支",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "      if (deps.workspace.releaseDefaultBranch(spec, release.remote) === release.target && release.allowDefaultBranch !== true) throw new Error('target 現為遠端預設分支，這可能等於部署；需重新加 --allow-default-branch 建立放行');",
+    "to": "      if (deps.workspace.releaseDefaultBranch(spec, release.remote) === release.target && false) throw new Error('target 現為遠端預設分支，這可能等於部署；需重新加 --allow-default-branch 建立放行');",
+    "expect": "放行：push 拒絕 default"
+  },
+  {
+    "name": "kernel release 16：throw new Error('target 已漂移",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    if (deps.workspace.releaseTarget(spec, release.action, release.target, release.remote) !== release.targetCommitAtCreate) throw new Error('target 已漂移，拒絕放行');",
+    "to": "    if (false) throw new Error('target 已漂移，拒絕放行');",
+    "expect": "放行：執行前重驗 target"
+  },
+  {
+    "name": "kernel release 17：} else deps.workspace.releaseMergeReady",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    } else deps.workspace.releaseMergeReady(spec, release.target);",
+    "to": "    } else undefined;",
+    "expect": "放行：merge 拒絕 dirty"
+  },
+  {
+    "name": "kernel release 18：    releaseDelivery(deps);",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    releaseDelivery(deps);",
+    "to": "    /* 不再重驗交付 */",
+    "expect": "放行：查詢後交付 HEAD 變動仍不執行"
+  },
+  {
+    "name": "kernel release 19：    if (deps.now() >= Date.parse(release.expiresAt))",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    if (deps.now() >= Date.parse(release.expiresAt)) throw new Error('放行已過期');",
+    "to": "    if (false) throw new Error('放行已過期');",
+    "expect": "放行：遠端查詢後過期仍不執行"
+  },
+  {
+    "name": "kernel release 20：deps.store.appendRelease({ type: 'release_intent'",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    deps.store.appendRelease({ type: 'release_intent', id, at: new Date(deps.now()).toISOString() });",
+    "to": "    void({ type: 'release_intent', id, at: new Date(deps.now()).toISOString() });",
+    "expect": "放行：意圖未落盤絕不執行"
+  },
+  {
+    "name": "kernel release 21：result.status === 'succeeded' && deps.workspace.releaseTarget",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "      if (result.status === 'succeeded' && deps.workspace.releaseTarget(spec, release.action, release.target, release.remote) !== release.commit) {",
+    "to": "      if (false && deps.workspace.releaseTarget(spec, release.action, release.target, release.remote) !== release.commit) {",
+    "expect": "放行：執行器說成功但 target 不符記 unknown"
+  },
+  {
+    "name": "kernel release 22：worker 不能建立或執行放行",
+    "file": "src/ai-cli_kernel/api.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "      if (process.env.AI_CLI_WORKER === '1') throw new Error('worker 不能建立或執行放行；放行只能由人使用 CLI 決定');",
+    "to": "      if (false) throw new Error('worker 不能建立或執行放行；放行只能由人使用 CLI 決定');",
+    "expect": "放行：worker 不能建立或執行即使允許巢狀派工"
+  },
+  {
+    "name": "kernel release 23：放行紀錄殘行，結果不明",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    if (text && !text.endsWith('\\n')) throw new Error('放行紀錄殘行，結果不明，拒絕執行');",
+    "to": "    if (false) throw new Error('放行紀錄殘行，結果不明，拒絕執行');",
+    "expect": "放行：殘行不能忽略或自動重試"
+  },
+  {
+    "name": "kernel release 24：fd = openSync(path, 'wx'",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    try { fd = openSync(path, 'wx', 0o600); }",
+    "to": "    try { fd = openSync(path, 'w', 0o600); }",
+    "expect": "放行：並行同一 run 被原子鎖拒絕且不消耗授權"
+  },
+  {
+    "name": "kernel release 25：view.attempted = true; view.status",
+    "file": "src/ai-cli_kernel/replay.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "      view.attempted = true; view.status = 'unknown'; view.detail = '意圖已記錄，結果不明，絕不自動重試';",
+    "to": "      view.attempted = true; view.status = 'available'; view.detail = '意圖已記錄，結果不明，絕不自動重試';",
+    "expect": "放行重播：只有意圖即 unknown 且不重用"
+  },
+  {
+    "name": "kernel release 26：branch !== `refs/heads/${target}`",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    if (branch !== `refs/heads/${target}`) throw new Error(`merge 要求 repo 目前就在 target ${target}，不會自動切換分支`);",
+    "to": "    if (false) throw new Error(`merge 要求 repo 目前就在 target ${target}，不會自動切換分支`);",
+    "expect": "放行：merge 拒絕 wrong-branch"
+  },
+  {
+    "name": "kernel release 27：merge 要求工作樹與 index 乾淨",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    if (mustGit(spec.repoRoot, 'status', '--porcelain=v1', '-z', '--untracked-files=all')) throw new Error('merge 要求工作樹與 index 乾淨（含未追蹤檔案）');",
+    "to": "    if (false) throw new Error('merge 要求工作樹與 index 乾淨（含未追蹤檔案）');",
+    "expect": "放行：merge 拒絕 untracked"
+  },
+  {
+    "name": "kernel release 28：? git(spec.repoRoot, 'merge', '--ff-only'",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "      ? git(spec.repoRoot, 'merge', '--ff-only', release.commit)",
+    "to": "      ? git(spec.repoRoot, 'merge', '--no-ff', release.commit)",
+    "expect": "放行：merge 僅 ff-only 且 push 明確 refspec 無 force"
+  },
+  {
+    "name": "kernel release 29：: git(spec.repoRoot, 'push', '--no-follow-tags'",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "      : git(spec.repoRoot, '-c', `remote.${release.remote!}.mirror=false`, 'push', '--no-follow-tags', '--no-mirror', '--recurse-submodules=no', release.remote!, `${release.commit}:refs/heads/${release.target}`);",
+    "to": "      : git(spec.repoRoot, '-c', `remote.${release.remote!}.mirror=false`, 'push', '--follow-tags', '--no-mirror', '--recurse-submodules=no', release.remote!, `${release.commit}:refs/heads/${release.target}`);",
+    "expect": "放行：push 不受 followTags 或 mirror 擴大範圍"
+  },
+  {
+    "name": "kernel release 30：放行需要單一且與查詢相同的遠端 URL",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    if (urls.length !== 1 || urls[0] !== fetchUrl) throw new Error('放行需要單一且與查詢相同的遠端 URL');",
+    "to": "    if (false) throw new Error('放行需要單一且與查詢相同的遠端 URL');",
+    "expect": "放行：push 拒絕 pushurl"
+  },
+  {
+    "name": "kernel release 31：throw new Error('無法確認遠端預設分支",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "    if (!ref) throw new Error('無法確認遠端預設分支，拒絕 push 放行');",
+    "to": "    if (!ref) return \"not-default\";",
+    "expect": "放行：push 拒絕 unknown-default"
+  },
+  {
+    "name": "kernel release 32：指令層必須覆蓋遠端 mirror 設定",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "      : git(spec.repoRoot, '-c', `remote.${release.remote!}.mirror=false`, 'push', '--no-follow-tags', '--no-mirror', '--recurse-submodules=no', release.remote!, `${release.commit}:refs/heads/${release.target}`);",
+    "to": "      : git(spec.repoRoot, '-c', `remote.${release.remote!}.mirror=true`, 'push', '--no-follow-tags', '--no-mirror', '--recurse-submodules=no', release.remote!, `${release.commit}:refs/heads/${release.target}`);",
+    "expect": "放行：push 不受 followTags 或 mirror 擴大範圍"
   }
 ]

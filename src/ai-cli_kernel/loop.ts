@@ -6,6 +6,8 @@
  * 所有依賴都從參數傳入，測試用假執行器就能走遍每一種當機位置，不必啟動 vendor。
  */
 import { randomBytes } from 'node:crypto';
+import { aiCliKernelReplayReleases } from './replay.js';
+import type { KernelRelease, KernelReleaseView, ReleaseWorkspaceOps } from './types.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { activeMinutes, derivedStop, nextStep, openActions, replayJournal, unprocessedActions, type ActionRecord, type RunView } from './replay.js';
@@ -37,6 +39,98 @@ export interface KernelLoopDeps {
 
 const PREVIEW_CHARS = 1500;
 const REVIEW_DIFF_CHARS = 20000;
+
+/** CLI 單次放行；不經 decide、不派 worker。I/O 都在 deps，replay 只還原事實。 */
+export interface KernelReleaseDeps {
+  store: RunStore;
+  workspace: ReleaseWorkspaceOps & Pick<WorkspaceOps, 'checkpointValid'>;
+  now(): number;
+  newId(): string;
+  assertHuman(): void;
+}
+export interface KernelReleaseCreateInput {
+  action: string;
+  target: string;
+  confirm: string;
+  remote?: string;
+  hours?: number;
+  allowDefaultBranch?: boolean;
+}
+
+function releaseDelivery(deps: KernelReleaseDeps): { contract: KernelContract; spec: NonNullable<KernelContract['develop']>; commit: string } {
+  const { store, workspace } = deps;
+  const contract = store.readContract();
+  const view = replayJournal(store.read());
+  if (contract.template !== 'develop' || !contract.develop || view.state !== 'completed') throw new Error('只能放行 completed 的 develop run');
+  if (contract.origin?.kind === 'trigger') throw new Error('觸發的 run 不能建立或執行放行');
+  if (!view.approvedDigest || view.contractDigest !== view.approvedDigest || store.contractDigest() !== view.approvedDigest) throw new Error('委任書與核准 digest 不符，拒絕放行');
+  const spec = contract.develop;
+  const commit = view.headCommit;
+  if (!commit || !view.acceptance?.passed || !view.verification?.passed || view.verification.commit !== commit || view.verification.exitCode !== 0 || view.verification.timedOut || view.openCheck || openActions(view).length) throw new Error('交付 commit 沒有通過測試／驗收，拒絕放行');
+  if (workspace.releaseBranchHead(spec) !== commit) throw new Error('交付分支 HEAD 已變動，拒絕放行');
+  if (spec.checkpoint && spec.checkpoint.mode !== 'off' && (!view.checkpoint || !workspace.checkpointValid(spec, view.checkpoint))) throw new Error('回復點 ref 已變動，拒絕放行');
+  return { contract, spec, commit };
+}
+
+export function aiCliKernelCreateRelease(deps: KernelReleaseDeps, input: KernelReleaseCreateInput): KernelRelease {
+  deps.assertHuman();
+  return deps.store.withReleaseLock(() => {
+    const { spec, commit } = releaseDelivery(deps);
+    if (input.action !== 'merge' && input.action !== 'push') throw new Error('action 必須是 merge 或 push');
+    if (input.confirm !== commit.slice(0, 10)) throw new Error('confirm 必須等於交付 commit 前 10 碼');
+    const hours = input.hours ?? 1;
+    if (!Number.isFinite(hours) || hours <= 0 || !Number.isFinite(deps.now() + hours * 3600000)) throw new Error('hours 必須是大於零的有限數字');
+    if (!input.target || input.target.startsWith('-') || /[\s\x00-\x1f]/.test(input.target)) throw new Error('target 必須是有效分支名稱');
+    if (input.action === 'merge' && (input.remote !== undefined || input.allowDefaultBranch)) throw new Error('merge 不接受 remote 或 allow-default-branch');
+    const remote = input.action === 'push' ? input.remote ?? 'origin' : null;
+    const remoteUrl = remote ? deps.workspace.releaseRemoteUrl(spec, remote) : null;
+    const targetCommitAtCreate = deps.workspace.releaseTarget(spec, input.action, input.target, remote);
+    if (remote && deps.workspace.releaseDefaultBranch(spec, remote) === input.target && input.allowDefaultBranch !== true) throw new Error('target 是遠端預設分支，這可能等於部署；請另外加 --allow-default-branch');
+    const release: KernelRelease = {
+      id: deps.newId(), action: input.action, target: input.target, remote, remoteUrl,
+      commit, baseCommit: spec.baseCommit, targetCommitAtCreate,
+      expiresAt: new Date(deps.now() + hours * 3600000).toISOString(), allowDefaultBranch: input.allowDefaultBranch === true,
+    };
+    const known = aiCliKernelReplayReleases(deps.store.readReleases());
+    if (known.has(release.id)) throw new Error('放行 id 已存在');
+    deps.store.appendRelease({ type: 'release_created', at: new Date(deps.now()).toISOString(), ...release });
+    return release;
+  });
+}
+
+export function aiCliKernelRunRelease(deps: KernelReleaseDeps, id: string): KernelReleaseView {
+  deps.assertHuman();
+  return deps.store.withReleaseLock(() => {
+    const view = aiCliKernelReplayReleases(deps.store.readReleases()).get(id);
+    if (!view) throw new Error('找不到放行 id');
+    if (view.attempted || view.status !== 'available') throw new Error(`放行已使用或結果不明（${view.status}），絕不自動重試`);
+    const release = view.release;
+    if (!Number.isFinite(Date.parse(release.expiresAt)) || deps.now() >= Date.parse(release.expiresAt)) throw new Error('放行已過期');
+    const { spec, commit } = releaseDelivery(deps);
+    if (release.commit !== commit || release.baseCommit !== spec.baseCommit) throw new Error('放行版本與交付 commit 不符');
+    if (release.action !== 'merge' && release.action !== 'push') throw new Error('放行 action 不合法');
+    if (release.action === 'push') {
+      if (!release.remote || deps.workspace.releaseRemoteUrl(spec, release.remote) !== release.remoteUrl) throw new Error('遠端 URL 已變動，拒絕放行');
+      if (deps.workspace.releaseDefaultBranch(spec, release.remote) === release.target && release.allowDefaultBranch !== true) throw new Error('target 現為遠端預設分支，這可能等於部署；需重新加 --allow-default-branch 建立放行');
+    } else deps.workspace.releaseMergeReady(spec, release.target);
+    if (deps.workspace.releaseTarget(spec, release.action, release.target, release.remote) !== release.targetCommitAtCreate) throw new Error('target 已漂移，拒絕放行');
+    // 遠端查詢可能花掉整個有效期；在記意圖前再核對版本與期限。
+    releaseDelivery(deps);
+    if (deps.now() >= Date.parse(release.expiresAt)) throw new Error('放行已過期');
+    // 在任何不可逆 I/O 之前 fsync。落盤失敗，絕不執行。
+    deps.store.appendRelease({ type: 'release_intent', id, at: new Date(deps.now()).toISOString() });
+    let result: { status: 'succeeded' | 'failed' | 'unknown'; detail: string };
+    try {
+      result = deps.workspace.releaseExecute(spec, release);
+      if (result.status === 'succeeded' && deps.workspace.releaseTarget(spec, release.action, release.target, release.remote) !== release.commit) {
+        result = { status: 'unknown', detail: '執行後 target 不等於交付 commit，結果不明，絕不自動重試' };
+      }
+    }
+    catch (error) { result = { status: 'unknown', detail: `結果不明，絕不自動重試：${(error as Error).message}` }; }
+    deps.store.appendRelease({ type: 'release_result', id, at: new Date(deps.now()).toISOString(), ...result });
+    return aiCliKernelReplayReleases(deps.store.readReleases()).get(id)!;
+  });
+}
 
 /** 別的 runner 接手了。從任何一層丟出來，迴圈最外層接住後直接退出，不再寫任何東西。 */
 class SupersededError extends Error {}
@@ -474,6 +568,7 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
 - worktree：${develop.worktree}
 - 回復點：${view.checkpoint ? `${view.checkpoint.ref} @ ${view.checkpoint.commit}（${view.checkpoint.pushed ? `已推到 ${view.checkpoint.remote}` : '只留本地'}）` : develop.checkpoint?.mode === 'off' ? '人手動核准關閉' : '舊委任書未設定'}
 - 交付分支還沒合併、也沒有 push。看過沒問題再自己合併：git merge ${develop.branch}
+- 如需 kernel 執行，先由人在 CLI 建立單次放行：ai-cli kernel release create ${store.runId} --action merge|push --target <branch> --confirm ${delivered.head.slice(0, 10)}，再 release run <id>。推遠端預設分支可能等於部署，需額外同意。
 
 \`\`\`
 ${stat}

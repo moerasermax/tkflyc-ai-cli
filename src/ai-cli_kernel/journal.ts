@@ -8,7 +8,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, truncateSync, writeFileSync, writeSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { jobStateDir } from '../core/live-jobs.js';
-import type { KernelContract, KernelEvent, KernelEventBody } from './types.js';
+import type { KernelContract, KernelEvent, KernelEventBody, KernelReleaseEvent } from './types.js';
 
 export function kernelStateDir(): string { return join(jobStateDir(), 'kernel'); }
 export function kernelRunsDir(): string { return join(kernelStateDir(), 'runs'); }
@@ -45,6 +45,33 @@ export class RunStore {
   get cancelPath(): string { return join(this.dir, 'cancel.request'); }
   get runnerPath(): string { return join(this.dir, 'runner.json'); }
   get runnerLockPath(): string { return join(this.dir, 'runner.lock'); }
+
+  get releasesPath(): string { return join(this.dir, 'releases.jsonl'); }
+
+  /** 與 job 日誌不同：殘行可能是放行意圖，不能忽略，否則可能重做不可逆操作。 */
+  readReleases(): KernelReleaseEvent[] {
+    let text: string;
+    try { text = readFileSync(this.releasesPath, 'utf8'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+    if (text && !text.endsWith('\n')) throw new Error('放行紀錄殘行，結果不明，拒絕執行');
+    return text.split('\n').filter(Boolean).map(line => JSON.parse(line) as KernelReleaseEvent);
+  }
+
+  appendRelease(event: KernelReleaseEvent): void {
+    this.readReleases(); // 損毀或殘行不能被新事件蓋過。
+    const fd = openSync(this.releasesPath, 'a', 0o600);
+    try { writeFileSync(fd, `${JSON.stringify(event)}\n`); fsyncSync(fd); } finally { closeSync(fd); }
+  }
+
+  /** 同一 run 的建立／執行互斥。當機留下鎖時拒絕，不能猜舊執行器已停止。 */
+  withReleaseLock<T>(work: () => T): T {
+    const path = join(this.dir, 'release.lock');
+    let fd: number;
+    try { fd = openSync(path, 'wx', 0o600); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('放行鎖已被佔用或上次中斷，請人工對帳；不會自動重試'); throw error; }
+    try { writeFileSync(fd, JSON.stringify({ pid: process.pid })); fsyncSync(fd); return work(); }
+    finally { closeSync(fd); rmSync(path); }
+  }
 
   /** 建立 run 目錄並寫入委任書。回傳 digest。 */
   create(contract: KernelContract): string {

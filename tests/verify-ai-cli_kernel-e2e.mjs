@@ -287,6 +287,32 @@ try {
   check('MCP 明確承認才開始執行', toolText(mcpAck).includes('running') || toolText(mcpAck).includes('completed'), toolText(mcpAck));
   const mcpDone = waitThroughQuota(mcpRun);
   check('透過 MCP 核准的 develop 一樣跑到完成', mcpDone.data?.state === 'completed', mcpDone.out);
+
+  /* ---- L4：單次放行只走 CLI；遠端只使用暫存 bare repo ---- */
+  const releasedCommit = git(REPO, 'rev-parse', devSpec.branch);
+  const targetBranch = git(REPO, 'symbolic-ref', '--short', 'HEAD');
+  const releaseArgs = ['release', 'create', devId, '--action', 'merge', '--target', targetBranch];
+  const wrongConfirm = cli([...releaseArgs, '--confirm', '0000000000']);
+  check('release E2E：confirm 不符拒絕且主分支未動', wrongConfirm.code === 1 && wrongConfirm.err.includes('confirm') && git(REPO, 'rev-parse', 'HEAD') === baseHead, wrongConfirm.err);
+  const bare = mkdtempSync(join(tmpdir(), 'kernel-e2e-release-origin-'));
+  git(bare, 'init', '--bare', '-q');
+  git(REPO, 'remote', 'add', 'origin', bare);
+  git(REPO, 'push', 'origin', `${baseHead}:refs/heads/main`);
+  git(bare, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+  const pushArgs = ['release', 'create', devId, '--action', 'push', '--target', 'main', '--confirm', releasedCommit.slice(0, 10)];
+  const defaultBlocked = cli(pushArgs);
+  check('release E2E：預設分支必須另外承認可能部署', defaultBlocked.code === 1 && defaultBlocked.err.includes('可能等於部署') && defaultBlocked.err.includes('--allow-default-branch'), defaultBlocked.err);
+  const pushRelease = json([...pushArgs, '--allow-default-branch']);
+  const workerBlocked = cli(['release', 'run', pushRelease.data?.id], { AI_CLI_WORKER: '1', AI_CLI_ALLOW_NESTED: '1' });
+  check('release E2E：worker 不能使用放行', workerBlocked.code === 1 && workerBlocked.err.includes('worker'), workerBlocked.err);
+  const pushed = json(['release', 'run', pushRelease.data?.id]);
+  check('release E2E：推送精確交付版本且來源 HEAD 不變', pushed.code === 0 && pushed.data?.status === 'succeeded' && git(bare, 'rev-parse', 'main') === releasedCommit && git(REPO, 'rev-parse', 'HEAD') === baseHead, pushed.out + pushed.err);
+  check('release E2E：推送放行不能重複使用', cli(['release', 'run', pushRelease.data?.id]).code === 1);
+  const mergeRelease = json([...releaseArgs, '--confirm', releasedCommit.slice(0, 10)]);
+  const merged = json(['release', 'run', mergeRelease.data?.id]);
+  check('release E2E：worktree 清理後仍可快轉合併', merged.code === 0 && merged.data?.status === 'succeeded' && git(REPO, 'rev-parse', 'HEAD') === releasedCommit && git(REPO, 'status', '--porcelain') === '', merged.out + merged.err);
+  check('release E2E：回復點 ref 保持原 commit', git(REPO, 'rev-parse', devSpec.checkpoint.ref) === baseHead);
+  check('release E2E：MCP 沒有放行工具', !onNames.some(name => /release/.test(name)));
 } catch (error) {
   check('測試沒有丟例外', false, error.stack);
 }

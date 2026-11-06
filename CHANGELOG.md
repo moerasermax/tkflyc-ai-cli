@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **`ai-cli_kernel` L4 單次放行**：CLI `kernel release create/run` 將人的 merge／push 同意綁定 completed develop 的精確交付 commit、基準、目標目前版本及有效期限（預設一小時）。執行前重驗測試、交付分支、回復點及目標；merge 僅允許目前 target 的乾淨工作樹快轉，push 不帶強制旗標且抑制額外 tag／mirror／子模組推送。遠端預設分支需額外承認可能部署。意圖先落盤，失敗或中斷結果不明一律 unknown、不重試；worker 與 trigger run 禁用，不提供 MCP 工具。新增 stub／暫存 bare repo 測試與驗收對照；完整 npm test、E2E 及三平台 CI 待外層 kernel 驗收。（@moerasermax；Codex）
+
 ### 修復
 
 - **`ai-cli_kernel` develop 的獨立稽核**：由 kernel 自己派 gpt-6.1-sol（effort high）唯讀稽核，找到 8 項，逐條對照原始碼都成立，修了 7 項。靜態審查，修補後的測試由我補上。（Claude Opus 5.5）

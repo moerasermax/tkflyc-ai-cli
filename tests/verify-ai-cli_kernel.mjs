@@ -20,7 +20,9 @@ const runKernelLoop = deps => rawLoop(deps).catch(error => { if (error instanceo
 const { classifyJobResult, checkCitations, evaluateChecks, gitSnapshot, snapshotsEqual } = await load('verdict');
 const { parseDecision, buildDecidePrompt, actionMarker } = await load('plan');
 const { buildContract, DEFAULT_BUDGET } = await load('templates');
-const { cancelWithoutRunner, aiCliKernelRollback, aiCliKernelStatus } = await load('api');
+const { cancelWithoutRunner, aiCliKernelRollback, aiCliKernelStatus, aiCliKernelReleaseCreate, aiCliKernelReleaseRun } = await load('api');
+const { aiCliKernelCreateRelease, aiCliKernelRunRelease } = await load('loop');
+const { aiCliKernelReplayReleases } = await load('replay');
 const { runKernelCli } = await load('cli');
 const { remainingPercentFromUsage } = await load('runtime');
 const { KERNEL_TOOL_PREFIX, aiCliKernelToolDefinitions } = await load('mcp-tools');
@@ -1472,6 +1474,267 @@ for (const crashAt of ['prepared', 'ref', 'push', 'event']) {
   realWorkspace.prepare(owner.spec);
   const other = newRepo();
   check('別的 repo 的 linked worktree 也不能碰', /不屬於/.test(failing(realWorkspace.restore, { ...owner.spec, repoRoot: other })?.message ?? ''), failing(realWorkspace.restore, { ...owner.spec, repoRoot: other })?.message);
+}
+
+/* ---- L4 第二階段：單次放行 ---- */
+// fixture 用已驗證日誌模擬交付，真正的 develop → 放行整合另在下方跑一次。
+function releaseFixture(options = {}) {
+  const run = newDevRun(options);
+  const { store, spec, repo } = run;
+  const cp = realWorkspace.checkpointSnapshot(spec);
+  realWorkspace.checkpointRef(spec, cp);
+  store.append({ type: 'checkpoint', commit: cp, ref: spec.checkpoint.ref, remote: null, pushed: false });
+  realWorkspace.prepare(spec);
+  store.append({ type: 'workspace_ready', head: spec.baseCommit });
+  writeFileSync(join(spec.worktree, 'feature.txt'), 'good\n');
+  const commit = realWorkspace.commit(spec, 'release fixture');
+  store.append({ type: 'step_checked', actionId: 'fixture', stepId: 's1', passed: true, findings: [], commit });
+  store.append({ type: 'verification', commit, passed: true, exitCode: 0, timedOut: false, tail: 'fixture stub' });
+  store.append({ type: 'acceptance', stepId: 's1', passed: true, findings: [] });
+  store.append({ type: 'state', state: 'completed' });
+  return { ...run, commit, target: git(repo, 'symbolic-ref', '--short', 'HEAD') };
+}
+const releaseInput = (run, extra = {}) => ({ runId: run.store.runId, action: 'merge', target: run.target, confirm: run.commit.slice(0, 10), ...extra });
+const releaseDeps = (run, extra = {}) => ({ store: run.store, workspace: realWorkspace, now: Date.now, newId: () => `${run.store.runId}-rel-0123456789abcdef`, assertHuman() {}, ...extra });
+const releaseView = (run, id) => aiCliKernelReplayReleases(run.store.readReleases()).get(id);
+const seedReleaseRemote = run => {
+  const remote = bareOrigin(run.repo);
+  git(run.repo, 'push', 'origin', `${run.spec.baseCommit}:refs/heads/main`);
+  git(remote, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+  return remote;
+};
+{
+  const run = releaseFixture();
+  const before = git(run.repo, 'for-each-ref');
+  const bad = ['', run.commit.slice(0, 9), run.commit, '0000000000'];
+  for (const confirm of bad) check(`放行：confirm 不符拒絕 ${confirm.length}`, /confirm/.test(failing(aiCliKernelReleaseCreate, releaseInput(run, { confirm }))?.message ?? ''));
+  check('放行：建立被拒絕不改 refs 或授權紀錄', git(run.repo, 'for-each-ref') === before && run.store.readReleases().length === 0);
+  for (const hours of [0, -1, NaN, Infinity]) check(`放行：拒絕無效 hours ${hours}`, /hours/.test(failing(aiCliKernelReleaseCreate, releaseInput(run, { hours }))?.message ?? ''));
+  check('放行：拒絕未知 action', /action/.test(failing(aiCliKernelReleaseCreate, releaseInput(run, { action: 'reset' }))?.message ?? ''));
+  for (const target of ['--all', '../bad', 'bad:ref', 'bad ref']) check(`放行：拒絕非法 target ${target}`, !!failing(aiCliKernelReleaseCreate, releaseInput(run, { target })));
+  check('放行：merge 不接受 remote', /merge/.test(failing(aiCliKernelReleaseCreate, releaseInput(run, { remote: 'origin' }))?.message ?? ''));
+  const start = Date.now();
+  const release = aiCliKernelReleaseCreate(releaseInput(run));
+  check('放行：建立持久綁定交付與 target 且預設一小時', release.commit === run.commit && release.baseCommit === run.spec.baseCommit && release.targetCommitAtCreate === run.spec.baseCommit && release.remote === null && Date.parse(release.expiresAt) >= start + 3600000 && Date.parse(release.expiresAt) <= Date.now() + 3600000 && readFileSync(run.store.releasesPath, 'utf8').includes(release.id));
+  check('放行：create 無合併副作用', git(run.repo, 'for-each-ref') === before && releaseView(run, release.id).status === 'available');
+  const result = aiCliKernelReleaseRun({ id: release.id });
+  check('放行：merge ff-only 成功且先意圖後結果', result.status === 'succeeded' && git(run.repo, 'rev-parse', 'HEAD') === run.commit && git(run.repo, 'status', '--porcelain') === '' && run.store.readReleases().map(e => e.type).join() === 'release_created,release_intent,release_result');
+  check('放行：成功後重複使用拒絕', /已使用/.test(failing(aiCliKernelReleaseRun, { id: release.id })?.message ?? '') && run.store.readReleases().length === 3);
+  check('放行：API 拒絕非法或不存在 id', !!failing(aiCliKernelReleaseRun, { id: '../bad' }) && /找不到/.test(failing(aiCliKernelReleaseRun, { id: `${run.store.runId}-rel-0000000000000000` })?.message ?? ''));
+}
+for (const state of ['running', 'awaiting_approval', 'failed', 'cancelled', 'waiting_human']) {
+  const run = releaseFixture();
+  run.store.append({ type: 'state', state });
+  check(`放行：非 completed 拒絕 ${state}`, /completed/.test(failing(aiCliKernelReleaseCreate, releaseInput(run))?.message ?? '') && run.store.readReleases().length === 0);
+}
+{
+  const run = newRun();
+  run.store.append({ type: 'state', state: 'completed' });
+  check('放行：唯讀 run 不可放行', /develop/.test(failing(aiCliKernelReleaseCreate, { runId: run.store.runId, action: 'merge', target: 'main', confirm: '0000000000' })?.message ?? ''));
+  const triggered = releaseFixture({ origin: { kind: 'trigger', mandate: 'test', digest: 'digest' } });
+  check('放行：觸發 run 不可建立放行', /觸發/.test(failing(aiCliKernelReleaseCreate, releaseInput(triggered))?.message ?? ''));
+  const manual = releaseFixture();
+  const release = aiCliKernelReleaseCreate(releaseInput(manual));
+  process.env.AI_CLI_WORKER = '1'; process.env.AI_CLI_ALLOW_NESTED = '1';
+  const createError = failing(aiCliKernelReleaseCreate, releaseInput(manual));
+  const runError = failing(aiCliKernelReleaseRun, { id: release.id });
+  delete process.env.AI_CLI_WORKER; delete process.env.AI_CLI_ALLOW_NESTED;
+  check('放行：worker 不能建立或執行即使允許巢狀派工', /worker/.test(createError?.message ?? '') && /worker/.test(runError?.message ?? '') && releaseView(manual, release.id).status === 'available');
+}
+for (const issue of ['expiry', 'branch', 'verification', 'test-failed', 'test-exit', 'test-timeout', 'checkpoint', 'target', 'contract', 'state', 'acceptance']) {
+  const run = releaseFixture();
+  const release = aiCliKernelReleaseCreate(releaseInput(run));
+  let d = releaseDeps(run), queries = 0;
+  if (issue === 'expiry') d.now = () => Date.parse(release.expiresAt);
+  if (issue === 'branch') git(run.spec.worktree, 'commit', '-q', '--allow-empty', '-m', 'head changed');
+  if (issue === 'verification') run.store.append({ type: 'verification', commit: run.spec.baseCommit, passed: true, exitCode: 0, timedOut: false, tail: '' });
+  if (issue === 'test-failed') run.store.append({ type: 'verification', commit: run.commit, passed: false, exitCode: 0, timedOut: false, tail: '' });
+  if (issue === 'test-exit') run.store.append({ type: 'verification', commit: run.commit, passed: true, exitCode: 1, timedOut: false, tail: '' });
+  if (issue === 'test-timeout') run.store.append({ type: 'verification', commit: run.commit, passed: true, exitCode: 0, timedOut: true, tail: '' });
+  if (issue === 'checkpoint') git(run.repo, 'update-ref', `refs/heads/${run.spec.checkpoint.ref}`, run.commit);
+  if (issue === 'target') git(run.repo, 'commit', '-q', '--allow-empty', '-m', 'target changed');
+  if (issue === 'contract') appendFileSync(run.store.contractPath, ' ');
+  if (issue === 'state') run.store.append({ type: 'state', state: 'cancelled' });
+  if (issue === 'acceptance') run.store.append({ type: 'acceptance', stepId: 's1', passed: false, findings: ['changed'] });
+  d.workspace = { ...realWorkspace, releaseBranchHead(spec) { queries++; return realWorkspace.releaseBranchHead(spec); } };
+  const before = git(run.repo, 'for-each-ref');
+  const error = failing(aiCliKernelRunRelease, d, release.id);
+  const expected = { expiry: '過期', branch: 'HEAD', verification: '測試', 'test-failed': '測試', 'test-exit': '測試', 'test-timeout': '測試', checkpoint: '回復點', target: '漂移', contract: 'digest', state: 'completed', acceptance: '驗收' }[issue];
+  check(`放行：執行前重驗 ${issue}`, error?.message.includes(expected) && releaseView(run, release.id).status === 'available' && git(run.repo, 'for-each-ref') === before, error?.message);
+  if (issue === 'expiry') check('放行：過期在查詢前拒絕', queries === 0);
+}
+for (const issue of ['dirty', 'index', 'untracked', 'wrong-branch', 'detached', 'in-progress']) {
+  const run = releaseFixture();
+  const release = aiCliKernelReleaseCreate(releaseInput(run));
+  if (issue === 'dirty' || issue === 'index') { writeFileSync(join(run.repo, 'README.md'), 'keep me\n'); if (issue === 'index') git(run.repo, 'add', 'README.md'); }
+  if (issue === 'untracked') writeFileSync(join(run.repo, 'keep.txt'), 'keep me\n');
+  if (issue === 'wrong-branch') git(run.repo, 'switch', '-c', 'other');
+  if (issue === 'detached') git(run.repo, 'checkout', '--detach');
+  if (issue === 'in-progress') writeFileSync(join(run.repo, '.git', 'MERGE_HEAD'), `${run.spec.baseCommit}\n`);
+  const before = git(run.repo, 'status', '--porcelain');
+  const head = git(run.repo, 'rev-parse', 'HEAD');
+  const error = failing(aiCliKernelReleaseRun, { id: release.id });
+  check(`放行：merge 拒絕 ${issue} 並保留工作`, !!error && git(run.repo, 'rev-parse', 'HEAD') === head && git(run.repo, 'status', '--porcelain') === before && !releaseView(run, release.id).attempted, error?.message);
+}
+{
+  const run = releaseFixture();
+  const release = aiCliKernelReleaseCreate(releaseInput(run));
+  // target 在建立時已分歧；目標沒有漂移也不可以做非快轉合併。
+  git(run.repo, 'commit', '-q', '--allow-empty', '-m', 'diverge');
+  const divergent = aiCliKernelReleaseCreate(releaseInput(run));
+  const before = git(run.repo, 'rev-parse', 'HEAD');
+  const result = aiCliKernelReleaseRun({ id: divergent.id });
+  check('放行：merge 分歧不產生合併 commit 且授權已消耗', result.status === 'unknown' && git(run.repo, 'rev-parse', 'HEAD') === before && /已使用/.test(failing(aiCliKernelReleaseRun, { id: divergent.id })?.message ?? ''));
+  check('放行：獨立授權互不覆蓋', !releaseView(run, release.id).attempted && releaseView(run, divergent.id).attempted);
+}
+{
+  const run = releaseFixture();
+  const remote = seedReleaseRemote(run);
+  check('放行：預設分支需額外同意且說明可能部署', /可能等於部署.*allow-default-branch/.test(failing(aiCliKernelReleaseCreate, releaseInput(run, { action: 'push', target: 'main' }))?.message ?? ''));
+  const release = aiCliKernelReleaseCreate(releaseInput(run, { action: 'push', target: 'main', allowDefaultBranch: true }));
+  const result = aiCliKernelReleaseRun({ id: release.id });
+  check('放行：明確同意後 push 指定 commit 到遠端預設分支', result.status === 'succeeded' && git(remote, 'rev-parse', 'refs/heads/main') === run.commit && git(run.repo, 'rev-parse', 'HEAD') === run.spec.baseCommit && release.allowDefaultBranch === true && release.remote === 'origin');
+  check('放行：push 成功後不可重用', !!failing(aiCliKernelReleaseRun, { id: release.id }));
+  const fresh = aiCliKernelReleaseCreate(releaseInput(run, { action: 'push', target: 'new-delivery', hours: 2 }));
+  check('放行：新遠端分支綁定不存在狀態', fresh.targetCommitAtCreate === null && Date.parse(fresh.expiresAt) > Date.now() + 7100000);
+  aiCliKernelReleaseRun({ id: fresh.id });
+  check('放行：可以推送新的非預設分支', git(remote, 'rev-parse', 'refs/heads/new-delivery') === run.commit);
+}
+for (const issue of ['target', 'created-target', 'default', 'url', 'pushurl', 'unknown-default', 'remote-missing']) {
+  const run = releaseFixture();
+  const remote = seedReleaseRemote(run);
+  git(run.repo, 'push', 'origin', `${run.spec.baseCommit}:refs/heads/delivery`);
+  const release = aiCliKernelReleaseCreate(releaseInput(run, { action: 'push', target: issue === 'created-target' ? 'absent' : 'delivery' }));
+  if (issue === 'target') {
+    const other = git(run.repo, 'commit-tree', `${run.spec.baseCommit}^{tree}`, '-p', run.spec.baseCommit, '-m', 'remote drift');
+    git(remote, 'fetch', run.repo, `${other}:refs/heads/delivery`);
+  }
+  if (issue === 'created-target') git(remote, 'update-ref', 'refs/heads/absent', run.spec.baseCommit);
+  if (issue === 'default') git(remote, 'symbolic-ref', 'HEAD', 'refs/heads/delivery');
+  if (issue === 'url') git(run.repo, 'remote', 'set-url', 'origin', newRepo());
+  if (issue === 'pushurl') git(run.repo, 'remote', 'set-url', '--push', 'origin', newRepo());
+  if (issue === 'unknown-default') git(remote, 'symbolic-ref', 'HEAD', 'refs/heads/missing');
+  if (issue === 'remote-missing') git(run.repo, 'remote', 'remove', 'origin');
+  const before = git(remote, 'for-each-ref');
+  const error = failing(aiCliKernelReleaseRun, { id: release.id });
+  const expected = { target: '漂移', 'created-target': '漂移', default: '可能等於部署', url: 'URL', pushurl: 'URL', 'unknown-default': '預設分支', 'remote-missing': '失敗' }[issue];
+  check(`放行：push 拒絕 ${issue}`, error?.message.includes(expected) && !releaseView(run, release.id).attempted && git(remote, 'for-each-ref') === before, error?.message);
+}
+{
+  const run = releaseFixture();
+  const remote = seedReleaseRemote(run);
+  check('放行：push 拒絕選項型 remote', /remote/.test(failing(aiCliKernelReleaseCreate, releaseInput(run, { action: 'push', target: 'delivery', remote: '--all' }))?.message ?? ''));
+  const release = aiCliKernelReleaseCreate(releaseInput(run, { action: 'push', target: 'delivery' }));
+  writeFileSync(join(remote, 'hooks', 'pre-receive'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const result = aiCliKernelReleaseRun({ id: release.id });
+  check('放行：push 失敗保守記 unknown 且不可重試', result.status === 'unknown' && /絕不自動重試/.test(result.detail) && /已使用/.test(failing(aiCliKernelReleaseRun, { id: release.id })?.message ?? ''));
+}
+for (const crashAt of ['intent-before', 'intent-after', 'execute', 'result']) {
+  const run = releaseFixture();
+  const release = aiCliKernelReleaseCreate(releaseInput(run));
+  let executions = 0;
+  class ReleaseCrashStore extends RunStore {
+    appendRelease(event) {
+      if (event.type === 'release_intent' && crashAt === 'intent-before') throw new Crash('intent not durable');
+      if (event.type === 'release_result' && crashAt === 'result') throw new Crash('result not durable');
+      super.appendRelease(event);
+      if (event.type === 'release_intent' && crashAt === 'intent-after') throw new Crash('intent durable');
+    }
+  }
+  const workspace = { ...realWorkspace, releaseExecute(spec, r) { executions++; check(`放行：執行前意圖已落盤 ${crashAt}`, releaseView(run, r.id).attempted); if (crashAt === 'execute') throw new Error('network lost'); return realWorkspace.releaseExecute(spec, r); } };
+  failing(aiCliKernelRunRelease, releaseDeps(run, { store: new ReleaseCrashStore(run.store.dir), workspace }), release.id);
+  const state = releaseView(run, release.id);
+  if (crashAt === 'intent-before') check('放行：意圖未落盤絕不執行', executions === 0 && state.status === 'available');
+  else {
+    const error = failing(aiCliKernelRunRelease, releaseDeps(run, { workspace }), release.id);
+    check(`放行：當在 ${crashAt} 結果 unknown 絕不重試`, state.status === 'unknown' && state.attempted && /已使用/.test(error?.message ?? '') && executions === (crashAt === 'intent-after' ? 0 : 1));
+  }
+}
+{
+  const run = releaseFixture();
+  const release = aiCliKernelReleaseCreate(releaseInput(run));
+  let executions = 0, now = Date.now();
+  const workspace = { ...realWorkspace,
+    releaseTarget(...args) { now = Date.parse(release.expiresAt); return realWorkspace.releaseTarget(...args); },
+    releaseExecute() { executions++; return { status: 'succeeded', detail: '' }; },
+  };
+  const error = failing(aiCliKernelRunRelease, releaseDeps(run, { workspace, now: () => now }), release.id);
+  check('放行：遠端查詢後過期仍不執行', /過期/.test(error?.message ?? '') && executions === 0 && !releaseView(run, release.id).attempted);
+}
+{
+  const run = releaseFixture();
+  const release = aiCliKernelReleaseCreate(releaseInput(run));
+  let executions = 0;
+  const workspace = { ...realWorkspace,
+    releaseTarget(...args) { git(run.spec.worktree, 'commit', '-q', '--allow-empty', '-m', 'during query'); return realWorkspace.releaseTarget(...args); },
+    releaseExecute() { executions++; return { status: 'succeeded', detail: '' }; },
+  };
+  const error = failing(aiCliKernelRunRelease, releaseDeps(run, { workspace }), release.id);
+  check('放行：查詢後交付 HEAD 變動仍不執行', /HEAD/.test(error?.message ?? '') && executions === 0 && !releaseView(run, release.id).attempted);
+}
+{
+  const run = releaseFixture();
+  const release = aiCliKernelReleaseCreate(releaseInput(run));
+  const workspace = { ...realWorkspace, releaseExecute() { return { status: 'succeeded', detail: 'pretend' }; } };
+  const result = aiCliKernelRunRelease(releaseDeps(run, { workspace }), release.id);
+  check('放行：執行器說成功但 target 不符記 unknown', result.status === 'unknown' && result.attempted && result.detail.includes('target'));
+}
+{
+  const run = releaseFixture();
+  const remote = seedReleaseRemote(run);
+  git(run.repo, 'tag', '-a', 'unapproved-tag', run.commit, '-m', 'must stay local');
+  git(run.repo, 'config', 'push.followTags', 'true');
+  git(run.repo, 'config', 'remote.origin.mirror', 'true');
+  const release = aiCliKernelReleaseCreate(releaseInput(run, { action: 'push', target: 'delivery' }));
+  const result = aiCliKernelReleaseRun({ id: release.id });
+  check('放行：push 不受 followTags 或 mirror 擴大範圍', result.status === 'succeeded' && git(remote, 'for-each-ref', '--format=%(refname)').split('\n').sort().join() === 'refs/heads/delivery,refs/heads/main');
+}
+{
+  const run = releaseFixture();
+  const release = aiCliKernelReleaseCreate(releaseInput(run));
+  const created = run.store.readReleases()[0];
+  const intent = { type: 'release_intent', id: release.id, at: new Date().toISOString() };
+  check('放行重播：只有意圖即 unknown 且不重用', aiCliKernelReplayReleases([created, intent]).get(release.id).status === 'unknown');
+  check('放行重播：重複建立或意圖與缺建立事件皆拒絕', !!failing(aiCliKernelReplayReleases, [created, created]) && !!failing(aiCliKernelReplayReleases, [created, intent, intent]) && !!failing(aiCliKernelReplayReleases, [intent]));
+  appendFileSync(run.store.releasesPath, '{"type":"release_intent"');
+  const error = failing(aiCliKernelReleaseRun, { id: release.id });
+  check('放行：殘行不能忽略或自動重試', /殘行/.test(error?.message ?? '') && git(run.repo, 'rev-parse', 'HEAD') === run.spec.baseCommit);
+}
+{
+  const run = releaseFixture();
+  const release = aiCliKernelReleaseCreate(releaseInput(run));
+  let nestedError;
+  failing(() => run.store.withReleaseLock(() => { nestedError = failing(aiCliKernelReleaseRun, { id: release.id }); }));
+  check('放行：並行同一 run 被原子鎖拒絕且不消耗授權', /放行鎖/.test(nestedError?.message ?? '') && !releaseView(run, release.id).attempted);
+  writeFileSync(join(run.store.dir, 'release.lock'), 'stale');
+  check('放行：中斷的鎖不會自動清除或重試', /人工對帳/.test(failing(aiCliKernelReleaseRun, { id: release.id })?.message ?? ''));
+}
+{
+  const run = newDevRun();
+  const state = await runKernelLoop(devDeps(run.store, run.contract, new FakeExecutor(writes('good\n'))));
+  run.commit = view(run.store).headCommit;
+  run.target = git(run.repo, 'symbolic-ref', '--short', 'HEAD');
+  const cleaned = cleanupWorkspace(run.spec);
+  check('放行：清理 worktree 後仍保留可放行的交付分支', cleaned.worktreeRemoved && !cleaned.branchRemoved && !existsSync(run.spec.worktree) && git(run.repo, 'rev-parse', run.spec.branch) === run.commit);
+  let output = '', error = '';
+  const io = { stdout: text => { output += text; }, stderr: text => { error += text; } };
+  const create = await runKernelCli(['release', 'create', run.store.runId, '--action', 'merge', '--target', run.target, '--confirm', run.commit.slice(0, 10), '--json'], io);
+  const release = create === 0 ? JSON.parse(output) : {};
+  check('放行 CLI：真正 develop 完成後可 create 並支援 JSON', state === 'completed' && create === 0 && release.commit === run.commit && !error, error);
+  output = ''; error = '';
+  const execCode = await runKernelCli(['release', 'run', release.id, '--json'], io);
+  check('放行 CLI：run 成功 exit 0 並支援 JSON', execCode === 0 && JSON.parse(output).status === 'succeeded' && git(run.repo, 'rev-parse', 'HEAD') === run.commit, error);
+  output = ''; error = '';
+  check('放行 CLI：再次 run exit 1', await runKernelCli(['release', 'run', release.id], io) === 1 && error.includes('已使用'));
+  for (const args of [[], ['create'], ['run', release.id, '--force'], ['create', run.store.runId, '--action', 'merge', '--target', run.target, '--confirm'], ['create', run.store.runId, '--allow-default-branch', 'false']]) {
+    check(`放行 CLI：拒絕不完整或未知旗標 ${args.join(' ')}`, await runKernelCli(['release', ...args], io) === 1);
+  }
+  const source = readFileSync(join(ROOT, 'src', 'ai-cli_kernel', 'workspace.ts'), 'utf8');
+  const method = source.slice(source.indexOf('  releaseExecute(spec, release) {'), source.indexOf('  checkpointSnapshot(spec) {'));
+  check('放行：merge 僅 ff-only 且 push 明確 refspec 無 force', method.includes("'merge', '--ff-only', release.commit") && method.includes("'push', '--no-follow-tags', '--no-mirror', '--recurse-submodules=no', release.remote!, `${release.commit}:refs/heads/${release.target}`") && !/--force|force-with-lease/.test(method));
+  process.env.AI_CLI_KERNEL = 'on';
+  check('放行：不提供 MCP 工具', !aiCliKernelToolDefinitions().some(t => /release/.test(t.name)));
+  delete process.env.AI_CLI_KERNEL;
 }
 
 /* ---- 命名與依賴方向 ---- */

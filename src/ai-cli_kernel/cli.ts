@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs';
 import {
   aiCliKernelApprove, aiCliKernelCancel, aiCliKernelCleanup, aiCliKernelEnabled, aiCliKernelProbe, aiCliKernelResult, aiCliKernelSetEnabled,
-  aiCliKernelStart, aiCliKernelStatus, aiCliKernelTemplates, aiCliKernelWait, aiCliKernelRollback, type KernelRunStatus,
+  aiCliKernelStart, aiCliKernelStatus, aiCliKernelTemplates, aiCliKernelWait, aiCliKernelRollback, aiCliKernelReleaseCreate, aiCliKernelReleaseRun, type KernelRunStatus,
 } from './api.js';
 
 export const KERNEL_HELP_TEXT = `Usage: ai-cli kernel <動作> [選項]
@@ -41,6 +41,10 @@ readonly-audit（預設）只讀不改。develop 會在獨立的 worktree 和分
   cancel <run>                           取消，並確認程序真的停了
   cleanup <run>                          清掉 develop 的 worktree；分支沒合併就留著
   rollback <run> [--apply]                預設印還原指令；apply 只建 restore/<run> 分支，不切換
+  release create <run> --action merge|push --target <branch> --confirm <commit 前 10 碼>
+       [--remote origin] [--hours 1] [--allow-default-branch]
+                                         人的單次放行，只有 completed develop；推遠端預設分支可能等於部署
+  release run <id>                       重新驗證後執行一次；結果不明絕不自動重試
   probe --agent <codex|claude|grok>      跑權限邊界探針
   templates                              列出可用範本
   enable | disable                       開關 MCP 的 ai-cli_kernel_* 工具（CLI 不受影響）
@@ -199,6 +203,24 @@ export async function runKernelCli(argv: string[], io: Io): Promise<number> {
         const result = aiCliKernelRollback({ runId: needRun(), apply: flags.get('apply') === true });
         emit(result, result.applied ? `已建立 ${result.branch} @ ${result.commit}，目前目錄沒有切換。\n` : `${result.command}\n`);
         return 0;
+      }
+      case 'release': {
+        const [operation, subject] = positionals;
+        if (!subject || positionals.length !== 2 || !['create', 'run'].includes(operation)) throw new Error('用法：release create <run> --action merge|push --target <branch> --confirm <前10碼>，或 release run <id>');
+        const allowed = operation === 'create' ? ['action', 'target', 'confirm', 'remote', 'hours', 'allow-default-branch', 'json'] : ['json'];
+        for (const name of flags.keys()) if (!allowed.includes(name)) throw new Error(`release ${operation} 不接受 --${name}`);
+        if (flags.has('allow-default-branch') && flags.get('allow-default-branch') !== true) throw new Error('--allow-default-branch 不接受值');
+        if (operation === 'create') {
+          const release = aiCliKernelReleaseCreate({
+            runId: subject, action: stringFlag(flags, 'action') ?? '', target: stringFlag(flags, 'target') ?? '', confirm: stringFlag(flags, 'confirm') ?? '',
+            remote: stringFlag(flags, 'remote'), hours: numberFlag(flags, 'hours'), allowDefaultBranch: flags.get('allow-default-branch') === true,
+          });
+          emit(release, `放行 ${release.id}\n${release.action} ${release.commit} → ${release.remote ? `${release.remote}/` : ''}${release.target}\n到期 ${release.expiresAt}\n${release.allowDefaultBranch ? '注意：推送遠端預設分支可能等於部署。\n' : ''}執行：ai-cli kernel release run ${release.id}\n`);
+          return 0;
+        }
+        const result = aiCliKernelReleaseRun({ id: subject });
+        emit(result, `放行 ${subject}：${result.status}\n${result.detail}\n`);
+        return result.status === 'succeeded' ? 0 : 1;
       }
       case 'probe': {
         const agent = stringFlag(flags, 'agent');

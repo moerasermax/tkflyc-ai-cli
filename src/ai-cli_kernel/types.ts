@@ -47,6 +47,41 @@ export type StepMode = 'read' | 'write';
 export interface CheckpointSpec { mode: 'push' | 'local' | 'off'; remote: string | null; ref: string }
 export interface CheckpointRecord { commit: string; ref: string; pushed: boolean; remote: string | null }
 
+/** 人在 CLI 綁定的單次授權；額外同意和遠端 URL 也要固定，不能執行時換目的地。 */
+export interface KernelRelease {
+  id: string;
+  action: 'merge' | 'push';
+  target: string;
+  remote: string | null;
+  remoteUrl: string | null;
+  commit: string;
+  baseCommit: string;
+  targetCommitAtCreate: string | null;
+  expiresAt: string;
+  allowDefaultBranch: boolean;
+}
+export type KernelReleaseEvent =
+  | ({ type: 'release_created'; at: string } & KernelRelease)
+  | { type: 'release_intent'; id: string; at: string }
+  | { type: 'release_result'; id: string; at: string; status: 'succeeded' | 'failed' | 'unknown'; detail: string };
+
+export interface KernelReleaseView {
+  release: KernelRelease;
+  status: 'available' | 'succeeded' | 'failed' | 'unknown';
+  attempted: boolean;
+  detail: string;
+}
+
+/** release 的 git I/O 由 loop 的 deps 注入；不需要仍存在的 worker worktree。 */
+export interface ReleaseWorkspaceOps {
+  releaseBranchHead(spec: DevelopSpec): string;
+  releaseTarget(spec: DevelopSpec, action: KernelRelease['action'], target: string, remote: string | null): string | null;
+  releaseRemoteUrl(spec: DevelopSpec, remote: string): string;
+  releaseDefaultBranch(spec: DevelopSpec, remote: string): string;
+  releaseMergeReady(spec: DevelopSpec, target: string): void;
+  releaseExecute(spec: DevelopSpec, release: KernelRelease): { status: 'succeeded' | 'failed' | 'unknown'; detail: string };
+}
+
 /**
  * develop 範本才有。worker 拿的是全權限，所以這裡寫明的是 kernel 事後查核的範圍，不是隔離：
  * worktree 只隔開正常路徑的寫入，擋不住蓄意的操作。

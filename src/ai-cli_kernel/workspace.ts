@@ -11,7 +11,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { mayBeAlive, sameIdentity } from '../core/job-store.js';
 import { lookupIdentities } from '../core/live-jobs.js';
-import type { CheckHandle, CheckpointRecord, CheckpointSpec, DevelopSpec, WorkspaceOps, WorkspaceState } from './types.js';
+import type { CheckHandle, CheckpointRecord, CheckpointSpec, DevelopSpec, WorkspaceOps, WorkspaceState, ReleaseWorkspaceOps } from './types.js';
 
 const exec = promisify(execFile);
 const TAIL_BYTES = 8192;
@@ -127,7 +127,60 @@ async function killTree(pid: number): Promise<void> {
   try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch { /* 已經不在了 */ } }
 }
 
-export const realWorkspace: WorkspaceOps = {
+export const realWorkspace: WorkspaceOps & ReleaseWorkspaceOps = {
+  releaseBranchHead(spec) {
+    mustGit(spec.repoRoot, 'check-ref-format', `refs/heads/${spec.branch}`);
+    const head = mustGit(spec.repoRoot, 'show-ref', '--verify', '--hash', `refs/heads/${spec.branch}`).trim();
+    mustGit(spec.repoRoot, 'merge-base', '--is-ancestor', spec.baseCommit, head);
+    return head;
+  },
+
+  releaseTarget(spec, action, target, remote) {
+    mustGit(spec.repoRoot, 'check-ref-format', `refs/heads/${target}`);
+    if (target.startsWith('-')) throw new Error('target 不能是 git 選項');
+    if (action === 'merge') return mustGit(spec.repoRoot, 'show-ref', '--verify', '--hash', `refs/heads/${target}`).trim();
+    if (!remote) throw new Error('push 缺少 remote');
+    const lines = mustGit(spec.repoRoot, 'ls-remote', '--heads', remote, `refs/heads/${target}`).trim().split('\n').filter(Boolean);
+    const found = lines.find(line => line.split(/\s+/)[1] === `refs/heads/${target}`);
+    return found ? found.split(/\s+/)[0] : null;
+  },
+
+  releaseRemoteUrl(spec, remote) {
+    if (!remote || remote.startsWith('-') || /[\s\x00-\x1f]/.test(remote)) throw new Error('remote 必須是已設定的遠端名稱');
+    // git push 用 pushurl；多目的地會產生部分成功，因此拒絕。
+    const urls = mustGit(spec.repoRoot, 'remote', 'get-url', '--push', '--all', remote).trim().split('\n');
+    const fetchUrl = mustGit(spec.repoRoot, 'remote', 'get-url', remote).trim();
+    if (urls.length !== 1 || urls[0] !== fetchUrl) throw new Error('放行需要單一且與查詢相同的遠端 URL');
+    return urls[0];
+  },
+
+  releaseDefaultBranch(spec, remote) {
+    const output = mustGit(spec.repoRoot, 'ls-remote', '--symref', remote, 'HEAD');
+    const ref = output.match(/^ref: refs\/heads\/(.+)\s+HEAD\s*$/m)?.[1];
+    if (!ref) throw new Error('無法確認遠端預設分支，拒絕 push 放行');
+    return ref;
+  },
+
+  releaseMergeReady(spec, target) {
+    const branch = mustGit(spec.repoRoot, 'symbolic-ref', '-q', 'HEAD').trim();
+    if (branch !== `refs/heads/${target}`) throw new Error(`merge 要求 repo 目前就在 target ${target}，不會自動切換分支`);
+    if (mustGit(spec.repoRoot, 'status', '--porcelain=v1', '-z', '--untracked-files=all')) throw new Error('merge 要求工作樹與 index 乾淨（含未追蹤檔案）');
+    for (const name of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply']) {
+      const path = mustGit(spec.repoRoot, 'rev-parse', '--git-path', name).trim();
+      if (existsSync(resolve(spec.repoRoot, path))) throw new Error('repo 有尚未結束的 git 操作，拒絕 merge');
+    }
+  },
+
+  releaseExecute(spec, release) {
+    const result = release.action === 'merge'
+      ? git(spec.repoRoot, 'merge', '--ff-only', release.commit)
+      : git(spec.repoRoot, '-c', `remote.${release.remote!}.mirror=false`, 'push', '--no-follow-tags', '--no-mirror', '--recurse-submodules=no', release.remote!, `${release.commit}:refs/heads/${release.target}`);
+    // push 非零也可能是遠端成功後斷線；merge hook 也可能在更新 ref 後失敗。保守記 unknown。
+    return result.status === 0 && !result.error
+      ? { status: 'succeeded', detail: `${release.action} 完成：${release.commit}` }
+      : { status: 'unknown', detail: `結果不明，絕不自動重試：${String(result.stderr || result.stdout || result.error).slice(0, 600)}` };
+  },
+
   checkpointSnapshot(spec) {
     const ref = checkpointName(spec);
     const existing = git(spec.repoRoot, 'show-ref', '--verify', '--hash', ref);
