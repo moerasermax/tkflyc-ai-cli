@@ -10,6 +10,7 @@
 
 ### 新增
 
+- **`JobStore.start` 也檢查巢狀派工。** 第一次實戰的稽核報告指出，這個底層入口原本不擋，能直接呼叫內部模組就能繞過。`spawnPty` 刻意不加：runner 本來就帶 worker 標記，加了會連授權的 vendor 都啟動不了。（@moerasermax）
 - direct-api 的 providers.json 新增 `max_tool_loops`（正整數，預設 30、最高 200），同步控制工具迴圈與 API 呼叫上限（不含 HTTP 重試），撞限訊息顯示實際值；因 2026-10-23 評測中 Qwen 與 DeepSeek 做讀碼題都在 30 圈撞限、未交出答案，改為可依 provider 調整，免改程式碼。（Codex）
 
 - `tools/statusline/ai-cli-status.mjs`：Claude Code statusLine 腳本，直接讀 job store（`meta.json`／`exit.json`／`lost.json`）顯示**全機**執行中與近 10 分鐘完成的 job，含模型與 effort、經過時間、stdout 超過 5 分鐘沒動的「靜默」標記、其他專案的 job 附專案名；完成數依 ✓／✗／?（lost）分項計數，失敗不會被收進「+N」看不到。背景：`ai-cli-jobs` 面板只列本 session 主對話派的 job、完成後 120 秒消失，看不到子代理與其他專案的 worker。不經 MCP、不寫任何檔，每次約 55 ms；啟用方式寫在檔頭。不隨 npm 套件散布，改 job store 格式時要一起改它。（Claude）

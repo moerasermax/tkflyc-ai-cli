@@ -10,7 +10,7 @@ import { StringDecoder } from 'node:string_decoder';
 import type { AgentId, BuiltCommand } from '../agents/types.js';
 import { getAgent } from '../agents/registry.js';
 import { grokResultFailed, collectGrokPromptFiles } from '../agents/grok.js';
-import { buildWorkerEnv, isNestedWorker } from './worker-env.js';
+import { assertCanStartJob, buildWorkerEnv, isNestedWorker } from './worker-env.js';
 import { jobStateDir, lookupIdentities, lookupPrincipalIdentities, taskSummary, shortText, type ProcessIdentity, type IdentityLookup, type LiveJob } from './live-jobs.js';
 import { buildLiveness, emptyOutputStats, listProcessTiming, elapsedSeconds, type ProcessOutputStats } from './liveness.js';
 import { LivenessEventExtractor } from './peek-extractor.js';
@@ -608,6 +608,8 @@ export class JobStore {
     }
   }
   async start(cmd: BuiltCommand, model?: string, timeoutMs?: number): Promise<StoredJob> {
+    // 直接呼叫底層也要擋。pty-runner 的 spawnPty 刻意不加：runner 本來就帶 worker 標記，加了會連授權的 vendor 都啟動不了。
+    assertCanStartJob();
     const pty = process.platform === 'win32' && getAgent(cmd.agent).win32SpawnMode === 'pty';
     // ConPTY 沒有 stdin prompt 通道；現有 agy 只傳 -p argv，不可默默遺失未來的 prompt。
     if (pty && typeof cmd.stdinPrompt === 'string') throw new Error('PTY jobs do not support stdinPrompt');

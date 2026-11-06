@@ -3053,5 +3053,13 @@
     "to": "  return text;",
     "expect": "帶 UTF-8 BOM 的 providers.json 照常載入與路由",
     "script": "verify-extra-body.mjs"
+  },
+  {
+    "name": "JobStore.start 不檢查巢狀派工",
+    "script": "verify-worker-guards.mjs",
+    "file": "src/core/job-store.ts",
+    "from": "    assertCanStartJob();\n",
+    "to": "",
+    "expect": "F2 直接呼叫 JobStore.start 也拒絕"
   }
 ]

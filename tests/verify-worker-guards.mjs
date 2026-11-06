@@ -9,6 +9,8 @@ import { spawn } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { assertCanStartJob, buildWorkerEnv, NESTED_DISPATCH_ERROR } from '../dist/core/worker-env.js';
+import { JobStore } from '../dist/core/job-store.js';
+import { existsSync as guardExists, readdirSync as guardReaddir } from 'node:fs';
 import { WORKER_CONTEXT } from '../dist/core/worker-context.js';
 import { buildCliCommand } from '../dist/core/command-builder.js';
 import { ProcessService } from '../dist/core/process-service.js';
@@ -108,6 +110,14 @@ try {
   await check('F2 直接呼叫 ProcessService 與 FileProcessService 也拒絕', async () => withEnv({ AI_CLI_WORKER: '1' }, async () => {
     await assert.rejects(new ProcessService({ cliPaths: paths }).startProcess({ workFolder: temp, prompt: 'stub', model: 'codex' }), /AI_CLI_NESTED_DISPATCH_BLOCKED/);
     await assert.rejects(new FileProcessService({ stateDir: join(temp, 'state'), cliPaths: paths }).startProcess({ cwd: temp, prompt: 'stub', model: 'codex' }), /AI_CLI_NESTED_DISPATCH_BLOCKED/);
+  }));
+  await check('F2 直接呼叫 JobStore.start 也拒絕，而且不留下 job 目錄', async () => withEnv({ AI_CLI_WORKER: '1' }, async () => {
+    const dir = join(temp, 'guard-state');
+    const store = new JobStore(dir, 'cli', false);
+    try {
+      await assert.rejects(store.start({ agent: 'codex', cliPath: paths.codex, args: [], cwd: temp, prompt: 'stub', resolvedModel: 'gpt-6.1-sol' }), /AI_CLI_NESTED_DISPATCH_BLOCKED/);
+      assert(!guardExists(join(dir, 'jobs')) || guardReaddir(join(dir, 'jobs')).length === 0);
+    } finally { store.dispose(); }
   }));
   await check('F2 CLI run 在依賴啟動前拒絕，不能被 stub runProcess 繞過', async () => withEnv({ AI_CLI_WORKER: '1' }, async () => {
     let launched = false, error = '';
