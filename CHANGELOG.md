@@ -37,6 +37,7 @@
 - **派工政策第 6 條更正。** 舊文寫「codex 的 percentUsed 是剩餘」，現在是已用量（`usage-service.ts` 的 app-server 路徑，basis 為 used）。政策仍然要求讀 raw 原文。（@moerasermax）
 - **突變測試 34 筆全部被抓到**（kernel 33 筆、`JobStore.start` 1 筆，最後一輪只重跑新增與修改過的）。 過程中抓到 2 筆假綠燈（測試資料太弱，有沒有那道防線都會過），補強測試後重驗。另外第一筆突變讓迴圈停不下來，測試卡死半小時才發現，所以假執行器加了失控保護。
 - **手冊**：`docs/ai-cli_kernel/教學手冊.md`（手把手）、`docs/ai-cli_kernel/技術手冊.md`（含流程圖）。
+- **探針一次沒結論不再把使用者擋下來。** 實際使用時撞到：模型回「我無法刻意嘗試繞過唯讀限制」，結果是 UNKNOWN（判定正確），卻把之前的 PASS 蓋掉，新任務全被擋。現在 UNKNOWN 不蓋掉已有結果；提示詞改成講清楚這是授權的測試、被拒絕才是正確結果；模型沒嘗試時自動再跑一次，只多一次。（@moerasermax）
 
 
 - direct-api 的 providers.json 新增 `max_tool_loops`（正整數，預設 30、最高 200），同步控制工具迴圈與 API 呼叫上限（不含 HTTP 重試），撞限訊息顯示實際值；因 2026-10-23 評測中 Qwen 與 DeepSeek 做讀碼題都在 30 圈撞限、未交出答案，改為可依 provider 調整，免改程式碼。（Codex）

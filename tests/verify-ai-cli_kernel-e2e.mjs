@@ -73,6 +73,13 @@ try {
   const changed = cli(['approve', runId], { KERNEL_STUB_VERSION: 'kernel-stub 2.0.0' });
   check('CLI 版本變了，舊的 PASS 立刻失效', changed.code === 1 && changed.err.includes('UNKNOWN'), changed.out + changed.err);
 
+  const before = logCount('probe');
+  const flaky = json(['probe', '--agent', 'codex'], { KERNEL_STUB_MODE: 'probe-silent' });
+  check('模型沒有嘗試時自動再跑一次，但只多一次', logCount('probe') === before + 2, `${before} -> ${logCount('probe')}`);
+  check('沒結論的探針不會蓋掉之前的 PASS', flaky.data?.status === 'UNKNOWN' && flaky.data?.detail?.includes('仍然有效'), flaky.out + flaky.err);
+  const retried = json(['probe', '--agent', 'codex'], { KERNEL_STUB_MODE: 'probe-flaky', KERNEL_STUB_FLAG: join(CONFIG, 'flaky.flag') });
+  check('第一次沒嘗試、第二次被擋下，結果是 PASS', retried.data?.status === 'PASS', retried.out + retried.err);
+
   /* ---- 正常流程 ---- */
   const approved = json(['approve', runId]);
   check('核准後開始執行', approved.code === 0 && ['running', 'completed'].includes(approved.data?.state), approved.out + approved.err);
@@ -138,7 +145,7 @@ try {
   check('worker 不能再開 run', nested.code === 1 && nested.err.includes('AI_CLI_NESTED_DISPATCH_BLOCKED'), nested.out + nested.err);
 
   /* ---- MCP ---- */
-  const callMcp = async (env, requests) => {
+  const callMcp = async (env, requests, finish = child => child.kill()) => {
     const child = spawn(process.execPath, [SERVER], { env: { ...baseEnv, ...env }, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
     const responses = new Map();
     let buffer = '';
@@ -156,7 +163,7 @@ try {
     requests.forEach((request, i) => send({ jsonrpc: '2.0', id: i + 2, ...request }));
     const deadline = Date.now() + 30000;
     while (Date.now() < deadline && responses.size < requests.length + 1) await sleep(50);
-    child.kill();
+    finish(child);
     return requests.map((_, i) => responses.get(i + 2));
   };
   const [offTools] = await callMcp({}, [{ method: 'tools/list' }]);
@@ -169,6 +176,20 @@ try {
   check('開啟後多出帶前綴的工具，原生工具都還在', onNames.length === 18 && offNames.every(name => onNames.includes(name)) && onNames.filter(name => !offNames.includes(name)).every(name => name.startsWith('ai-cli_kernel_')), onNames.join(','));
   const statusText = statusCall?.result?.content?.[0]?.text ?? '';
   check('MCP 查得到 CLI 建立的 run', statusText.includes(runId) && statusText.includes('completed'), statusText.slice(0, 300));
+
+  /* ---- 關掉 Claude Code：MCP server 整棵行程樹被砍，run 要繼續跑 ---- */
+  const survivor = json(START);
+  const treeKill = child => {
+    // Claude Code 在 Windows 上退出時對 server 做 taskkill /T /F，連子行程一起砍。
+    if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
+    else child.kill('SIGKILL');
+  };
+  const workersBefore = logCount('worker');
+  const [approveCall] = await callMcp({ KERNEL_STUB_DELAY_MS: '8000' }, [{ method: 'tools/call', params: { name: 'ai-cli_kernel_approve', arguments: { runId: survivor.data?.runId } } }], treeKill);
+  check('MCP 核准成功', (approveCall?.result?.content?.[0]?.text ?? '').includes('running'), JSON.stringify(approveCall).slice(0, 300));
+  const afterKill = json(['wait', survivor.data?.runId, '--timeout', '120']);
+  check('server 整棵行程樹被砍之後，run 仍然跑到完成', afterKill.data?.state === 'completed', afterKill.out + afterKill.err);
+  check('沒有因為 server 被砍而重派 worker', logCount('worker') === workersBefore + 1, `${workersBefore} -> ${logCount('worker')}`);
 } catch (error) {
   check('測試沒有丟例外', false, error.stack);
 }

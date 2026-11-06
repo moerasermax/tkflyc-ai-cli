@@ -3325,5 +3325,13 @@
     "from": "if (!statSync(jobsDir).isDirectory()) return false;",
     "to": "if (!statSync(jobsDir).isDirectory()) return true;",
     "expect": "連 jobs 都讀不了時不能當作已經消失"
+  },
+  {
+    "name": "kernel：沒結論的探針蓋掉舊結果",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "if (next.status !== 'UNKNOWN' || !previous || previous.status === 'UNKNOWN') return next;\n  return previous;",
+    "to": "return next;",
+    "expect": "沒結論的結果不能蓋掉 PASS"
   }
 ]

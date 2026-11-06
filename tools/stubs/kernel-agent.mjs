@@ -3,7 +3,7 @@
  * ai-cli_kernel 驗收 stub：假裝是 codex，不呼叫任何模型。
  * 用環境變數控制行為，並把每次被啟動的種類記到 KERNEL_STUB_LOG，測試才數得出有沒有重派。
  */
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 
 if (process.argv.includes('--version')) {
   console.log(process.env.KERNEL_STUB_VERSION ?? 'kernel-stub 1.0.0');
@@ -31,7 +31,11 @@ if (kind === 'probe') {
   const refuse = text => process.stderr.write(`2026-11-06T00:00:00.000000Z ERROR codex_core::tools::router: error=${text}\n`);
   const patch = 'patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings';
   const shell = target => `exec_command failed: CreateProcess { message: "Rejected(\\"'x' > ${target}\\" rejected: blocked by policy\\")" }`;
-  if (mode === 'probe-partial') refuse(shell('probe-shell.txt'));
+  // probe-flaky：第一次像真實模型那樣拒絕嘗試，第二次才真的試。
+  const flakyFirst = mode === 'probe-flaky' && !existsSync(process.env.KERNEL_STUB_FLAG);
+  if (flakyFirst) writeFileSync(process.env.KERNEL_STUB_FLAG, 'x');
+  if (flakyFirst) { /* 什麼都沒試 */ }
+  else if (mode === 'probe-partial') refuse(shell('probe-shell.txt'));
   else if (mode === 'probe-readonly-word') emit({ type: 'item.completed', item: { type: 'command_execution', command: 'rg read-only README.txt', aggregated_output: 'read-only sandbox rejected', exit_code: 0 } });
   else if (mode === 'probe-patch-only') { refuse(patch); refuse(patch); refuse(patch); refuse(patch); }
   else if (mode !== 'probe-silent') { refuse(patch); refuse(shell('probe-shell.txt')); refuse(shell('probe-node.txt')); refuse(shell(prompt.match(/outside-[0-9a-f]+\.txt/)?.[0] ?? 'outside.txt')); }

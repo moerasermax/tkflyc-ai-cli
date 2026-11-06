@@ -23,7 +23,7 @@ const { buildContract, DEFAULT_BUDGET } = await load('templates');
 const { cancelWithoutRunner } = await load('api');
 const { remainingPercentFromUsage } = await load('runtime');
 const { KERNEL_TOOL_PREFIX, aiCliKernelToolDefinitions } = await load('mcp-tools');
-const { probeEvidence } = await load('probe');
+const { probeEvidence, mergeProbeResult } = await load('probe');
 const { FileJobExecutor } = await load('executor');
 const { acquireRunnerLock, releaseRunnerLock } = await load('runner-lock');
 
@@ -637,6 +637,15 @@ check('成功的報告提到限流不算失敗', classifyJobResult({ status: 'co
   } finally {
     if (previous === undefined) delete process.env.AI_CLI_STATE_DIR; else process.env.AI_CLI_STATE_DIR = previous;
   }
+}
+{
+  // 真實發生過：模型回「我無法刻意嘗試繞過唯讀限制」，一次沒結論就把之前的 PASS 蓋掉，新任務全被擋。
+  const record = status => ({ status, at: status });
+  check('沒結論的結果不能蓋掉 PASS', mergeProbeResult(record('PASS'), record('UNKNOWN')).status === 'PASS');
+  check('沒結論的結果不能蓋掉 FAIL', mergeProbeResult(record('FAIL'), record('UNKNOWN')).status === 'FAIL');
+  check('FAIL 一定蓋掉 PASS', mergeProbeResult(record('PASS'), record('FAIL')).status === 'FAIL');
+  check('PASS 可以蓋掉 UNKNOWN', mergeProbeResult(record('UNKNOWN'), record('PASS')).status === 'PASS');
+  check('沒有舊結果時照存', mergeProbeResult(null, record('UNKNOWN')).status === 'UNKNOWN');
 }
 // 稽核 2-6：引用範圍起點大於終點不算。
 check('引用範圍顛倒要擋', !checkCitations('見 README.md:999999-1', WORK, 1).passed);
