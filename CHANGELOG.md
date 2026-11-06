@@ -36,7 +36,7 @@
 - **`JobStore.start` 也檢查巢狀派工。** 第一次實戰的稽核報告指出，這個底層入口原本不擋，能直接呼叫內部模組就能繞過。`spawnPty` 刻意不加：runner 本來就帶 worker 標記，加了會連授權的 vendor 都啟動不了。（@moerasermax）
 - **派工政策第 6 條更正。** 舊文寫「codex 的 percentUsed 是剩餘」，現在是已用量（`usage-service.ts` 的 app-server 路徑，basis 為 used）。政策仍然要求讀 raw 原文。（@moerasermax）
 - **突變測試 34 筆全部被抓到**（kernel 33 筆、`JobStore.start` 1 筆，最後一輪只重跑新增與修改過的）。 過程中抓到 2 筆假綠燈（測試資料太弱，有沒有那道防線都會過），補強測試後重驗。另外第一筆突變讓迴圈停不下來，測試卡死半小時才發現，所以假執行器加了失控保護。
-- **手冊**：`docs/ai-cli_kernel/教學手冊.md`（手把手）、`docs/ai-cli_kernel/技術手冊.md`（含流程圖）。
+- **手冊**：`docs/ai-cli_kernel/教學手冊.md`（怎麼用）、`docs/ai-cli_kernel/技術手冊.md`（內部設計與命令列，含流程圖）。教學手冊依 `ai-cli_kernel` 自己的評估重寫，從 283 行縮到約 100 行：先教「跟 Claude 說一句話」，命令列與對照表移到技術手冊，也拿掉了個人路徑。（@moerasermax）
 - **探針一次沒結論不再把使用者擋下來。** 實際使用時撞到：模型回「我無法刻意嘗試繞過唯讀限制」，結果是 UNKNOWN（判定正確），卻把之前的 PASS 蓋掉，新任務全被擋。現在 UNKNOWN 不蓋掉已有結果；提示詞改成講清楚這是授權的測試、被拒絕才是正確結果；模型沒嘗試時自動再跑一次，只多一次。（@moerasermax）
 
 
