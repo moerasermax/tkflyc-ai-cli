@@ -10,6 +10,8 @@
 
 ### 新增
 
+- **`ai-cli_kernel` L5 歸檔包與待歸檔狀態**：新增純日誌計算的歸檔包、CLI `archive list/show/done` 與同名 MCP 三工具；沒有結束報告或 worktree 也能整理已落盤證據。develop 日誌補記相對基準的檔案及完整 commit 清單，舊日誌缺證據明示未知。status 首行顯示所有待歸檔筆數並標出觸發來源；本機 archived.json 綁定當時日誌／放行紀錄，新增事實後再次待歸檔。done 不改 run 狀態、不執行外部交接，worker 不可自行勾選，所有介面拒絕任意執行或服務寫入參數。補規格斷言、整合測試與突變定義；任意 contextCommand／同權限 worker 的非隔離限制仍待上層決策，未宣稱硬性遠端防寫已滿足。（@moerasermax；Codex）
+
 - **`ai-cli_kernel` L5 記憶與唯讀資料介面**：新增依 repo 分開的 JSONL 記憶與人工 CLI `memory list/add/promote/revoke`；decide lessons 僅存候選，日誌先落盤且可恢復。每次決策只參考符合範圍的 active 記憶，限制 20 條／4000 字元並標不可信。委任書／範本支援 contextCommand，開工前只讀一次、輸出前 8000 字元，失敗與中斷不重試並留下原因。無私人服務 SDK 或 Planner／Knowledge 寫入工具；外部命令以使用者權限執行，需自行提供唯讀 accessor，未宣稱隔離。補具名斷言、突變與規格對照；歸檔包留待下一步，完整 npm test 由外層 kernel 驗收。（@moerasermax；Codex）
 
 - **`ai-cli_kernel` L5 第一部分收尾驗收**：補強啟動當下名額落盤、有效 JSON 殘行、重複名額／未結束動作、來源種類與每日預算不擴大等斷言，新增對應突變；提供工作目錄內隔離快照的定向 harness，區分清單健康與實際指定斷言殺死突變。更新範本五項操作、總開關、每日帳本及排程的用法和限制；完整 npm test 留由外層 kernel 驗收。（@moerasermax；Codex）

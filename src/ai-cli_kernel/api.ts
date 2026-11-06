@@ -21,6 +21,7 @@ import { buildContract, TEMPLATES, type KernelStartInput } from './templates.js'
 import { isTerminalState, workDirOf, type ActionOutcome, type BoundaryStatus, type DevelopSpec, type KernelContract, type KernelExecutor, type RunState } from './types.js';
 import { aiCliKernelRestoreCheckpointBranch, cleanupWorkspace, realWorkspace } from './workspace.js';
 import { AiCliKernelMemoryStore, aiCliKernelMemoryRepo, type KernelMemory } from './memory.js';
+import { aiCliKernelBuildArchivePacket, type KernelArchiveMark, type KernelArchivePacket } from './archive.js';
 
 export type { KernelStartInput } from './templates.js';
 
@@ -78,6 +79,7 @@ export function aiCliKernelSetEnabled(enabled: boolean): { enabled: boolean; pat
 export type EffectiveState = RunState | 'interrupted';
 
 export interface KernelRunStatus {
+  origin: KernelContract['origin'] | null;
   contextCommand: string | null;
   context: RunView['context'];
   runId: string;
@@ -184,6 +186,7 @@ async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRun
   const boundary = withBoundary ? boundaries(contract) : {};
   const passed = Object.values(boundary).every(status => status === 'PASS');
   return {
+    origin: contract.origin ?? null,
     contextCommand: contract.contextCommand ?? null, context: view.context,
     runId: store.runId, state: view.state, effectiveState, stateLabel: STATE_LABELS[effectiveState],
     reason: view.reason ?? null, detail: view.detail ?? null, goal: contract.goal, workFolder: contract.develop ? workDirOf(contract.develop) : contract.workFolder, template: contract.template,
@@ -315,14 +318,62 @@ export async function aiCliKernelApprove(input: KernelApproveInput, deps: { laun
   return statusOf(store);
 }
 
-export async function aiCliKernelStatus(input: { runId?: string } = {}): Promise<KernelRunStatus | { active: string | null; runs: Array<Pick<KernelRunStatus, 'runId' | 'effectiveState' | 'stateLabel' | 'goal' | 'nextAction'>> }> {
+export async function aiCliKernelStatus(input: { runId?: string } = {}): Promise<KernelRunStatus | { active: string | null; pendingArchiveCount: number; runs: Array<Pick<KernelRunStatus, 'runId' | 'effectiveState' | 'stateLabel' | 'goal' | 'nextAction' | 'origin'>> }> {
   if (input.runId) return statusOf(storeFor(input.runId));
   const runs = [];
   for (const runId of listRunIds().slice(0, 20)) {
     const status = await statusOf(new RunStore(kernelRunDir(runId)), false);
-    runs.push({ runId, effectiveState: status.effectiveState, stateLabel: status.stateLabel, goal: status.goal.slice(0, 80), nextAction: status.nextAction });
+    runs.push({ runId, effectiveState: status.effectiveState, stateLabel: status.stateLabel, goal: status.goal.slice(0, 80), nextAction: status.nextAction, origin: status.origin });
   }
-  return { active: readActiveRun(), runs };
+  return { active: readActiveRun(), pendingArchiveCount: (await aiCliKernelArchiveList()).length, runs };
+}
+
+/* ---- 本機歸檔標記。沒有 callback、目的地、工具名稱或外部服務參數。 ---- */
+function archiveInput(input: object, allowed: string[]): void {
+  for (const key of Object.keys(input)) if (!allowed.includes(key)) throw new Error(`archive 不接受 ${key}`);
+}
+
+async function archivePacket(store: RunStore): Promise<KernelArchivePacket> {
+  let archived: KernelArchiveMark | null = null;
+  try {
+    archived = JSON.parse(readFileSync(join(store.dir, 'archived.json'), 'utf8')) as KernelArchiveMark;
+    if (!archived || archived.runId !== store.runId || !Number.isFinite(Date.parse(archived.archivedAt)) || typeof archived.note !== 'string' ||
+      !Number.isInteger(archived.journalSeq) || archived.journalSeq < 0 || !Number.isInteger(archived.releaseEvents) || archived.releaseEvents < 0) throw new Error('歸檔標記損毀，請人工核對');
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  const events = store.read();
+  const runnerAlive = replayJournal(events).state === 'running' ? await aiCliKernelRunnerAlive(store) : null;
+  return aiCliKernelBuildArchivePacket({ runId: store.runId, contract: store.readContract(), events, releases: store.readReleases(), archived, runnerAlive });
+}
+
+export async function aiCliKernelArchiveShow(input: { runId: string }): Promise<KernelArchivePacket> {
+  archiveInput(input, ['runId']);
+  return archivePacket(storeFor(input.runId));
+}
+
+/** 不限最近二十筆；讀取不建立任何檔案。 */
+export async function aiCliKernelArchiveList(input: Record<string, never> = {}): Promise<KernelArchivePacket[]> {
+  archiveInput(input, []);
+  const packets: KernelArchivePacket[] = [];
+  for (const runId of listRunIds()) {
+    const packet = await archivePacket(storeFor(runId));
+    if (packet.pendingArchive) packets.push(packet);
+  }
+  return packets;
+}
+
+/** 主 session 完成交接後標記；模型 worker 不可替自己勾掉收尾。只寫 run/archived.json。 */
+export async function aiCliKernelArchiveDone(input: { runId: string; note?: string }): Promise<KernelArchiveMark> {
+  archiveInput(input, ['runId', 'note']);
+  if (process.env.AI_CLI_WORKER === '1') throw new Error('worker 不能標記歸檔完成，請交給主 session');
+  if (input.note !== undefined && typeof input.note !== 'string') throw new Error('note 必須是字串');
+  const store = storeFor(input.runId);
+  const packet = await archivePacket(store);
+  if (packet.effectiveState === 'running') throw new Error('執行中的 run 不可標記歸檔，請先等它停止');
+  if (packet.archived) return packet.archived;
+  const mark: KernelArchiveMark = { runId: store.runId, archivedAt: new Date().toISOString(), note: input.note ?? '',
+    journalSeq: packet.evidence.journalSeq, releaseEvents: packet.evidence.releaseEvents };
+  atomicWrite(join(store.dir, 'archived.json'), JSON.stringify(mark, null, 2) + '\n');
+  return mark;
 }
 
 /** 等到 run 不是執行中，或逾時。逾時不是錯誤。 */

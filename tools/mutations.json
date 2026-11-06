@@ -4757,5 +4757,101 @@
     "to": "    // mutation: checkpoint guard removed",
     "script": "verify-ai-cli_kernel.mjs",
     "expect": "L5 context：先守住回復點才跑命令"
+  },
+  {
+    "name": "kernel archive：所有停止狀態都要列出",
+    "file": "src/ai-cli_kernel/archive.ts",
+    "from": "const pending = effectiveState !== 'running' && !marked;",
+    "to": "const pending = effectiveState === 'completed' && !marked;",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔 API：所有停止狀態與中斷都列出"
+  },
+  {
+    "name": "kernel archive：中斷須查證不是未知",
+    "file": "src/ai-cli_kernel/archive.ts",
+    "from": "view.state === 'running' && store.runnerAlive === false",
+    "to": "view.state === 'running' && store.runnerAlive !== true",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔純函式：身分未知不當成死亡"
+  },
+  {
+    "name": "kernel archive：停止決定不可漏掉",
+    "file": "src/ai-cli_kernel/archive.ts",
+    "from": "const stop = view.state === 'running' ? derivedStop(view) : null;",
+    "to": "const stop = view.state === 'completed' ? derivedStop(view) : null;",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔純函式：當在停止提案和 state 之間"
+  },
+  {
+    "name": "kernel archive：新日誌重新待歸檔",
+    "file": "src/ai-cli_kernel/archive.ts",
+    "from": "archived.journalSeq === view.lastSeq",
+    "to": "archived.journalSeq <= view.lastSeq",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔 API：接回後新日誌不會被舊標記隱藏"
+  },
+  {
+    "name": "kernel archive：新放行重新待歸檔",
+    "file": "src/ai-cli_kernel/archive.ts",
+    "from": "archived.releaseEvents === releases.length",
+    "to": "archived.releaseEvents <= releases.length",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔 API：後續放行紀錄使 run 再次待歸檔"
+  },
+  {
+    "name": "kernel archive：保留同 worker 多 commit",
+    "file": "src/ai-cli_kernel/archive.ts",
+    "from": "commits.push(...event.commits);",
+    "to": "commits.push(event.head);",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔整合：同 worker 多 commit 全部從日誌重建"
+  },
+  {
+    "name": "kernel archive：保留測試歷程",
+    "file": "src/ai-cli_kernel/archive.ts",
+    "from": "results: events.filter(event => event.type === 'verification')",
+    "to": "results: events.filter(event => event.type === 'verification').slice(-1)",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔純函式：測試歷程與精確失敗次數"
+  },
+  {
+    "name": "kernel archive：候選不漏掉",
+    "file": "src/ai-cli_kernel/archive.ts",
+    "from": "candidateMemories: view.candidateMemories",
+    "to": "candidateMemories: []",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔整合：完整工作包三"
+  },
+  {
+    "name": "kernel archive：worker不可勾選收尾",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "if (process.env.AI_CLI_WORKER === '1') throw new Error('worker 不能標記歸檔完成，請交給主 session');",
+    "to": "if (false) throw new Error('worker 不能標記歸檔完成，請交給主 session');",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔邊界：worker 即使允許巢狀仍不能自行標記"
+  },
+  {
+    "name": "kernel archive：拒絕任意執行參數",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "if (!allowed.includes(key)) throw new Error(`archive 不接受 ${key}`);",
+    "to": "if (false) throw new Error(`archive 不接受 ${key}`);",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔邊界：API MCP 拒絕額外執行參數"
+  },
+  {
+    "name": "kernel archive：已標記不重複列出",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "if (packet.pendingArchive) packets.push(packet);",
+    "to": "if (true) packets.push(packet);",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔 API：已歸檔不再列出"
+  },
+  {
+    "name": "kernel archive：狀態顯示待歸檔數量",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "pendingArchiveCount: (await aiCliKernelArchiveList()).length",
+    "to": "pendingArchiveCount: 0",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔 status：計數遍歷全部而非最近二十筆"
   }
 ]

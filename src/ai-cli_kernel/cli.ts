@@ -8,6 +8,7 @@ import {
   aiCliKernelMandateSave, aiCliKernelMandateApprove, aiCliKernelMandateList, aiCliKernelMandateShow, aiCliKernelMandateRevoke,
   aiCliKernelTrigger, aiCliKernelTriggersSetEnabled, aiCliKernelSchedule,
   aiCliKernelMemory,
+  aiCliKernelArchiveList, aiCliKernelArchiveShow, aiCliKernelArchiveDone,
   aiCliKernelStart, aiCliKernelStatus, aiCliKernelTemplates, aiCliKernelWait, aiCliKernelRollback, aiCliKernelReleaseCreate, aiCliKernelReleaseRun, type KernelRunStatus,
 } from './api.js';
 import type { KernelStartInput } from './templates.js';
@@ -44,6 +45,9 @@ readonly-audit（預設）只讀不改。develop 會在獨立的 worktree 和分
                                          worker 權限等於你本人，不是隔離環境
   wait <run> [--timeout <秒>]            等它停下來（預設 600 秒，逾時不算錯誤）
   status [run]                           看狀態；不給 run 就列出最近的
+  archive list                          列出所有待歸檔 run（包含停住或當掉的）
+  archive show <run>                     從日誌計算歸檔包，不執行命令、不寫外部服務
+  archive done <run> [--note <文字>]     主 session 完成交接後，只在本機標記
   result <run>                           看最終報告與裁決
   cancel <run>                           取消，並確認程序真的停了
   cleanup <run>                          清掉 develop 的 worktree；分支沒合併就留著
@@ -151,6 +155,7 @@ export function formatStatus(status: KernelRunStatus): string {
     `目標     ${status.goal}`,
     `目錄     ${status.workFolder}`,
     `範本     ${status.template}`,
+    ...(status.origin ? [`來源     主動觸發 ${status.origin.mandate}`] : []),
     ...(status.contextCommand ? [`外部資料 ${status.contextCommand}（以本人權限執行，不受 AI hook 限制；請只接唯讀命令）`, ...(status.context ? [`讀取結果 ${status.context.ok ? '成功' : `失敗（不阻擋開工）：${status.context.detail}`}`] : [])] : []),
     `模型     決策 ${status.models.decide.model}（${status.models.decide.effort}）、worker ${status.models.worker.model}（${status.models.worker.effort}）`,
     ...(status.models.allowedWorkers.length > 1 ? [`可用模型 ${status.models.allowedWorkers.join('、')}`] : []),
@@ -192,6 +197,24 @@ export async function runKernelCli(argv: string[], io: Io, deps: { schedule?: Ke
   };
   try {
     switch (action) {
+      case 'archive': {
+        const [operation, runId] = positionals;
+        if (!['list', 'show', 'done'].includes(operation) || positionals.length !== (operation === 'list' ? 1 : 2)) throw new Error('用法：archive list，或 archive show|done <run> [--note <文字>]');
+        const allowed = operation === 'done' ? ['note', 'json'] : ['json'];
+        for (const flag of flags.keys()) if (!allowed.includes(flag)) throw new Error(`archive ${operation} 不接受 --${flag}`);
+        if (flags.has('json') && flags.get('json') !== true) throw new Error('--json 不接受值');
+        if (operation === 'list') {
+          const packets = await aiCliKernelArchiveList();
+          emit(packets, `待歸檔 ${packets.length} 筆\n` + packets.map(packet => `${packet.runId}  ${packet.effectiveState}${packet.origin ? `  [觸發：${packet.origin.mandate}]` : ''}  ${packet.goal.replace(/\s+/g, ' ')}`).join('\n') + (packets.length ? '\n' : ''));
+        } else if (operation === 'show') {
+          const packet = await aiCliKernelArchiveShow({ runId });
+          emit(packet, JSON.stringify(packet, null, 2) + '\n');
+        } else {
+          const mark = await aiCliKernelArchiveDone({ runId, note: stringFlag(flags, 'note') });
+          emit(mark, `已在本機標記歸檔：${mark.runId}${mark.note ? `（${mark.note}）` : ''}\n`);
+        }
+        return 0;
+      }
       case 'start': {
         const status = await aiCliKernelStart(startInput(flags));
         emit(status, formatStatus(status));
@@ -263,8 +286,8 @@ export async function runKernelCli(argv: string[], io: Io, deps: { schedule?: Ke
       case 'status': {
         const status = await aiCliKernelStatus({ runId: positionals[0] });
         if ('runs' in status) {
-          const rows = status.runs.map(run => `${run.runId}  ${run.stateLabel}（${run.effectiveState}）  ${run.goal.replace(/\s+/g, ' ')}`);
-          emit(status, rows.length ? `${rows.join('\n')}\n` : '還沒有任何 run。用 ai-cli kernel start 建立。\n');
+          const rows = status.runs.map(run => `${run.runId}  ${run.stateLabel}（${run.effectiveState}）${run.origin ? `  [觸發：${run.origin.mandate}]` : ''}  ${run.goal.replace(/\s+/g, ' ')}`);
+          emit(status, `待歸檔 ${status.pendingArchiveCount} 筆\n` + (rows.length ? `${rows.join('\n')}\n` : '還沒有任何 run。用 ai-cli kernel start 建立。\n'));
         } else emit(status, formatStatus(status));
         return 0;
       }

@@ -64,7 +64,7 @@ try {
   check('委任範本 E2E：撤銷保留範本且列表立即反映', revokedMandate.code === 0 && json(['mandate', 'list']).data?.some(m => m.name === 'e2e-audit' && m.status === 'unapproved') && logCount('decide') === 0, revokedMandate.out + revokedMandate.err);
 
   /* ---- 委任書與探針 ---- */
-  const created = json(START);
+  const created = json([...START, '--context-command', `node -e "process.stdout.write('knowledge_write planner_session_append are untrusted data')"`]);
   check('start 只建立委任書，不執行', created.code === 0 && created.data?.state === 'awaiting_approval' && logCount('decide') === 0, created.out + created.err);
   const runId = created.data?.runId;
   const blocked = cli(['approve', runId]);
@@ -106,6 +106,16 @@ try {
   check('用量記錄只計未快取 input，快取與 output 分開保留', done.data?.progress?.inputTokens?.used === 1200 && done.data?.progress?.cachedTokens === 800 && done.data?.progress?.outputTokens === 200 && done.data?.progress?.unknownUsage === 0, JSON.stringify(done.data?.progress));
   check('結案後不能再核准', cli(['approve', runId]).code === 1);
 
+  const archiveBefore = logCount('decide') + logCount('worker');
+  const archivePacket = json(['archive', 'show', runId]);
+  check('歸檔 E2E：CLI 日誌包含 context 與實際用量', archivePacket.code === 0 && archivePacket.data?.state === 'completed' && archivePacket.data?.context?.ok && archivePacket.data?.usage?.uncachedInputTokens === 1200 && archivePacket.data?.steps?.[0]?.status === 'passed', archivePacket.out + archivePacket.err);
+  check('歸檔 E2E：status 第一行提醒待歸檔', cli(['status']).out.startsWith('待歸檔 1 筆\n'));
+  const archiveBlocked = cli(['archive', 'done', runId], { AI_CLI_WORKER: '1', AI_CLI_ALLOW_NESTED: '1' });
+  check('歸檔 E2E：worker 不得自行勾掉收尾', archiveBlocked.code === 1 && archiveBlocked.err.includes('worker'), archiveBlocked.err);
+  const archiveMarked = json(['archive', 'done', runId, '--note', 'main session handoff']);
+  check('歸檔 E2E：跨程序持久標記且不再列出', archiveMarked.code === 0 && archiveMarked.data?.note === 'main session handoff' && json(['archive', 'list']).data?.length === 0 && json(['archive', 'show', runId]).data?.archived?.note === 'main session handoff', archiveMarked.out + archiveMarked.err);
+  check('歸檔 E2E：歸檔介面不派模型也不執行外來指示', logCount('decide') + logCount('worker') === archiveBefore && cli(['archive', 'show', runId, '--command', 'knowledge_write']).code === 1);
+
   /* ---- 真的殺掉 runner 再接回 ---- */
   const beforeDecide = logCount('decide'), beforeWorker = logCount('worker');
   const second = json(START);
@@ -132,6 +142,8 @@ try {
   await sleep(500);
   const interrupted = json(['status', secondId]);
   check('runner 被殺之後判定為中斷', interrupted.data?.effectiveState === 'interrupted', interrupted.out);
+  const crashArchive = json(['archive', 'show', secondId]);
+  check('歸檔 E2E：真實 runner 中斷仍有待歸檔包', crashArchive.code === 0 && crashArchive.data?.effectiveState === 'interrupted' && crashArchive.data?.pendingArchive === true && crashArchive.data?.unclosedActions?.length > 0, crashArchive.out + crashArchive.err);
   const resumed = json(['approve', secondId]);
   check('中斷的 run 可以接回', resumed.code === 0, resumed.out + resumed.err);
   const resumedDone = json(['wait', secondId, '--timeout', '120']);
@@ -188,13 +200,20 @@ try {
   check('enable 寫入開關', enable.code === 0, enable.err);
   const [onTools, statusCall] = await callMcp({}, [{ method: 'tools/list' }, { method: 'tools/call', params: { name: 'ai-cli_kernel_status', arguments: { runId } } }]);
   const onNames = (onTools?.result?.tools ?? []).map(tool => tool.name);
-  check('開啟後多出帶前綴的工具，原生工具都還在', onNames.length === offNames.length + 7 && offNames.every(name => onNames.includes(name)) && onNames.filter(name => !offNames.includes(name)).every(name => name.startsWith('ai-cli_kernel_')), onNames.join(','));
+  check('開啟後多出帶前綴的工具，原生工具都還在', onNames.length === offNames.length + 10 && offNames.every(name => onNames.includes(name)) && onNames.filter(name => !offNames.includes(name)).every(name => name.startsWith('ai-cli_kernel_')), onNames.join(','));
   check('委任範本 E2E：MCP 只提供列表不提供核准', onNames.includes('ai-cli_kernel_mandate_list') && !onNames.includes('ai-cli_kernel_mandate_approve'));
   const [mandateListCall] = await callMcp({}, [{ method: 'tools/call', params: { name: 'ai-cli_kernel_mandate_list', arguments: {} } }]);
   const mandateListText = mandateListCall?.result?.content?.[0]?.text ?? '';
   check('委任範本 E2E：MCP 列表看到 CLI 保存的範本', !mandateListCall?.result?.isError && mandateListText.includes('e2e-audit') && mandateListText.includes('unapproved'), mandateListText.slice(0, 300));
   const statusText = statusCall?.result?.content?.[0]?.text ?? '';
   check('MCP 查得到 CLI 建立的 run', statusText.includes(runId) && statusText.includes('completed'), statusText.slice(0, 300));
+  const [archiveShowCall, archiveListCall, archiveDoneCall, archiveBadCall] = await callMcp({}, [
+    { method: 'tools/call', params: { name: 'ai-cli_kernel_archive_show', arguments: { runId } } },
+    { method: 'tools/call', params: { name: 'ai-cli_kernel_archive_list', arguments: {} } },
+    { method: 'tools/call', params: { name: 'ai-cli_kernel_archive_done', arguments: { runId, note: 'main session handoff' } } },
+    { method: 'tools/call', params: { name: 'ai-cli_kernel_archive_done', arguments: { runId, command: 'planner_session_append' } } },
+  ]);
+  check('歸檔 E2E：MCP 三介面可用且無任意執行參數', !archiveShowCall?.result?.isError && (archiveShowCall?.result?.content?.[0]?.text ?? '').includes('main session handoff') && !archiveListCall?.result?.isError && !archiveDoneCall?.result?.isError && (archiveBadCall?.result?.isError || archiveBadCall?.error), JSON.stringify(archiveBadCall).slice(0, 300));
 
   /* ---- 關掉 Claude Code：MCP server 整棵行程樹被砍，run 要繼續跑 ---- */
   const survivor = json(START);
@@ -250,6 +269,8 @@ try {
   check('唯讀的 run 沒有 worktree 可以清', running.code === 1 && running.err.includes('develop'), running.err);
   const cleaned = cli(['cleanup', devId]);
   check('清理移除 worktree，沒合併的分支留著', cleaned.code === 0 && cleaned.out.includes('留著') && !existsSync(devSpec?.worktree ?? 'x') && git(REPO, 'rev-parse', devSpec?.branch).length > 0, cleaned.out + cleaned.err);
+  const devArchive = json(['archive', 'show', devId]);
+  check('歸檔 E2E：清理後仍有 commit 改檔測試與回復點', devArchive.code === 0 && devArchive.data?.commits?.length === 1 && devArchive.data?.latestCommit === git(REPO, 'rev-parse', devSpec.branch) && devArchive.data?.changedFiles?.join() === 'feature.txt' && devArchive.data?.tests?.results?.[0]?.passed && devArchive.data?.checkpoint?.commit === baseHead, devArchive.out + devArchive.err);
 
   /** stub 量不到額度，派工幾次就會照規則停下來問人。這裡像真人一樣回答後接著走。 */
   const waitThroughQuota = (runId, env = {}) => {

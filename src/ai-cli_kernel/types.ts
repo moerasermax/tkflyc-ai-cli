@@ -217,6 +217,8 @@ export type KernelEventBody =
   | { type: 'step_checked'; actionId: string; stepId: string; passed: boolean; failureClass?: FailureClass; findings: string[]; commit?: string }
   | { type: 'acceptance'; stepId: string; passed: boolean; findings: string[] }
   | { type: 'workspace_ready'; head: string }
+  /** 歸檔依據：當時相對基準的檔案與完整 commit 清單，不依賴最後裁決檔。 */
+  | { type: 'workspace_observed'; head: string; commits: string[]; changedFiles: string[]; complete: boolean }
   /** 先記 commit，再建立 ref：當在兩次寫入之間也能核對原本的快照。 */
   | { type: 'checkpoint_prepared'; commit: string; ref: string }
   | ({ type: 'checkpoint' } & CheckpointRecord)
@@ -285,6 +287,8 @@ export interface WorkspaceOps {
   pushCheckpoint(spec: DevelopSpec, commit: string): void;
   prepare(spec: DevelopSpec): void;
   inspect(spec: DevelopSpec): WorkspaceState;
+  /** 舊的注入執行器可省略；歸檔包會明示清單不完整。 */
+  commitHistory?(spec: DevelopSpec): string[];
   commit(spec: DevelopSpec, message: string): string;
   restore(spec: DevelopSpec): void;
   refs(spec: DevelopSpec): string[];

@@ -159,6 +159,13 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
     commit({ type: 'state', state, ...(reason ? { reason } : {}), ...(detail ? { detail } : {}) });
   };
 
+  const observeWorkspace = (): void => {
+    if (!develop) return;
+    const state = ws!.inspect(develop);
+    commit({ type: 'workspace_observed', head: state.head, changedFiles: state.changed,
+      commits: ws!.commitHistory?.(develop) ?? (state.head === develop.baseCommit ? [] : [state.head]), complete: !!ws!.commitHistory });
+  };
+
   const initial = read();
   if (initial.state !== 'running') return initial.state;
   if (!initial.approvedDigest || store.contractDigest() !== initial.approvedDigest) {
@@ -330,17 +337,20 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
       return false;
     }
     if (!outcome.ok) {
+      if (develop) observeWorkspace();
       commit({ type: 'step_checked', actionId, stepId, passed: false, failureClass: outcome.failureClass ?? 'process_failed', findings: [outcome.detail] });
       return true;
     }
     const message = outcome.messageFile ? store.readOutput(outcome.messageFile) : '';
     const check = evaluateChecks(contract.stepChecks, message, workDir);
     if (!check.passed) {
+      if (develop) observeWorkspace();
       commit({ type: 'step_checked', actionId, stepId, passed: false, failureClass: 'check_failed', findings: check.findings });
       return true;
     }
     if (develop) {
       const result = checkDevelopStep(record, view);
+      observeWorkspace();
       if (!result.passed) { commit({ type: 'step_checked', actionId, stepId, passed: false, failureClass: result.failureClass, findings: result.findings }); return true; }
       commit({ type: 'step_checked', actionId, stepId, passed: true, findings: [], ...(result.commit ? { commit: result.commit } : {}) });
       return true; // 驗收要等測試跑完，由主迴圈接手。
@@ -480,6 +490,7 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
       return false;
     }
     commit({ type: 'workspace_ready', head: ready.head });
+    observeWorkspace();
     return true;
   };
 
@@ -492,6 +503,7 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
     try { ws!.restore(develop!); }
     catch (error) { setState('waiting_human', 'workspace_failed', `測試後還原工作目錄失敗：${(error as Error).message}`); return false; }
     const tail = (moved ? `測試指令移動了 HEAD（${head.slice(0, 10)} → ${after.slice(0, 10)}），不算通過。\n` : '') + result.tail.slice(-4000);
+    observeWorkspace();
     commit({ type: 'verification', commit: head, passed: result.exitCode === 0 && !result.timedOut && !moved, exitCode: result.exitCode, timedOut: result.timedOut, tail });
     return true;
   };
@@ -566,6 +578,7 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
     }
     const worker = view.actions.get(step.actionId)?.outcome;
     const delivered = develop ? ws!.inspect(develop) : null;
+    if (develop) observeWorkspace();
     const stat = develop ? ws!.diffStat(develop) : '';
     const report = store.readOutput(step.messageFile!);
     store.writeReport(develop && delivered ? `${report.trimEnd()}

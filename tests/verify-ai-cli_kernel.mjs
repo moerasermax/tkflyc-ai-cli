@@ -2385,6 +2385,159 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   setEnabled(false); clear();
 }
 
+/* ---- L5 歸檔包：純日誌、介面與記憶/context 整合 ---- */
+const { aiCliKernelBuildArchivePacket: buildArchive } = await load('archive');
+const { aiCliKernelArchiveList: archiveList, aiCliKernelArchiveShow: archiveShow, aiCliKernelArchiveDone: archiveDone } = await load('api');
+{
+  // 預期值依規格手寫，不以 replay 或產品 formatter 當唯一 oracle。
+  const contract = { ...buildContract({ goal: 'archive fixture', workFolder: WORK }), template: 'develop',
+    develop: { repoRoot: 'repo', branch: 'delivery', baseCommit: 'base', testCommand: 'test-fixed' },
+    origin: { kind: 'trigger', mandate: 'daily', digest: 'd' }, contextCommand: 'read-fixed' };
+  const bodies = [
+    { type: 'created', contractDigest: 'd' }, { type: 'state', state: 'running' },
+    { type: 'checkpoint_prepared', commit: 'cp', ref: 'checkpoints/run' },
+    { type: 'checkpoint', commit: 'cp', ref: 'checkpoints/run', pushed: true, remote: 'origin' },
+    { type: 'decide_processed', actionId: 'a0', ok: true, plan: { planId: 'p1', steps: [{ id: 'p1-s1', title: '第一步', prompt: 'p' }, { id: 'p1-s2', title: '未完成', prompt: 'p' }] }, memories: [{ id: 'lesson', text: '候選', source: { kind: 'run', runId: 'fixture' }, scope: {}, status: 'candidate', createdAt: '2026-01-01' }] },
+    { type: 'action_intent', action: { ...WORKER_INTENT, model: 'actual-model' } },
+    { type: 'action_result', actionId: 'a1', outcome: { ok: false, failureClass: 'process_failed', detail: 'failed', usage: { input: 120, cached: 80, output: 7 } } },
+    { type: 'step_checked', actionId: 'a1', stepId: 'p1-s1', passed: false, findings: ['step-failed'] },
+    { type: 'decide_processed', actionId: 'rejected', ok: false, reason: 'invalid' },
+    { type: 'workspace_observed', head: 'c2', commits: ['c1', 'c2'], changedFiles: ['a.txt', 'src/b.txt'], complete: true },
+    { type: 'verification', commit: 'c1', passed: false, exitCode: 3, timedOut: false, tail: 'test failed' },
+    { type: 'verification', commit: 'c2', passed: true, exitCode: 0, timedOut: false, tail: 'test passed' },
+    { type: 'acceptance', stepId: 'p1-s1', passed: false, findings: ['acceptance-failed'] },
+    { type: 'context_intent' }, { type: 'context_result', ok: false, exitCode: 9, timedOut: false, outputFile: null, detail: 'reader-failed' },
+    { type: 'state', state: 'waiting_human', reason: 'manual', detail: 'review required' },
+  ];
+  const releases = [{ type: 'release_created', at: '2026-01-01', id: 'rel', action: 'push', target: 'main', remote: 'origin', commit: 'c2', baseCommit: 'base' }, { type: 'release_intent', id: 'rel', at: '2026-01-02' }];
+  const snapshot = { runId: 'fixture', contract, events: bodies.map((b, i) => ({ ...b, seq: i + 1, at: '2026-01-01T00:00:00Z' })), releases, archived: null };
+  const before = JSON.stringify(snapshot);
+  const freeze = value => { if (value && typeof value === 'object') { Object.freeze(value); for (const child of Object.values(value)) freeze(child); } return value; };
+  freeze(snapshot);
+  const packet = buildArchive(snapshot);
+  check('L5 歸檔純函式：固定日誌產生固定結果且不改輸入', JSON.stringify(packet) === JSON.stringify(buildArchive(snapshot)) && JSON.stringify(snapshot) === before);
+  check('L5 歸檔純函式：身份狀態原因與來源完整', packet.runId === 'fixture' && packet.state === 'waiting_human' && packet.effectiveState === 'waiting_human' && packet.reason === 'manual' && packet.detail === 'review required' && packet.goal === 'archive fixture' && packet.template === 'develop' && packet.repo === 'repo' && packet.branch === 'delivery' && packet.origin.mandate === 'daily');
+  check('L5 歸檔純函式：基準最新完整 commit 清單與改檔證據', packet.baseCommit === 'base' && packet.latestCommit === 'c2' && packet.commits.join() === 'c1,c2' && packet.changedFiles.join() === 'a.txt,src/b.txt' && packet.evidence.completeCommitList && packet.evidence.changedFilesKnown);
+  check('L5 歸檔純函式：測試歷程與精確失敗次數', packet.tests.command === 'test-fixed' && packet.tests.results.length === 2 && packet.tests.results[0].exitCode === 3 && packet.tests.results[1].passed && JSON.stringify(packet.failures) === JSON.stringify({ actions: 1, steps: 1, tests: 1, acceptance: 1, decisions: 1 }));
+  check('L5 歸檔純函式：用量保留快取與模型實際選擇', packet.usage.inputTokens === 120 && packet.usage.cachedTokens === 80 && packet.usage.uncachedInputTokens === 40 && packet.usage.outputTokens === 7 && packet.models.used.join() === 'actual-model');
+  check('L5 歸檔純函式：包含失敗與未執行步驟標題結果', packet.steps.length === 2 && packet.steps[0].title === '第一步' && packet.steps[0].status === 'failed' && packet.steps[0].attempts[0].findings[0] === 'step-failed' && packet.steps[1].status === 'pending');
+  check('L5 歸檔純函式：回復點放行 unknown 候選與 context 失敗', packet.checkpoint.commit === 'cp' && packet.checkpoint.pushed && packet.checkpointPrepared.ref === 'checkpoints/run' && packet.releases[0].status === 'unknown' && packet.candidateMemories[0].status === 'candidate' && packet.context.detail === 'reader-failed');
+  check('L5 歸檔純函式：下一步由狀態推導且待人工標記', packet.pendingArchive && packet.nextActions[0].includes('approve fixture') && packet.nextActions[1].includes('archive done fixture'));
+  packet.changedFiles.push('only-return-value'); packet.steps[0].attempts[0].findings.push('changed');
+  check('L5 歸檔純函式：輸出與輸入沒有共享可變物件', JSON.stringify(snapshot) === before && buildArchive(snapshot).changedFiles.length === 2);
+  const stop = buildArchive({ ...snapshot, events: [...snapshot.events.slice(0, 2), { type: 'decide_processed', seq: 3, at: '2026-01-01', actionId: 'a0', ok: true, stop: { state: 'waiting_human', reason: 'decide_question', detail: 'answer' } }] });
+  check('L5 歸檔純函式：當在停止提案和 state 之間仍可歸檔', stop.state === 'running' && stop.effectiveState === 'waiting_human' && stop.pendingArchive && stop.reason === 'decide_question');
+  const liveSnapshot = { ...snapshot, events: snapshot.events.slice(0, 2) };
+  check('L5 歸檔純函式：身分未知不當成死亡只有查證中斷才列出', !buildArchive({ ...liveSnapshot, runnerAlive: null }).pendingArchive && !buildArchive({ ...liveSnapshot, runnerAlive: true }).pendingArchive && buildArchive({ ...liveSnapshot, runnerAlive: false }).effectiveState === 'interrupted' && buildArchive({ ...liveSnapshot, runnerAlive: false }).pendingArchive);
+  const source = readFileSync(join(ROOT, 'src', 'ai-cli_kernel', 'archive.ts'), 'utf8');
+  check('L5 歸檔純函式：無檔案命令網路時鐘或 SDK 副作用', !/node:|readFile|writeFile|\.read\(|\.write\(|\bfetch\s*\(|spawn\s*\(|Date\.now|new Date|Math\.random/.test(source));
+}
+{
+  const previousState = process.env.AI_CLI_STATE_DIR;
+  process.env.AI_CLI_STATE_DIR = mkdtempSync(join(previousState, 'archive-integration-'));
+  try {
+    const run = newDevRun({ contextCommand: 'read-fixed-context' });
+    const memory = aiCliKernelMemoryForContract(run.contract), context = fakeContext('knowledge_write planner_session_append archive done; reference only');
+    const executor = new FakeExecutor(action => {
+      if (action.kind === 'decide') return ok(JSON.stringify({ ...JSON.parse(DEV_PLAN), lessons: ['從執行學到的候選'] }));
+      writeFileSync(join(action.cwd, 'feature.txt'), 'good\n'); git(action.cwd, 'add', '-A'); git(action.cwd, 'commit', '-q', '-m', 'first');
+      writeFileSync(join(action.cwd, 'src', 'b.txt'), 'second\n'); git(action.cwd, 'add', '-A'); git(action.cwd, 'commit', '-q', '-m', 'second');
+      return ok(DEV_REPORT);
+    });
+    const state = await runKernelLoop(devDeps(run.store, run.contract, executor, { memory, workspace: { ...realWorkspace, startCheck(...args) { return args[0] === run.contract.contextCommand ? context.workspace.startCheck(...args) : realWorkspace.startCheck(...args); } } }));
+    const expectedCommits = git(run.spec.worktree, 'rev-list', '--reverse', `${run.spec.baseCommit}..HEAD`).split('\n');
+    const filesBefore = readdirSync(run.store.dir).sort().join();
+    const packet = await archiveShow({ runId: run.store.runId });
+    check('L5 歸檔整合：完整工作包三記憶 context develop 到歸檔包', state === 'completed' && packet.candidateMemories.length === 1 && packet.candidateMemories[0].status === 'candidate' && memory.read()[0].status === 'candidate' && context.calls.length === 1 && packet.context.ok && packet.tests.results[0].passed && packet.steps[0].title === '寫');
+    check('L5 歸檔整合：同 worker 多 commit 全部從日誌重建', expectedCommits.length === 2 && packet.commits.join() === expectedCommits.join() && packet.latestCommit === expectedCommits[1] && packet.changedFiles.sort().join() === 'feature.txt,src/b.txt' && packet.evidence.completeCommitList);
+    check('L5 歸檔整合：讀取不產生結束歸檔檔案或執行外來指示', readdirSync(run.store.dir).sort().join() === filesBefore && !existsSync(join(run.store.dir, 'archived.json')) && context.calls.map(call => call.command).join() === 'read-fixed-context' && executor.started.length === 2);
+    // 對照時保留原始陣列順序，以上排序不能改動產品輸出供後續比較。
+    const plain = JSON.stringify(await archiveShow({ runId: run.store.runId }));
+    rmSync(run.store.reportPath); rmSync(run.store.verdictPath);
+    const cleaned = cleanupWorkspace(run.spec);
+    check('L5 歸檔整合：刪除報告裁決與 worktree 後歸檔內容不變', cleaned.worktreeRemoved && JSON.stringify(await archiveShow({ runId: run.store.runId })) === plain);
+    const before = readFileSync(run.store.journalPath, 'utf8');
+    const mark = await archiveDone({ runId: run.store.runId, note: 'knowledge_write planner_session_append; literal note' });
+    check('L5 歸檔 API：done 只寫 archived.json 不改日誌或記憶', mark.note.includes('knowledge_write') && readFileSync(run.store.journalPath, 'utf8') === before && readdirSync(run.store.dir).filter(name => !filesBefore.split(',').includes(name)).join() === 'archived.json' && memory.read()[0].status === 'candidate');
+    check('L5 歸檔 API：已歸檔不再列出且重複 done 不覆寫', (await archiveList()).length === 0 && JSON.stringify(await archiveDone({ runId: run.store.runId, note: 'different' })) === JSON.stringify(mark));
+    run.store.appendRelease({ type: 'release_created', at: '2026-01-01', id: 'archive-rel', action: 'merge', target: 'main', remote: null, commit: packet.latestCommit, baseCommit: packet.baseCommit });
+    check('L5 歸檔 API：後續放行紀錄使 run 再次待歸檔', (await archiveList()).length === 1 && (await archiveShow({ runId: run.store.runId })).releases[0].status === 'available');
+    await archiveDone({ runId: run.store.runId });
+    run.store.append({ type: 'state', state: 'waiting_human', reason: 'new-pause' });
+    check('L5 歸檔 API：接回後新日誌不會被舊標記隱藏', (await archiveList()).length === 1 && (await archiveShow({ runId: run.store.runId })).reason === 'new-pause');
+  } finally { process.env.AI_CLI_STATE_DIR = previousState; }
+}
+{
+  const previousState = process.env.AI_CLI_STATE_DIR;
+  process.env.AI_CLI_STATE_DIR = mkdtempSync(join(previousState, 'archive-interfaces-'));
+  const { aiCliKernelHandleTool } = await load('mcp-tools');
+  const cli = async args => { let out = '', err = ''; const code = await runKernelCli(args, { stdout: text => out += text, stderr: text => err += text }); return { code, out, err }; };
+  try {
+    check('L5 歸檔 CLI：空狀態第一行仍有待歸檔零筆', (await cli(['status'])).out.startsWith('待歸檔 0 筆\n') && (await archiveList()).length === 0);
+    const states = ['awaiting_approval', 'waiting_human', 'needs_reconcile', 'stop_pending', 'version_drift', 'completed', 'failed', 'cancelled', 'budget_exhausted'];
+    const runs = [];
+    for (const state of states) { const run = newRun(); run.store.append({ type: 'state', state, reason: `reason-${state}` }); runs.push(run); }
+    const crashed = crashedAtIntent(); runs.push(crashed);
+    appendFileSync(crashed.store.journalPath, '{"type":"state"');
+    const crashPacket = await archiveShow({ runId: crashed.store.runId });
+    check('L5 歸檔 API：當掉 run 無報告仍可由殘行前的日誌歸檔', crashPacket.effectiveState === 'interrupted' && crashPacket.pendingArchive && crashPacket.unclosedActions[0].hasResult === false && crashPacket.steps[0].status === 'unknown' && !existsSync(crashed.store.reportPath));
+    check('L5 歸檔 API：舊日誌未知檔案不冒稱沒有改動', !crashPacket.evidence.changedFilesKnown && !crashPacket.evidence.completeCommitList && crashPacket.changedFiles.length === 0);
+    const active = newRun(); writeFileSync(active.store.runnerPath, JSON.stringify({ pid: process.pid, started: '', name: '' }));
+    check('L5 歸檔 API：活著的 run 不待歸檔也不能 done', !(await archiveShow({ runId: active.store.runId })).pendingArchive && !!await rejecting(archiveDone({ runId: active.store.runId })) && !existsSync(join(active.store.dir, 'archived.json')));
+    check('L5 歸檔 API：所有停止狀態與中斷都列出', (await archiveList()).length === states.length + 1);
+    for (let i = 0; i < 15; i++) { const run = newRun(); run.store.append({ type: 'state', state: 'cancelled' }); }
+    const triggerContract = { ...buildContract({ goal: 'triggered archive', workFolder: WORK }), origin: { kind: 'trigger', mandate: 'nightly', digest: 'd' } };
+    // 固定較晚的 id，避免同一秒亂數排序使觸發 fixture 掉到最近二十筆之外。
+    const triggered = { store: new RunStore(kernelRunDir('kr-20990101-000000-ffff')) };
+    triggered.store.create(triggerContract); triggered.store.append({ type: 'state', state: 'failed' });
+    const summary = await aiCliKernelStatus();
+    check('L5 歸檔 status：計數遍歷全部而非最近二十筆', summary.pendingArchiveCount === 26 && summary.runs.length === 20 && (await archiveList()).length === 26);
+    const text = await cli(['status']);
+    check('L5 歸檔 status：第一行待歸檔筆數並標出觸發', text.code === 0 && text.out.startsWith('待歸檔 26 筆\n') && text.out.includes('[觸發：nightly]'));
+    const list = await cli(['archive', 'list', '--json']);
+    check('L5 歸檔 CLI：list 只列待歸檔並保留觸發來源', list.code === 0 && JSON.parse(list.out).length === 26 && JSON.parse(list.out).some(p => p.origin?.mandate === 'nightly'));
+    const show = await cli(['archive', 'show', crashed.store.runId, '--json']);
+    check('L5 歸檔 CLI：show JSON 與 API 一致', show.code === 0 && show.out.trim() === JSON.stringify(await archiveShow({ runId: crashed.store.runId }), null, 2));
+    const done = await cli(['archive', 'done', crashed.store.runId, '--note', 'handoff-note', '--json']);
+    check('L5 歸檔 CLI：done 持久標記並從列表消失', done.code === 0 && JSON.parse(done.out).note === 'handoff-note' && (await archiveList()).length === 25);
+    check('L5 歸檔 CLI：show 仍可讀已標記的 run', (await cli(['archive', 'show', crashed.store.runId])).out.includes('handoff-note'));
+    const external = spawnSync(process.execPath, [join(ROOT, 'dist', 'bin', 'ai-cli.js'), 'kernel', 'archive', 'list', '--json'], { encoding: 'utf8', env: { ...process.env, AI_CLI_AUTO_UPDATE: 'off' }, windowsHide: true });
+    check('L5 歸檔 CLI：另一程序看得到 archived.json', external.status === 0 && !JSON.parse(external.stdout).some(p => p.runId === crashed.store.runId));
+    for (const args of [[], ['send'], ['list', 'extra'], ['show'], ['done'], ['list', '--note', 'x'], ['show', crashed.store.runId, '--command', 'write'], ['done', crashed.store.runId, '--note'], ['done', crashed.store.runId, '--json', 'false'], ['done', crashed.store.runId, '--planner'], ['show', '../escape']]) check(`L5 歸檔 CLI：拒絕不合法輸入 ${args.join(' ')}`, (await cli(['archive', ...args])).code === 1);
+    process.env.AI_CLI_KERNEL = 'on';
+    const definitions = aiCliKernelToolDefinitions().filter(tool => tool.name.startsWith('ai-cli_kernel_archive_'));
+    check('L5 歸檔 MCP：三工具與嚴格 schema', definitions.map(tool => tool.name).sort().join() === 'ai-cli_kernel_archive_done,ai-cli_kernel_archive_list,ai-cli_kernel_archive_show' && definitions.every(tool => tool.inputSchema.additionalProperties === false));
+    check('L5 歸檔 MCP：list 與 show 共用 API', (await aiCliKernelHandleTool('ai-cli_kernel_archive_list', {})).length === 25 && (await aiCliKernelHandleTool('ai-cli_kernel_archive_show', { runId: crashed.store.runId })).archived.note === 'handoff-note');
+    const target = runs[0].store;
+    const mcpMark = await aiCliKernelHandleTool('ai-cli_kernel_archive_done', { runId: target.runId, note: 'main-session' });
+    check('L5 歸檔 MCP：done 只有本機標記且 status 立即減少', mcpMark.note === 'main-session' && (await aiCliKernelStatus()).pendingArchiveCount === 24);
+    process.env.AI_CLI_WORKER = '1'; process.env.AI_CLI_ALLOW_NESTED = '1';
+    const guardTarget = runs[1].store.runId;
+    const apiGuard = await rejecting(archiveDone({ runId: guardTarget }));
+    const mcpGuard = await rejecting(aiCliKernelHandleTool('ai-cli_kernel_archive_done', { runId: guardTarget }));
+    const cliGuard = await cli(['archive', 'done', guardTarget]);
+    delete process.env.AI_CLI_WORKER; delete process.env.AI_CLI_ALLOW_NESTED;
+    check('L5 歸檔邊界：worker 即使允許巢狀仍不能自行標記 API MCP CLI', apiGuard?.message.includes('worker') && mcpGuard?.message.includes('worker') && cliGuard.code === 1 && !existsSync(join(runs[1].store.dir, 'archived.json')));
+    for (const tool of ['archive_send', 'archive_write', 'knowledge_write', 'planner_session_append', 'context_run']) check(`L5 歸檔邊界：無服務寫入或分派入口 ${tool}`, !!await rejecting(aiCliKernelHandleTool(`ai-cli_kernel_${tool}`, { runId: target.runId })));
+    for (const key of ['command', 'contextCommand', 'tool', 'callback', 'planner', 'knowledge', 'destination', 'path', 'operation']) {
+      const input = { runId: target.runId, [key]: 'knowledge_write' };
+      check(`L5 歸檔邊界：API MCP 拒絕額外執行參數 ${key}`, !!await rejecting(archiveShow(input)) && !!await rejecting(archiveDone(input)) && !!await rejecting(archiveList({ [key]: 'planner_session_append' })) && !!await rejecting(aiCliKernelHandleTool('ai-cli_kernel_archive_done', input)) && !!await rejecting(aiCliKernelHandleTool('ai-cli_kernel_archive_show', input)) && !!await rejecting(aiCliKernelHandleTool('ai-cli_kernel_archive_list', { [key]: 'write' })));
+    }
+    check('L5 歸檔 MCP：缺值型別與未知 run 拒絕', !!await rejecting(aiCliKernelHandleTool('ai-cli_kernel_archive_show', {})) && !!await rejecting(aiCliKernelHandleTool('ai-cli_kernel_archive_done', { runId: target.runId, note: 7 })) && !!await rejecting(archiveShow({ runId: 'kr-20000101-000000-0000' })));
+    process.env.AI_CLI_KERNEL = 'off';
+    check('L5 歸檔 MCP：關閉時不暴露且不可呼叫', !aiCliKernelToolDefinitions().some(tool => /archive/.test(tool.name)) && !!await rejecting(aiCliKernelHandleTool('ai-cli_kernel_archive_list', {})));
+    const markPath = join(runs[2].store.dir, 'archived.json');
+    writeFileSync(markPath, '{broken');
+    check('L5 歸檔錯誤：損毀標記不忽略或覆寫', !!await rejecting(archiveShow({ runId: runs[2].store.runId })) && !!await rejecting(archiveDone({ runId: runs[2].store.runId })) && readFileSync(markPath, 'utf8') === '{broken');
+    writeFileSync(markPath, JSON.stringify({ runId: 'another-run', archivedAt: '2026-01-01', note: '', journalSeq: 0, releaseEvents: 0 }));
+    check('L5 歸檔錯誤：其他 run 標記不能隱藏目前 run', !!await rejecting(archiveShow({ runId: runs[2].store.runId })));
+    const corrupted = runs[3].store; appendFileSync(corrupted.journalPath, 'bad\n{}\n');
+    check('L5 歸檔錯誤：日誌中間損毀回報失敗', !!await rejecting(archiveShow({ runId: corrupted.runId })));
+    appendFileSync(runs[4].store.releasesPath, '{"type":"release_intent"');
+    check('L5 歸檔錯誤：放行殘行結果不明拒絕猜測', !!await rejecting(archiveShow({ runId: runs[4].store.runId })));
+  } finally { delete process.env.AI_CLI_KERNEL; delete process.env.AI_CLI_WORKER; delete process.env.AI_CLI_ALLOW_NESTED; process.env.AI_CLI_STATE_DIR = previousState; }
+}
+
 /* ---- 命名與依賴方向 ---- */
 {
   const walk = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? walk(join(dir, entry.name)) : entry.name.endsWith('.ts') ? [join(dir, entry.name)] : []);
