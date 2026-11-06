@@ -1,0 +1,328 @@
+/**
+ * 對外入口。CLI 與 MCP 都只呼叫這裡，行為才不會兩邊各一套。
+ * 匯出函式一律以 aiCliKernel 開頭，讓原生程式碼裡一眼看得出這是延伸功能。
+ */
+import { spawn } from 'node:child_process';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { CONFIG_DIR } from '../core/user-config.js';
+import { lookupIdentities } from '../core/live-jobs.js';
+import { sameIdentity } from '../core/job-store.js';
+import { assertCanStartJob } from '../core/worker-env.js';
+import { FileJobExecutor } from './executor.js';
+import { acquireActiveLock, atomicWrite, kernelRunDir, listRunIds, newRunId, readActiveRun, releaseActiveLock, RunStore } from './journal.js';
+import { boundaryKey, boundaryStatus, runBoundaryProbe, type ProbeRecord } from './probe.js';
+import { activeMinutes, nextStep, openActions, replayJournal, type RunView } from './replay.js';
+import { agentForModel } from './runtime.js';
+import { buildContract, TEMPLATES, type KernelStartInput } from './templates.js';
+import { isTerminalState, type ActionOutcome, type BoundaryStatus, type KernelContract, type KernelExecutor, type RunState } from './types.js';
+
+export type { KernelStartInput } from './templates.js';
+
+const OVERRIDABLE_REASONS = new Set(['quota_low', 'quota_unknown', 'worktree_changed']);
+
+/* ---- 開關：預設關閉，開了 MCP 才會多出 ai-cli_kernel_* 工具 ---- */
+function enablePath(): string { return join(CONFIG_DIR, 'kernel.json'); }
+
+export function aiCliKernelEnabled(): boolean {
+  const env = process.env.AI_CLI_KERNEL;
+  if (env === 'on') return true;
+  if (env === 'off') return false;
+  try { return (JSON.parse(readFileSync(enablePath(), 'utf8')) as { enabled?: unknown }).enabled === true; }
+  catch { return false; }
+}
+
+export function aiCliKernelSetEnabled(enabled: boolean): { enabled: boolean; path: string } {
+  atomicWrite(enablePath(), JSON.stringify({ enabled }, null, 2) + '\n');
+  return { enabled, path: enablePath() };
+}
+
+/* ---- 狀態 ---- */
+export type EffectiveState = RunState | 'interrupted';
+
+export interface KernelRunStatus {
+  runId: string;
+  state: RunState;
+  effectiveState: EffectiveState;
+  stateLabel: string;
+  reason: string | null;
+  detail: string | null;
+  goal: string;
+  workFolder: string;
+  template: string;
+  models: { decide: KernelContract['decide']; worker: KernelContract['worker'] };
+  contractDigest: string | null;
+  boundary: Record<string, BoundaryStatus>;
+  boundaryLabel: string;
+  progress: {
+    decides: { used: number; max: number }; workerSteps: { used: number; max: number };
+    inputTokens: { used: number; max: number }; cachedTokens: number; outputTokens: number; unknownUsage: number;
+    activeMinutes: { used: number; max: number }; quotaUnknownDispatches: number;
+  };
+  steps: Array<{ id: string; title: string; status: 'passed' | 'failed' | 'running' | 'pending'; findings: string[] }>;
+  currentAction: { actionId: string; kind: string; stepId: string | null; job: { pid: number; jobId: string } | null } | null;
+  acceptance: { stepId: string; passed: boolean; findings: string[] } | null;
+  nextAction: string;
+  reportPath: string | null;
+  runDir: string;
+}
+
+const STATE_LABELS: Record<EffectiveState, string> = {
+  awaiting_approval: '等你核准委任書', running: '執行中', waiting_human: '停下來等你', needs_reconcile: '要對帳：分不出動作做了沒',
+  stop_pending: '正在等舊程序消失', version_drift: 'ai-cli 被更新，已暫停', interrupted: 'runner 中斷了，可以接回',
+  completed: '完成，已通過驗收', failed: '失敗', cancelled: '已取消', budget_exhausted: '預算用完，已停止',
+};
+
+function nextActionFor(state: EffectiveState, runId: string, reason?: string): string {
+  switch (state) {
+    case 'awaiting_approval': return `讀完委任書後，同意就執行 ai-cli kernel approve ${runId}，不要就執行 ai-cli kernel cancel ${runId}`;
+    case 'running': return `不用做事。可用 ai-cli kernel wait ${runId} 等它停下來。`;
+    case 'waiting_human':
+      if (reason === 'boundary_unverified') return `先跑 ai-cli kernel probe --agent <agent>，通過後再 ai-cli kernel approve ${runId}`;
+      if (reason === 'decide_question') return `回答問題：ai-cli kernel approve ${runId} --note "你的回答"`;
+      return `確認上面的原因後，要繼續就執行 ai-cli kernel approve ${runId}，不要就執行 ai-cli kernel cancel ${runId}`;
+    case 'needs_reconcile': return `先用 ai-cli jobs 和 git status 確認實際情況。確定要放棄這個動作的結果就執行 ai-cli kernel approve ${runId} --reconcile abandon`;
+    case 'stop_pending': return `舊程序還沒確認停止。稍後再執行一次 ai-cli kernel cancel ${runId} 重新檢查。`;
+    case 'version_drift': return `ai-cli 更新過了。確認沒問題後執行 ai-cli kernel approve ${runId} 接回。`;
+    case 'interrupted': return `runner 不在了。執行 ai-cli kernel approve ${runId} 接回，已完成的步驟不會重做。`;
+    case 'completed': return `看報告：ai-cli kernel result ${runId}`;
+    case 'failed': case 'budget_exhausted': case 'cancelled': return `這個 run 已結束。需要的話調整目標或預算後重新 ai-cli kernel start。`;
+  }
+}
+
+async function runnerAlive(store: RunStore): Promise<boolean | null> {
+  if (!existsSync(store.runnerPath)) return false;
+  let holder: { pid: number; started: string; name: string };
+  try { holder = JSON.parse(readFileSync(store.runnerPath, 'utf8')); } catch { return null; }
+  const live = (await lookupIdentities([holder.pid])).get(holder.pid);
+  if (!live) return false;
+  return holder.started ? sameIdentity(holder, live) : true;
+}
+
+function describeSteps(view: RunView): KernelRunStatus['steps'] {
+  const rows: KernelRunStatus['steps'] = view.stepOrder.map(id => {
+    const step = view.stepResults.get(id)!;
+    return { id, title: step.title, status: step.passed ? 'passed' : 'failed', findings: step.findings };
+  });
+  const open = new Set(openActions(view).map(action => action.spec.stepId).filter(Boolean));
+  for (const step of view.plan?.steps ?? []) {
+    if (view.stepResults.has(step.id)) continue;
+    rows.push({ id: step.id, title: step.title, status: open.has(step.id) ? 'running' : 'pending', findings: [] });
+  }
+  return rows;
+}
+
+function boundaries(contract: KernelContract): Record<string, BoundaryStatus> {
+  const result: Record<string, BoundaryStatus> = {};
+  for (const model of [contract.decide.model, contract.worker.model]) {
+    const agent = agentForModel(model);
+    result[agent] ??= boundaryStatus(agent);
+  }
+  return result;
+}
+
+async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRunStatus> {
+  const contract = store.readContract();
+  const view = replayJournal(store.read());
+  const alive = view.state === 'running' ? await runnerAlive(store) : null;
+  const effectiveState: EffectiveState = view.state === 'running' && alive === false ? 'interrupted' : view.state;
+  const open = openActions(view)[0];
+  const boundary = withBoundary ? boundaries(contract) : {};
+  const passed = Object.values(boundary).every(status => status === 'PASS');
+  return {
+    runId: store.runId, state: view.state, effectiveState, stateLabel: STATE_LABELS[effectiveState],
+    reason: view.reason ?? null, detail: view.detail ?? null, goal: contract.goal, workFolder: contract.workFolder, template: contract.template,
+    models: { decide: contract.decide, worker: contract.worker }, contractDigest: view.contractDigest, boundary,
+    boundaryLabel: contract.allowUnverifiedBoundary ? '未驗證（呼叫端明確允許）' : passed ? '工具受限，非隔離' : '尚未通過探針',
+    progress: {
+      decides: { used: view.counters.decides, max: contract.budget.maxDecides },
+      workerSteps: { used: view.counters.workerSteps, max: contract.budget.maxWorkerSteps },
+      inputTokens: { used: view.counters.inputTokens, max: contract.budget.maxInputTokens },
+      cachedTokens: view.counters.cachedTokens, outputTokens: view.counters.outputTokens, unknownUsage: view.counters.unknownUsage,
+      activeMinutes: { used: Math.round(activeMinutes(view, Date.now()) * 10) / 10, max: contract.budget.maxWallMinutes },
+      quotaUnknownDispatches: view.counters.quotaUnknownDispatches,
+    },
+    steps: describeSteps(view),
+    currentAction: open ? { actionId: open.spec.actionId, kind: open.spec.kind, stepId: open.spec.stepId ?? null, job: open.job ?? null } : null,
+    acceptance: view.acceptance, nextAction: nextActionFor(effectiveState, store.runId, view.reason),
+    reportPath: existsSync(store.reportPath) ? store.reportPath : null, runDir: store.dir,
+  };
+}
+
+function storeFor(runId: string): RunStore {
+  const dir = kernelRunDir(runId);
+  if (!existsSync(join(dir, 'contract.json'))) throw new Error(`找不到 run：${runId}`);
+  return new RunStore(dir);
+}
+
+/* ---- 啟動 runner ---- */
+async function spawnRunner(store: RunStore): Promise<void> {
+  const viaLauncher = process.platform === 'win32';
+  rmSync(join(store.dir, 'launcher.json'), { force: true });
+  const script = fileURLToPath(new URL(viaLauncher ? './launcher.js' : './runner.js', import.meta.url));
+  const child = spawn(process.execPath, [script, store.dir], {
+    cwd: fileURLToPath(new URL('../../', import.meta.url)), env: process.env, detached: true, stdio: 'ignore', windowsHide: true,
+  });
+  await new Promise<void>((resolve, reject) => {
+    child.once('error', reject);
+    if (viaLauncher) child.once('close', code => code === 0 ? resolve() : reject(new Error(`launcher 結束碼 ${code}`)));
+    else child.once('spawn', () => { child.unref(); resolve(); });
+  });
+  const startSeq = replayJournal(store.read()).lastSeq;
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    if (existsSync(store.runnerPath) || replayJournal(store.read()).lastSeq > startSeq) return;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error(`runner 沒有在時限內啟動，請看 ${store.dir}`);
+}
+
+/* ---- 對外動作 ---- */
+export async function aiCliKernelStart(input: KernelStartInput): Promise<KernelRunStatus> {
+  assertCanStartJob(); // worker 不能再開 run，防止遞迴。
+  const contract = buildContract(input);
+  const store = new RunStore(kernelRunDir(newRunId()));
+  store.create(contract);
+  return statusOf(store);
+}
+
+export interface KernelApproveInput { runId: string; note?: string; reconcile?: string }
+
+export async function aiCliKernelApprove(input: KernelApproveInput): Promise<KernelRunStatus> {
+  assertCanStartJob();
+  const store = storeFor(input.runId);
+  const contract = store.readContract();
+  const view = replayJournal(store.read());
+  const digest = store.contractDigest();
+  if (digest !== view.contractDigest) throw new Error('委任書內容和建立時不一致，拒絕核准');
+  if (isTerminalState(view.state)) throw new Error(`這個 run 已經結束（${view.state}），不能再核准`);
+  if (view.state === 'stop_pending') throw new Error(`舊程序還沒確認停止，不能接回。請執行 ai-cli kernel cancel ${input.runId} 重新檢查`);
+  if (view.state === 'running' && await runnerAlive(store) !== false) throw new Error('這個 run 已經在執行中');
+
+  if (view.state === 'needs_reconcile') {
+    if (input.reconcile !== 'abandon') throw new Error(`這個 run 有分不出結果的動作。確認實際情況後，加上 --reconcile abandon 放棄那個動作的結果`);
+    for (const action of openActions(view)) {
+      // 使用者放棄的是結果，不代表它沒有執行過，所以名額不退。
+      store.append({ type: 'action_abandoned', actionId: action.spec.actionId, reason: '使用者確認後放棄', refund: false });
+    }
+  } else if (input.reconcile !== undefined) {
+    throw new Error('這個狀態不需要 --reconcile');
+  }
+
+  if (view.state === 'awaiting_approval') {
+    if (!contract.allowUnverifiedBoundary) {
+      for (const [agent, status] of Object.entries(boundaries(contract))) {
+        if (status !== 'PASS') throw new Error(`${agent} 的權限邊界探針結果是 ${status}。請先執行 ai-cli kernel probe --agent ${agent}`);
+      }
+    }
+    const lock = acquireActiveLock(input.runId);
+    if (!lock.ok) throw new Error(`受治理任務一次只能跑一個，目前被 ${lock.heldBy} 佔用。等它結束，或執行 ai-cli kernel cancel ${lock.heldBy}`);
+    store.append({ type: 'approved', contractDigest: digest, kind: 'contract', ...(input.note ? { note: input.note } : {}) });
+  } else {
+    const lock = acquireActiveLock(input.runId);
+    if (!lock.ok) throw new Error(`受治理任務一次只能跑一個，目前被 ${lock.heldBy} 佔用`);
+    const overrides = view.reason && OVERRIDABLE_REASONS.has(view.reason) && view.state === 'waiting_human' ? [view.reason] : [];
+    store.append({ type: 'approved', contractDigest: digest, kind: 'continue', ...(input.note ? { note: input.note } : {}), ...(overrides.length ? { overrides } : {}) });
+  }
+  store.append({ type: 'state', state: 'running' });
+  await spawnRunner(store);
+  return statusOf(store);
+}
+
+export async function aiCliKernelStatus(input: { runId?: string } = {}): Promise<KernelRunStatus | { active: string | null; runs: Array<Pick<KernelRunStatus, 'runId' | 'effectiveState' | 'stateLabel' | 'goal' | 'nextAction'>> }> {
+  if (input.runId) return statusOf(storeFor(input.runId));
+  const runs = [];
+  for (const runId of listRunIds().slice(0, 20)) {
+    const status = await statusOf(new RunStore(kernelRunDir(runId)), false);
+    runs.push({ runId, effectiveState: status.effectiveState, stateLabel: status.stateLabel, goal: status.goal.slice(0, 80), nextAction: status.nextAction });
+  }
+  return { active: readActiveRun(), runs };
+}
+
+/** 等到 run 不是執行中，或逾時。逾時不是錯誤。 */
+export async function aiCliKernelWait(input: { runId: string; timeoutSec?: number }): Promise<KernelRunStatus & { timedOut: boolean }> {
+  const store = storeFor(input.runId);
+  const deadline = Date.now() + (input.timeoutSec ?? 600) * 1000;
+  for (;;) {
+    const status = await statusOf(store, false);
+    if (status.effectiveState !== 'running') return { ...(await statusOf(store)), timedOut: false };
+    if (Date.now() >= deadline) return { ...status, timedOut: true };
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+}
+
+const cancelledOutcome: ActionOutcome = { ok: false, failureClass: 'cancelled', detail: '使用者取消', jobStatus: null, exitCode: null, messageFile: null, messageChars: 0, messagePreview: '', usage: null };
+
+/** runner 不在時由這裡收尾。回報 terminated 不算數，要確認程序真的消失。 */
+export async function cancelWithoutRunner(store: RunStore, executor: KernelExecutor, confirmMs = 20000): Promise<void> {
+  for (const action of openActions(replayJournal(store.read()))) {
+    if (action.job) {
+      await executor.kill(action.job).catch(() => false);
+      const deadline = Date.now() + confirmMs;
+      let gone = await executor.isGone(action.job).catch(() => false);
+      while (!gone && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        gone = await executor.isGone(action.job).catch(() => false);
+      }
+      if (!gone) {
+        store.append({ type: 'state', state: 'stop_pending', reason: 'worker_still_alive', detail: `job ${action.job.jobId} 還沒確認停止` });
+        return;
+      }
+      store.append({ type: 'action_result', actionId: action.spec.actionId, outcome: cancelledOutcome });
+    } else {
+      const found = await executor.find(action.spec.marker);
+      if (found === 'unknown' || found !== null) {
+        const job = found === 'unknown' ? null : found;
+        if (job) {
+          store.append({ type: 'action_started', actionId: action.spec.actionId, job });
+          return cancelWithoutRunner(store, executor, confirmMs);
+        }
+        store.append({ type: 'state', state: 'stop_pending', reason: 'cannot_verify_start', detail: `查不了動作 ${action.spec.actionId} 是否啟動過` });
+        return;
+      }
+      store.append({ type: 'action_abandoned', actionId: action.spec.actionId, reason: '取消時確認沒有啟動', refund: true });
+    }
+  }
+  store.append({ type: 'state', state: 'cancelled', reason: 'user_cancelled' });
+  releaseActiveLock(store.runId);
+}
+
+export async function aiCliKernelCancel(input: { runId: string; timeoutSec?: number }): Promise<KernelRunStatus> {
+  const store = storeFor(input.runId);
+  const view = replayJournal(store.read());
+  if (isTerminalState(view.state)) { releaseActiveLock(input.runId); return statusOf(store); }
+  store.requestCancel();
+  if (view.state === 'running' && await runnerAlive(store) !== false) {
+    // runner 活著就交給它：只有一個程序寫日誌，比較不會打架。
+    const deadline = Date.now() + (input.timeoutSec ?? 45) * 1000;
+    while (Date.now() < deadline) {
+      const now = replayJournal(store.read());
+      if (now.state !== 'running') { if (isTerminalState(now.state)) releaseActiveLock(input.runId); return statusOf(store); }
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    return statusOf(store);
+  }
+  await cancelWithoutRunner(store, new FileJobExecutor());
+  return statusOf(store);
+}
+
+export async function aiCliKernelResult(input: { runId: string }): Promise<{ runId: string; state: RunState; report: string | null; verdict: unknown; nextAction: string; detail: string | null; reportPath: string | null }> {
+  const store = storeFor(input.runId);
+  const status = await statusOf(store, false);
+  const report = existsSync(store.reportPath) ? readFileSync(store.reportPath, 'utf8') : null;
+  const verdict = existsSync(store.verdictPath) ? JSON.parse(readFileSync(store.verdictPath, 'utf8')) : null;
+  return { runId: input.runId, state: status.state, report, verdict, nextAction: status.nextAction, detail: status.detail, reportPath: status.reportPath };
+}
+
+export async function aiCliKernelProbe(input: { agent: string; timeoutSec?: number }): Promise<ProbeRecord> {
+  assertCanStartJob();
+  return runBoundaryProbe(input.agent, input.timeoutSec ? { timeoutMs: input.timeoutSec * 1000 } : {});
+}
+
+export function aiCliKernelTemplates(): Array<{ name: string; description: string }> {
+  return Object.entries(TEMPLATES).map(([name, template]) => ({ name, description: template.description }));
+}
+
+export function aiCliKernelBoundaryKey(agent: string) { return boundaryKey(agent); }
+export { nextStep };

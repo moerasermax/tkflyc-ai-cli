@@ -66,6 +66,8 @@ const TESTS = [
   'verify-adopt.mjs',
   'verify-pty-jobs.mjs',
   'verify-launcher-jobs.mjs',
+  'verify-ai-cli_kernel.mjs',
+  'verify-ai-cli_kernel-e2e.mjs',
   'verify-run-tests.mjs',
   'verify-mutation-manifest.mjs',
 ];

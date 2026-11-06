@@ -404,6 +404,20 @@ npm run dev        # tsx 直跑 src/server.ts（改完即生效，不用 build�
 npm run typecheck  # 只型別檢查
 ```
 
+## ai-cli_kernel：受監督的 agent run
+
+給目標和委任書，它自己規劃、派唯讀 worker、用確定性檢查驗收（每個 `路徑:行號` 都會實際打開核對），當掉可以接回，做過的步驟不會重做。第一版只跑唯讀任務，權限是工具受限，**不是隔離**。
+
+```
+ai-cli kernel probe --agent codex
+ai-cli kernel start --goal "稽核 X 的 Y" --cwd /path/to/repo
+ai-cli kernel approve <run>
+ai-cli kernel wait <run>
+ai-cli kernel result <run>
+```
+
+MCP 工具 `ai-cli_kernel_*` 預設關閉，`ai-cli kernel enable` 後才出現，原生工具不受影響。手把手教學看[教學手冊](docs/ai-cli_kernel/教學手冊.md)，內部設計看[技術手冊](docs/ai-cli_kernel/技術手冊.md)。
+
 ## 新增一個 AI agent
 
 1. 複製 `src/agents/codex.ts` 成 `src/agents/<name>.ts`，實作 `AgentDefinition`：

@@ -10,8 +10,35 @@
 
 ### 新增
 
-- **派工政策第 6 條更正。** 舊文寫「codex 的 percentUsed 是剩餘」，現在是已用量（`usage-service.ts` 的 app-server 路徑，basis 為 used）。政策仍然要求讀 raw 原文。（@moerasermax）
+- **`ai-cli_kernel`：第一版受監督唯讀 agent（L1）。** 給目標和委任書，它自己規劃、派唯讀 worker、驗收，做到有證據的結果；當掉可以接回，已完成的步驟不會重做。既有 `run`／`exec` 行為不變，`core/`、`agents/`、`models/`、`plugins/` 沒有改動，也不能反過來依賴它（有測試釘住）。入口是 `ai-cli kernel` 子命令，MCP 工具 `ai-cli_kernel_*` 預設關閉，`ai-cli kernel enable` 後才出現。（@moerasermax）
+  - 為什麼模型只提案：迴圈由確定性程式控制，模型只回 JSON 計畫，每一步能不能做由閘決定，所以 worker 輸出裡夾帶的指令沒有授權效力。
+  - 為什麼先記意圖：有意圖、沒結果的動作分不出做了沒，不能直接重跑。用 marker 到 JobStore 查，查到就接回，確認沒啟動才重派，查不了就停下來等人對帳。
+  - 為什麼要跑探針：旗標名稱不等於行為。Windows 上 Codex 的唯讀靠的是指令清單，不是 OS 沙箱，CLI 更新也可能改掉語義。所以對每組 CLI 版本、binary、參數真的叫模型寫檔，結果才算數。**通過只代表「工具受限」，不代表隔離。**
+  - 和當初規劃不同的一點：「固定版本目錄」改成偵測後暫停。updater 在原地重建 dist，要固定版本得連原生相依的 node_modules 一起複製，第一版改成偵測到變動就停下來，由人接回。
+- **第一輪獨立稽核**：由 `ai-cli_kernel` 自己派 gpt-6.1-sol（effort high）唯讀稽核，找到 6 項，逐條對照原始碼都成立，全部修掉並加上回歸測試與突變：
+  1. 兩個恢復程序能同時搶到 runner 鎖 → 原子接管舊鎖，再加 fencing token，只有最後啟動的 runner 算數。
+  2. 處理標記和後續狀態分兩筆寫，當在中間會漏掉人工閘 → 該不該停一律從日誌算出來。
+  3. 總時間上限停不掉執行中的 job，超時結果還能結案 → 等待時也檢查總時間。
+  4. 接回 job 時單一 job 的時限重新起算 → 從日誌記錄的啟動時間算。
+  5. 人工放棄已啟動的動作也退名額 → 只有確認沒啟動才退。
+  6. 既有髒檔內容被改，唯讀驗證仍判 unchanged → 快照納入 diff 內容。
+- **第二輪獨立稽核**：同樣由 `ai-cli_kernel` 派工，範圍是第一輪沒讀到的檔案與修補本身，找到 6 項，逐條對照原始碼都成立，全部修掉：
+  1. fencing 只擋下一輪，舊 runner 從 poll 回來仍會寫結果，退出時還會刪掉接手者的鎖（第一輪的測試因此是假綠燈）→ 所有寫入都先確認 token，只清自己的鎖。
+  2. **探針可能誤判 PASS**：只要出現 read-only 字樣就算拒絕，模型沒試也能過 → 四個目標每一個都要有對應的拒絕紀錄，格式取自真實輸出。第一版只有 Codex 有實測過的證據格式，其他家最多到 UNKNOWN。
+  3. 只改暫存區、工作樹剛好和 HEAD 一樣時快照看不出來 → 快照另外納入 `diff --cached`。
+  4. job 已啟動但啟動事件沒落盤，接回時時限重新起算 → 改用 job 真正的啟動時間。
+  5. 閘等待額度查詢期間被取消或超時，返回後仍會啟動 job → 派工前再檢查一次。
+  6. 引用範圍起點大於終點、超大檔案都被算成核對過 → 改成不通過。
+- **第三輪獨立稽核**：範圍是第二輪的修補與 `JobStore.start` 的新檢查，由 `ai-cli_kernel` 派 gpt-6.1-sol（effort high），找到 2 項，都成立，已修掉：
+  1. 模型把編輯工具重試四次，四筆不含檔名的拒絕就能替沒試過的 shell 背書 → 第 4 項改走 shell（會帶檔名），不含檔名的拒絕只能替編輯工具那一項作證。
+  2. 原生 `readJobMetas` 讀取失敗時回空清單，kernel 恢復時會把還在跑的 job 判成沒啟動而重派，取消時會誤判程序已消失 → kernel 這邊分清楚「確定沒有」和「查不了」，原生行為不動。
+  第三輪的修補沒有再經過第四輪獨立稽核。三輪都是靜態審查，競態的實際發生率沒有測過。
 - **`JobStore.start` 也檢查巢狀派工。** 第一次實戰的稽核報告指出，這個底層入口原本不擋，能直接呼叫內部模組就能繞過。`spawnPty` 刻意不加：runner 本來就帶 worker 標記，加了會連授權的 vendor 都啟動不了。（@moerasermax）
+- **派工政策第 6 條更正。** 舊文寫「codex 的 percentUsed 是剩餘」，現在是已用量（`usage-service.ts` 的 app-server 路徑，basis 為 used）。政策仍然要求讀 raw 原文。（@moerasermax）
+- **突變測試 34 筆全部被抓到**（kernel 33 筆、`JobStore.start` 1 筆，最後一輪只重跑新增與修改過的）。 過程中抓到 2 筆假綠燈（測試資料太弱，有沒有那道防線都會過），補強測試後重驗。另外第一筆突變讓迴圈停不下來，測試卡死半小時才發現，所以假執行器加了失控保護。
+- **手冊**：`docs/ai-cli_kernel/教學手冊.md`（手把手）、`docs/ai-cli_kernel/技術手冊.md`（含流程圖）。
+
+
 - direct-api 的 providers.json 新增 `max_tool_loops`（正整數，預設 30、最高 200），同步控制工具迴圈與 API 呼叫上限（不含 HTTP 重試），撞限訊息顯示實際值；因 2026-10-23 評測中 Qwen 與 DeepSeek 做讀碼題都在 30 圈撞限、未交出答案，改為可依 provider 調整，免改程式碼。（Codex）
 
 - `tools/statusline/ai-cli-status.mjs`：Claude Code statusLine 腳本，直接讀 job store（`meta.json`／`exit.json`／`lost.json`）顯示**全機**執行中與近 10 分鐘完成的 job，含模型與 effort、經過時間、stdout 超過 5 分鐘沒動的「靜默」標記、其他專案的 job 附專案名；完成數依 ✓／✗／?（lost）分項計數，失敗不會被收進「+N」看不到。背景：`ai-cli-jobs` 面板只列本 session 主對話派的 job、完成後 120 秒消失，看不到子代理與其他專案的 worker。不經 MCP、不寫任何檔，每次約 55 ms；啟用方式寫在檔頭。不隨 npm 套件散布，改 job store 格式時要一起改它。（Claude）

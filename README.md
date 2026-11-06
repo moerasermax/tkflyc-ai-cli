@@ -597,6 +597,20 @@ reads the job store and prints one line at the bottom of the screen. Its header
 says how to enable it (a `statusLine` entry in `~/.claude/settings.json`). It is
 not in the npm package either; get it from git.
 
+## ai-cli_kernel: supervised agent runs
+
+Give it a goal and a mandate. It plans with a tool-less model call, dispatches read-only workers, verifies the deliverable with deterministic checks (every cited `path:line` is opened and checked), and recovers across restarts without re-dispatching finished steps. The first version is read-only and tool-limited, **not isolated**.
+
+```
+ai-cli kernel probe --agent codex
+ai-cli kernel start --goal "Audit X for Y" --cwd /path/to/repo
+ai-cli kernel approve <run>
+ai-cli kernel wait <run>
+ai-cli kernel result <run>
+```
+
+The MCP tools (`ai-cli_kernel_*`) are off by default; `ai-cli kernel enable` turns them on. Existing tools are unaffected. Docs (Traditional Chinese): [tutorial](docs/ai-cli_kernel/教學手冊.md), [technical manual](docs/ai-cli_kernel/技術手冊.md).
+
 ## Adding an AI agent
 
 1. Copy `src/agents/codex.ts` to `src/agents/<name>.ts` and implement

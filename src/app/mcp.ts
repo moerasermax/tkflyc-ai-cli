@@ -2,6 +2,7 @@
  * MCP server。對應 dist/app/mcp.js。
  * 工具（12 個）：run, adopt, list_processes, get_result, wait, peek, kill_process,
  *       cleanup_processes, doctor, models, set_config, query_usage。
+ * 延伸工具：ai-cli_kernel_*，預設關閉，`ai-cli kernel enable` 後才出現。
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -34,6 +35,7 @@ import { UsageService } from '../plugins/usage-service.js';
 import { consumeNotice, scheduleBackgroundUpdates } from '../core/updater.js';
 import { getServerIdentity } from '../core/identity.js';
 import { assertCanStartJob } from '../core/worker-env.js';
+import { KERNEL_TOOL_PREFIX, aiCliKernelHandleTool, aiCliKernelToolDefinitions } from '../ai-cli_kernel/mcp-tools.js';
 
 // 版本與 doctor / models 回傳的 server.version 取自同一份來源，避免兩處各讀一次
 // package.json 而在某天分岔。
@@ -343,6 +345,7 @@ Note: antigravity (agy) does accept model selection — the resolved name is nor
             },
           },
         },
+        ...aiCliKernelToolDefinitions(),
       ],
     }));
 
@@ -351,6 +354,10 @@ Note: antigravity (agy) does accept model selection — the resolved name is nor
       const toolName = args.params.name;
       const toolArguments = (args.params.arguments || {}) as Record<string, unknown>;
       if (['run', 'adopt', 'list_processes', 'get_result', 'wait', 'peek', 'kill_process', 'cleanup_processes'].includes(toolName)) await this.processService.ready;
+      if (toolName.startsWith(KERNEL_TOOL_PREFIX)) {
+        try { return this.jsonResult(await aiCliKernelHandleTool(toolName, toolArguments)); }
+        catch (error) { throw new McpError(ErrorCode.InvalidRequest, (error as Error).message); }
+      }
       switch (toolName) {
         case 'run':
           return this.handleRun(toolArguments);

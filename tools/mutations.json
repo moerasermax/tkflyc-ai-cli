@@ -3055,11 +3055,275 @@
     "script": "verify-extra-body.mjs"
   },
   {
+    "name": "kernel：不先記意圖就執行",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "commit({ type: 'action_intent', action: spec });",
+    "to": "void spec;",
+    "expect": "意圖未落盤不得執行"
+  },
+  {
+    "name": "kernel：接回 job 時時限重新起算",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "record.startedAt ?? deps.now()",
+    "to": "deps.now()",
+    "expect": "接回同一個 job 時時限不重新起算"
+  },
+  {
+    "name": "kernel：總時間上限不管執行中的 job",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "const overWall = activeMinutes(view, deps.now()) >= contract.budget.maxWallMinutes;",
+    "to": "const overWall = false;",
+    "expect": "總時間到了會停掉執行中的 job"
+  },
+  {
+    "name": "kernel：被取代的 runner 繼續等結果",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (superseded(view)) return false;",
+    "to": "",
+    "expect": "被取代的 runner 不再寫結果也不再派工"
+  },
+  {
+    "name": "kernel：探針沒過也派工",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (boundary !== 'PASS') {",
+    "to": "if (false) {",
+    "expect": "探針結果不是 PASS 就不派工"
+  },
+  {
+    "name": "kernel：額度未知沒有上限",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (view.counters.quotaUnknownDispatches >= contract.budget.quotaUnknownMaxDispatches && !view.overrides.has('quota_unknown')) {",
+    "to": "if (false) {",
+    "expect": "額度未知只能在保守上限內繼續"
+  },
+  {
+    "name": "kernel：委任書被改過仍照跑",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (!initial.approvedDigest || store.contractDigest() !== initial.approvedDigest) {",
+    "to": "if (!initial.approvedDigest) {",
+    "expect": "委任書被改過就拒絕執行"
+  },
+  {
+    "name": "kernel：工作目錄變動仍結案",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "else if (snapshotsEqual(view.baseline, current)) readOnly = 'unchanged';",
+    "to": "else if (current.head) readOnly = 'unchanged';",
+    "expect": "工作目錄有變動就先停下來問"
+  },
+  {
+    "name": "kernel：人工放棄結果也退名額",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/replay.ts",
+    "from": "if (event.refund) { if (a.spec.kind",
+    "to": "if (true) { if (a.spec.kind",
+    "expect": "人工放棄結果不退 worker 名額"
+  },
+  {
+    "name": "kernel：當機後漏掉人工閘",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/replay.ts",
+    "from": "if (view.pendingStop) return view.pendingStop;",
+    "to": "",
+    "expect": "處理標記落盤後當掉，恢復時仍然停下來問人"
+  },
+  {
+    "name": "kernel：限流照樣重試",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/replay.ts",
+    "from": "if (view.humanStop) return view.humanStop;",
+    "to": "",
+    "expect": "限流不重試，立刻停下等人"
+  },
+  {
+    "name": "kernel：連續失敗不停",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/replay.ts",
+    "from": "if (view.failureStreak.count >= 2) return",
+    "to": "if (view.failureStreak.count >= 99) return",
+    "expect": "exit 0 加空白回覆不算完成，連續兩次就停"
+  },
+  {
+    "name": "kernel：已通過的步驟重派",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/replay.ts",
+    "from": "return view.plan.steps.find(step => !view.stepResults.get(step.id)?.passed) ?? null;",
+    "to": "return view.plan.steps[0] ?? null;",
+    "expect": "第二步執行中模擬當機"
+  },
+  {
+    "name": "kernel：空回覆當成功",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/verdict.ts",
+    "from": "if (!message.trim()) return { ok: false, failureClass: 'empty_output', detail: 'exit 0 但沒有回覆內容' };",
+    "to": "",
+    "expect": "失敗分類：exit 0 空白"
+  },
+  {
+    "name": "kernel：引用行號不檢查",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/verdict.ts",
+    "from": "if (Number(startLine) < 1 || lastLine < Number(startLine) || lastLine > lineCount) {",
+    "to": "if (false) {",
+    "expect": "引用行號超出範圍要擋"
+  },
+  {
+    "name": "kernel：引用可以跑出工作目錄",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/verdict.ts",
+    "from": "if (rel.startsWith('..') || isAbsolute(rel)) {",
+    "to": "if (false) {",
+    "expect": "引用跑出工作目錄要擋"
+  },
+  {
+    "name": "kernel：快照不看檔案內容",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/verdict.ts",
+    "from": "digestText(`${status.stdout}\\0${diff.stdout}\\0${staged.stdout}\\0${untrackedState}`)",
+    "to": "digestText(status.stdout)",
+    "expect": "已修改的檔案再被改一次，快照要不同"
+  },
+  {
+    "name": "kernel：殘行不處理",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "from": "if (raw.length > 0 && raw[raw.length - 1] !== 0x0a) truncateSync(this.journalPath, raw.lastIndexOf(0x0a) + 1);",
+    "to": "",
+    "expect": "殘行之後還能繼續寫入"
+  },
+  {
+    "name": "kernel：鎖擋不住第二個 run",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "from": "return { ok: false, heldBy: heldBy ?? 'unknown' };",
+    "to": "return { ok: true };",
+    "expect": "第二個 run 被擋下並指出誰佔用"
+  },
+  {
+    "name": "kernel：委任書外的模型也放行",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "if (step.model !== undefined && !contract.allowedWorkerModels.includes(step.model)) {",
+    "to": "if (false) {",
+    "expect": "委任書外的模型要拒絕"
+  },
+  {
+    "name": "kernel：預設就開放 MCP 工具",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mcp-tools.ts",
+    "from": "return aiCliKernelEnabled() ? TOOLS : [];",
+    "to": "return TOOLS;",
+    "expect": "預設關閉時 MCP 不多出任何工具"
+  },
+  {
+    "name": "kernel：舊 runner 仍可寫入",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (tokenWritten && read().runnerToken !== token) throw new SupersededError();",
+    "to": "",
+    "expect": "舊 runner 從 poll 回來也不能寫結果"
+  },
+  {
+    "name": "kernel：退出時刪掉別人的鎖",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/runner-lock.ts",
+    "from": "return holder.pid === self.pid && holder.started === self.started;",
+    "to": "return true;",
+    "expect": "舊 runner 退出時不會刪掉接手者的鎖"
+  },
+  {
+    "name": "kernel：探針只看有沒有任何拒絕",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "const missing = unnamed.filter(target => !(anonymousTargets.includes(target) && anonymous.length > 0));",
+    "to": "const missing: string[] = [];",
+    "expect": "只有一筆拒絕不算"
+  },
+  {
+    "name": "kernel：探針把讀取指令當拒絕",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "item.exit_code !== 0 && TOOL_REFUSAL.test",
+    "to": "TOOL_REFUSAL.test",
+    "expect": "讀取指令含 read-only 字樣不算"
+  },
+  {
+    "name": "kernel：快照不看暫存區",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/verdict.ts",
+    "from": "\\0${staged.stdout}",
+    "to": "",
+    "expect": "只有暫存區內容變動，快照也要不同"
+  },
+  {
+    "name": "kernel：閘等待後不重新檢查取消",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (store.cancelRequested()) { setState('cancelled', 'user_cancelled'); return false; }",
+    "to": "",
+    "expect": "額度查詢期間被取消，不會再啟動 job"
+  },
+  {
+    "name": "kernel：引用範圍顛倒也算",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/verdict.ts",
+    "from": "lastLine < Number(startLine) || ",
+    "to": "",
+    "expect": "引用範圍顛倒要擋"
+  },
+  {
     "name": "JobStore.start 不檢查巢狀派工",
     "script": "verify-worker-guards.mjs",
     "file": "src/core/job-store.ts",
     "from": "    assertCanStartJob();\n",
     "to": "",
     "expect": "F2 直接呼叫 JobStore.start 也拒絕"
+  },
+  {
+    "name": "kernel：匿名拒絕可以替任何目標背書",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "anonymousTargets.includes(target) && anonymous.length > 0",
+    "to": "anonymous.length > 0",
+    "expect": "重複的匿名拒絕不能替其他目標背書"
+  },
+  {
+    "name": "kernel：讀不出 meta 也當作沒有啟動",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "return unreadable ? 'unknown' : null;",
+    "to": "return null;",
+    "expect": "有目錄讀不出 meta 時，查不到不等於沒有"
+  },
+  {
+    "name": "kernel：jobs 讀取失敗也當作沒有啟動",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return 'unknown';\n",
+    "to": "",
+    "expect": "連 jobs 都讀不了時是 unknown"
+  },
+  {
+    "name": "kernel：讀不出 meta 也當作已經消失",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "if (!meta) return false;\n",
+    "to": "if (!meta) return true;\n",
+    "expect": "目錄還在卻讀不出 meta，不能當作已經消失"
+  },
+  {
+    "name": "kernel：jobs 查不了也當作已經消失",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "if (!statSync(jobsDir).isDirectory()) return false;",
+    "to": "if (!statSync(jobsDir).isDirectory()) return true;",
+    "expect": "連 jobs 都讀不了時不能當作已經消失"
   }
 ]

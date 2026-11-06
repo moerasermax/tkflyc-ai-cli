@@ -36,6 +36,7 @@ Commands:
   models    List candidate models and aliases
   mcp       Start the MCP server
   usage     Report local AI CLI usage/quota across providers
+  kernel    ai-cli_kernel: supervised read-only agent runs (kernel help)
   help      Show this help message
 `;
 
@@ -518,6 +519,11 @@ export async function runCli(argv: string[], deps: Partial<CliDeps> = {}): Promi
     await refreshCatalogV2();
     writeJson(stdout, getModelsPayload());
     return 0;
+  }
+
+  if (command === 'kernel') {
+    const { runKernelCli } = await import('../ai-cli_kernel/cli.js');
+    return runKernelCli(argv.slice(1), { stdout, stderr });
   }
 
   if (command === 'doctor') {
