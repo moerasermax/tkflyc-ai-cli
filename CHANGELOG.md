@@ -10,6 +10,7 @@
 
 ### 新增
 
+- **派工政策第 6 條更正。** 舊文寫「codex 的 percentUsed 是剩餘」，現在是已用量（`usage-service.ts` 的 app-server 路徑，basis 為 used）。政策仍然要求讀 raw 原文。（@moerasermax）
 - **`JobStore.start` 也檢查巢狀派工。** 第一次實戰的稽核報告指出，這個底層入口原本不擋，能直接呼叫內部模組就能繞過。`spawnPty` 刻意不加：runner 本來就帶 worker 標記，加了會連授權的 vendor 都啟動不了。（@moerasermax）
 - direct-api 的 providers.json 新增 `max_tool_loops`（正整數，預設 30、最高 200），同步控制工具迴圈與 API 呼叫上限（不含 HTTP 重試），撞限訊息顯示實際值；因 2026-10-23 評測中 Qwen 與 DeepSeek 做讀碼題都在 30 圈撞限、未交出答案，改為可依 provider 調整，免改程式碼。（Codex）
 

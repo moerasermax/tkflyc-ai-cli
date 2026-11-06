@@ -68,7 +68,7 @@ ctx = """【ai-cli 精簡派工政策 v2.2（2026-10-22）】
 3. high 僅限跨模組、架構、高風險修改、逆向歧義，或一次 medium 明顯不足；xhigh/max 需使用者明確要求。
 4. 同一工具／假設連續失敗 2 次即停止回報，不得等到第 5 次、不得換模型後原樣重跑。升級時說明失敗證據與理由。
 5. 子 Agent（含 Workflow 開出的）預設 0；使用者同意後，會改檔的同時最多 2 個、唯讀稽核／分析最多 8 個（開之前先告知規模），禁止遞迴 Agent。
-6. 額度讀 usage.raw 的 used/left 原文，不用解析出的 percent 欄位：兩家語意相反（2026-09-18 實測：codex 的 percentUsed 是剩餘、claude 的 weekAllModelsPercent 是已用），讀反會讓額度門檻判斷反向。量不到就是 unknown，不是「還夠」。direct-api 可能 exit 0 卻回空字串 message，所以 exit 0 仍須驗證 message 非空。
+6. 額度讀 usage.raw 的 used/left 原文，不要憑欄位名稱猜：百分比欄位的語意變過（2026-09-18 實測 codex 的 percentUsed 是剩餘；2026-11-06 查證現在是已用，以同筆的 basis 欄位為準。claude 的 weekAllModelsPercent 是已用），讀反會讓額度門檻判斷反向。量不到就是 unknown，不是「還夠」。direct-api 可能 exit 0 卻回空字串 message，所以 exit 0 仍須驗證 message 非空。
 7. 分類、摘要、查詢改寫、log 整理可用已確認可路由的本地／輕量 provider；機密、個資、NDA 資料不得送未核准外部免費 API。
 8. 交叉驗證只驗高風險 claim 或分歧；第二模型讀 <=2,000-token 證據包，不重掃 repository。
 9. 預算：search 8、tool 20、read 15 files、edit 5 files、test/fix 2 cycles、context 約 512K；達限即停止回報。
