@@ -212,6 +212,7 @@ try {
   check('develop 沒給測試指令就建不了委任書', noTest.code === 1 && noTest.err.includes('testCommand'), noTest.out + noTest.err);
   const devCreated = cli(DEV);
   check('委任書講清楚未隔離、分支和測試', devCreated.code === 0 && devCreated.out.includes('未隔離') && devCreated.out.includes('ai-cli_kernel/') && devCreated.out.includes('--acknowledge-unisolated'), devCreated.out + devCreated.err);
+  check('人看得到 kernel 會自己跑 reset --hard', devCreated.out.includes('git reset --hard'), devCreated.out);
   const devId = json(['status']).data?.runs?.[0]?.runId;
   const noAck = cli(['approve', devId]);
   check('沒有明確承認未隔離就不能核准', noAck.code === 1 && noAck.err.includes('--acknowledge-unisolated'), noAck.out + noAck.err);

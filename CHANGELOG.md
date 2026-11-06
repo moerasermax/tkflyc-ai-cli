@@ -20,7 +20,7 @@
   - 為什麼測試要自己跑：模型說測過了不算數。
   - 每一步可以挑不同模型（`workerModels`），例如一個寫、另一個唯讀審查，全部算進預算和日誌。worker 自己再呼叫 ai-cli 是刻意不開的。
   - 第一次真實 run 抓到兩個 stub 測不出來的問題，已修：審查跑在測試之前，報告因此自相矛盾；唯讀審查者沒有 shell，只能去翻 `.git`，現在由 kernel 直接附 diff。
-  - 已知限制：worker 會載入使用者完整的 CLI 設定，包含 MCP server。實測在沒登記過的 repo 上，planner MCP 自動註冊了專案，並在主目錄寫了 `.planner-id`。只驗過一台 Windows。
+  - 已知限制：worker 會載入使用者完整的 CLI 設定，包含 MCP server。實測在沒登記過的 repo 上，planner 的 SessionStart hook 自動註冊了專案，並在主目錄寫了 `.planner-id`。專案層 Codex hook 在 worktree 裡很可能不生效；kernel 自己跑的指令也不經過使用者的 hook，所以 `reset --hard` 和 `clean -fd` 寫進委任書，核准時一併同意。只驗過一台 Windows。
 - **`ai-cli_kernel`：第一版受監督唯讀 agent（L1）。** 給目標和委任書，它自己規劃、派唯讀 worker、驗收，做到有證據的結果；當掉可以接回，已完成的步驟不會重做。既有 `run`／`exec` 行為不變，`core/`、`agents/`、`models/`、`plugins/` 沒有改動，也不能反過來依賴它（有測試釘住）。入口是 `ai-cli kernel` 子命令，MCP 工具 `ai-cli_kernel_*` 預設關閉，`ai-cli kernel enable` 後才出現。（@moerasermax）
   - 為什麼模型只提案：迴圈由確定性程式控制，模型只回 JSON 計畫，每一步能不能做由閘決定，所以 worker 輸出裡夾帶的指令沒有授權效力。
   - 為什麼先記意圖：有意圖、沒結果的動作分不出做了沒，不能直接重跑。用 marker 到 JobStore 查，查到就接回，確認沒啟動才重派，查不了就停下來等人對帳。

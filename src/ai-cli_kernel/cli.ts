@@ -106,6 +106,7 @@ export function formatStatus(status: KernelRunStatus): string {
       `範圍     ${status.develop.allowedPaths.length ? status.develop.allowedPaths.join('、') : '整個 repo（沒有限制路徑）'}`,
       `期限     委任書到 ${status.develop.expiresAt} 失效`,
       ...(status.develop.dirtyAtStart ? [`注意     主目錄有 ${status.develop.dirtyAtStart} 筆未提交的變更，不會帶進 worktree`] : []),
+      ...status.develop.notices.map(notice => `注意     ${notice}`),
     ] : []),
     `進度     決策 ${p.decides.used}/${p.decides.max}、worker ${p.workerSteps.used}/${p.workerSteps.max}、input tokens ${p.inputTokens.used.toLocaleString('en-US')}/${p.inputTokens.max.toLocaleString('en-US')}${p.unknownUsage ? `（另有 ${p.unknownUsage} 個 job 量不到）` : ''}、執行 ${p.activeMinutes.used}/${p.activeMinutes.max} 分鐘`,
   ];

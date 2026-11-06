@@ -65,6 +65,8 @@ export interface DevelopSpec {
   dirtyAtStart: number;
   /** 超過這個時間就不再派新的 worker，要人重新同意。今天的同意不能變成長期授權。 */
   expiresAt: string;
+  /** 核准前要讓人看到的事。寫在委任書裡，digest 涵蓋，核准時就算同意了。 */
+  notices: string[];
 }
 
 export function workDirOf(spec: DevelopSpec): string {

@@ -1,8 +1,8 @@
 /**
  * 委任範本。全自動只開放給這裡列出來、成功定義已經寫死的任務類別，模型不能自己出題自己改。
  */
-import { statSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { existsSync, statSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
 import { KNOWN_BAD_MODELS, isKnownModelTarget, isRemovedModel, removedModelMessage, resolveAgentIdForModel, resolveModelAlias } from '../models/catalog.js';
 import { ALLOWED_REASONING_EFFORTS } from '../core/reasoning.js';
 import { KERNEL_SCHEMA_VERSION, type DevelopSpec, type KernelBudget, type KernelContract } from './types.js';
@@ -105,7 +105,19 @@ export const TEMPLATES = {
 
 export type KernelTemplateName = keyof typeof TEMPLATES;
 
-function buildDevelopSpec(input: KernelStartInput, workFolder: string, now: Date, context?: BuildContractContext): DevelopSpec {
+/**
+ * kernel 自己跑的指令不經過 AI 工具，使用者的 PreToolUse hook 管不到，所以要在核准前講清楚。
+ * 專案層 Codex hook 的信任紀錄綁絕對路徑，每個 run 的 worktree 都是新路徑，codex exec 會跳過沒信任的 hook。
+ */
+function developNotices(repoRoot: string, models: readonly string[]): string[] {
+  const notices = ['測試跑完後，kernel 會在這個 run 的 worktree 執行 git reset --hard 和 git clean -fd 清掉副產物。此時改動都已 commit，也不碰主目錄。這是 kernel 自己跑的，你的 hook 不會擋。'];
+  if (existsSync(join(repoRoot, '.codex', 'hooks.json')) && models.some(model => resolveAgentIdForModel(model) === 'codex')) {
+    notices.push('這個 repo 有專案層的 .codex/hooks.json，但 Codex 的 hook 信任綁絕對路徑，在 worktree 裡很可能不會觸發。依賴這些 hook 把關的話，請改用其他模型，或自己盯著。');
+  }
+  return notices;
+}
+
+function buildDevelopSpec(input: KernelStartInput, workFolder: string, now: Date, models: readonly string[], context?: BuildContractContext): DevelopSpec {
   if (!context) throw new Error('develop 範本需要 run id 才能決定分支和 worktree');
   const testCommand = input.testCommand?.trim();
   if (!testCommand) throw new Error('develop 範本一定要給測試指令（testCommand）：kernel 靠它驗收，模型說測過了不算數');
@@ -118,6 +130,7 @@ function buildDevelopSpec(input: KernelStartInput, workFolder: string, now: Date
     ...(input.setupCommand?.trim() ? { setupCommand: input.setupCommand.trim() } : {}),
     allowedPaths: normalizeAllowedPaths(input.allowedPaths ?? [], repo.prefix), dirtyAtStart: repo.dirty,
     expiresAt: new Date(now.getTime() + hours * 3600000).toISOString(),
+    notices: developNotices(repo.root, models),
   };
 }
 
@@ -145,14 +158,15 @@ export function buildContract(input: KernelStartInput, now = new Date(), context
   const budget = { ...DEFAULT_BUDGET, ...(isDevelop ? DEVELOP_BUDGET : {}), ...input.budget };
   for (const [name, value] of Object.entries(budget)) positive(name, value);
   const checks = template.build();
+  const allowedWorkerModels = [...new Set([workerModel, ...(input.workerModels ?? []).map(assertDispatchableModel)])];
   return {
     schemaVersion: KERNEL_SCHEMA_VERSION, template: templateName, goal, workFolder,
     decide: { model: decideModel, effort: decideEffort }, worker: { model: workerModel, effort: workerEffort },
-    allowedWorkerModels: [...new Set([workerModel, ...(input.workerModels ?? []).map(assertDispatchableModel)])], budget, stepChecks: checks.stepChecks, acceptance: checks.acceptance,
+    allowedWorkerModels, budget, stepChecks: checks.stepChecks, acceptance: checks.acceptance,
     reportInstructions: template.reportInstructions,
     // 只有字面值 true 才算，比照 exec 的 authority：未知值不能當成沒寫。
     allowUnverifiedBoundary: input.allowUnverifiedBoundary === true,
-    ...(isDevelop ? { develop: buildDevelopSpec(input, workFolder, now, context) } : {}),
+    ...(isDevelop ? { develop: buildDevelopSpec(input, workFolder, now, allowedWorkerModels, context) } : {}),
     createdAt: now.toISOString(),
   };
 }

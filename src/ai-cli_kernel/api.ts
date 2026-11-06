@@ -54,7 +54,7 @@ export interface KernelRunStatus {
   template: string;
   models: { decide: KernelContract['decide']; worker: KernelContract['worker']; allowedWorkers: string[] };
   /** develop 範本才有。委任書要讓人看清楚的東西都在這裡。 */
-  develop: (Pick<DevelopSpec, 'repoRoot' | 'branch' | 'baseCommit' | 'worktree' | 'testCommand' | 'setupCommand' | 'allowedPaths' | 'dirtyAtStart' | 'expiresAt'> & { testFailures: number; verifiedCommit: string | null }) | null;
+  develop: (Pick<DevelopSpec, 'repoRoot' | 'branch' | 'baseCommit' | 'worktree' | 'testCommand' | 'setupCommand' | 'allowedPaths' | 'dirtyAtStart' | 'expiresAt' | 'notices'> & { testFailures: number; verifiedCommit: string | null }) | null;
   contractDigest: string | null;
   boundary: Record<string, BoundaryStatus>;
   boundaryLabel: string;
@@ -149,7 +149,7 @@ async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRun
     develop: contract.develop ? {
       repoRoot: contract.develop.repoRoot, branch: contract.develop.branch, baseCommit: contract.develop.baseCommit, worktree: contract.develop.worktree, testCommand: contract.develop.testCommand,
       ...(contract.develop.setupCommand ? { setupCommand: contract.develop.setupCommand } : {}), allowedPaths: contract.develop.allowedPaths,
-      dirtyAtStart: contract.develop.dirtyAtStart, expiresAt: contract.develop.expiresAt, testFailures: view.testFailures,
+      dirtyAtStart: contract.develop.dirtyAtStart, expiresAt: contract.develop.expiresAt, notices: contract.develop.notices ?? [], testFailures: view.testFailures,
       verifiedCommit: view.verification?.passed ? view.verification.commit : null,
     } : null,
     boundaryLabel: contract.develop ? '未隔離：worker 權限等於你本人，worktree 只隔開正常路徑的寫入' : contract.allowUnverifiedBoundary ? '未驗證（呼叫端明確允許）' : passed ? '工具受限，非隔離' : '尚未通過探針',

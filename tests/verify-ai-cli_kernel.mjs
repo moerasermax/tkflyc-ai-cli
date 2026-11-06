@@ -739,6 +739,16 @@ const rejecting = async promise => { try { await promise; return null; } catch (
   check('allowedPaths 不能跑出工作目錄', !!failing(buildContract, { ...base, testCommand: 'x', allowedPaths: ['../x'] }, new Date(), ctx()) && !!failing(buildContract, { ...base, testCommand: 'x', allowedPaths: ['C:/x'] }, new Date(), ctx()));
   const sub = buildContract({ ...base, workFolder: join(repo, 'src'), testCommand: 'x', allowedPaths: ['lib'] }, new Date(), ctx());
   check('子目錄當工作目錄時，路徑換算成相對 repo 根目錄', sub.develop.prefix === 'src/' && sub.develop.allowedPaths[0] === 'src/lib', JSON.stringify(sub.develop));
+  const plain = buildContract({ ...base, testCommand: 'x' }, new Date(), ctx());
+  check('委任書講明 kernel 會自己跑 reset --hard，而且 hook 擋不到', plain.develop.notices.join().includes('git reset --hard') && plain.develop.notices.join().includes('hook 不會擋'), plain.develop.notices.join());
+  check('沒有專案層 Codex hook 時不亂警告', !plain.develop.notices.join().includes('.codex/hooks.json'), plain.develop.notices.join());
+  const hooked = newRepo();
+  mkdirSync(join(hooked, '.codex'));
+  writeFileSync(join(hooked, '.codex', 'hooks.json'), '{"hooks":{}}');
+  const hookedContract = buildContract({ ...base, workFolder: hooked, testCommand: 'x' }, new Date(), ctx());
+  check('repo 有專案層 Codex hook 時，委任書警告它可能不生效', hookedContract.develop.notices.join().includes('.codex/hooks.json'), hookedContract.develop.notices.join());
+  const hookedClaude = buildContract({ ...base, workFolder: hooked, testCommand: 'x', model: 'sonnet' }, new Date(), ctx());
+  check('只用 Claude 時不警告 Codex 的 hook', !hookedClaude.develop.notices.join().includes('.codex/hooks.json'), hookedClaude.develop.notices.join());
   const expiring = buildContract({ ...base, testCommand: 'x', mandateHours: 2 }, new Date('2026-01-01T00:00:00Z'), ctx());
   check('委任書有明確的失效時間', expiring.develop.expiresAt === '2026-01-01T02:00:00.000Z', expiring.develop.expiresAt);
   check('範圍檢查：目錄、精確檔案、沒列到的', outOfScope(['src/a.ts', 'src2/a.ts', 'b.md', 'lib/x'], ['src', 'b.md', 'lib/']).join() === 'src2/a.ts');

@@ -3541,5 +3541,13 @@
     "from": "const review = develop && mode !== 'write' ? { verification: view.verification, diff: ws!.diffText(develop, REVIEW_DIFF_CHARS) } : undefined;",
     "to": "const review = undefined;",
     "expect": "審查者拿到 kernel 產生的 diff"
+  },
+  {
+    "name": "kernel develop：不警告專案層 Codex hook",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/templates.ts",
+    "from": "if (existsSync(join(repoRoot, '.codex', 'hooks.json')) && models.some(model => resolveAgentIdForModel(model) === 'codex')) {",
+    "to": "if (false as boolean) {",
+    "expect": "repo 有專案層 Codex hook 時，委任書警告它可能不生效"
   }
 ]
