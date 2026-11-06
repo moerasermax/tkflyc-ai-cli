@@ -20,6 +20,8 @@
 
 ### 修復
 
+- **`ai-cli_kernel` L5 E2E 用量斷言**：修正仍把快取算入 input 的舊測試假設；正常 CLI／runner 路徑精確核對未快取 input 1200、cached 800、output 200 與未知用量 0，補上 status 計入快取的對應突變。產品實作與等待時間不變；實際驗證及尚待確認見 L5 驗收索引最後一節。（@moerasermax；Codex）
+
 - **`ai-cli_kernel`：token 預算改算未快取的部分。** 長任務每次工具呼叫都重送上下文，把快取算進去會高估幾十倍。實測第一個真實開發任務，一步 767 萬 input 裡有 742 萬是快取，週額度只動了約 1%，卻把 800 萬的預算用完，測試都還沒跑就停了。（Claude Opus 5.5）
 - **`ai-cli_kernel`：身分查詢失敗不再當成 runner 死了。** 機器忙的時候查詢會逾時，`wait` 就提早返回、狀態顯示「runner 中斷了」，`approve` 還可能多開一個 runner。（Claude Opus 5.5）
 - **`ai-cli_kernel` develop 的獨立稽核**：由 kernel 自己派 gpt-6.1-sol（effort high）唯讀稽核，找到 8 項，逐條對照原始碼都成立，修了 7 項。靜態審查，修補後的測試由我補上。（Claude Opus 5.5）

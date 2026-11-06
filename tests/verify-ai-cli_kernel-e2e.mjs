@@ -102,7 +102,8 @@ try {
   const result = json(['result', runId]);
   check('result 拿得到報告和裁決', result.data?.report?.includes('README.md:1') && result.data?.verdict?.delivery?.ok === true, result.out);
   check('額度量不到時裁決前有記錄', done.data?.progress?.quotaUnknownDispatches >= 1, JSON.stringify(done.data?.progress));
-  check('用量有記到', done.data?.progress?.inputTokens?.used === 2000, JSON.stringify(done.data?.progress));
+  // decide 與 worker 各回報 input=1000、cached=400、output=100；預算只計未快取 input。
+  check('用量記錄只計未快取 input，快取與 output 分開保留', done.data?.progress?.inputTokens?.used === 1200 && done.data?.progress?.cachedTokens === 800 && done.data?.progress?.outputTokens === 200 && done.data?.progress?.unknownUsage === 0, JSON.stringify(done.data?.progress));
   check('結案後不能再核准', cli(['approve', runId]).code === 1);
 
   /* ---- 真的殺掉 runner 再接回 ---- */

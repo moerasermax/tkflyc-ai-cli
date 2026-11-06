@@ -4541,5 +4541,13 @@
     "from": "    deps.execute('schtasks', args);",
     "to": "    try { deps.execute('schtasks', args); } catch { deps.execute('schtasks', args); }",
     "expect": "排程：執行失敗原樣回報且不重試"
+  },
+  {
+    "name": "kernel L5 E2E：status 把快取算進 input 用量",
+    "script": "verify-ai-cli_kernel-e2e.mjs",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "      inputTokens: { used: view.counters.inputTokens - view.counters.cachedTokens, max: contract.budget.maxInputTokens },",
+    "to": "      inputTokens: { used: view.counters.inputTokens, max: contract.budget.maxInputTokens },",
+    "expect": "用量記錄只計未快取 input，快取與 output 分開保留"
   }
 ]
