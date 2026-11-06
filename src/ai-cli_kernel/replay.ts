@@ -4,12 +4,14 @@
  * 計數和「該不該停」都從日誌算出來，不依賴兩次寫入之間沒有當機：
  * 預算不會因為 runner 重啟而歸零，人工閘也不會因為當在中間而漏掉。
  */
-import { NEEDS_HUMAN_FAILURES, type ActionOutcome, type ActionSpec, type FailureClass, type GitSnapshot, type JobRef, type KernelEvent, type PlanStep, type RunState, type StopDecision } from './types.js';
+import { NEEDS_HUMAN_FAILURES, type ActionOutcome, type ActionSpec, type CheckpointRecord, type FailureClass, type GitSnapshot, type JobRef, type KernelEvent, type PlanStep, type RunState, type StopDecision } from './types.js';
 
 export interface ActionRecord { spec: ActionSpec; job?: JobRef; startedAt?: number; outcome?: ActionOutcome; abandoned?: string; processed: boolean }
 export interface StepResult { stepId: string; title: string; actionId: string; passed: boolean; failureClass?: FailureClass; findings: string[]; preview: string; messageFile: string | null }
 
 export interface RunView {
+  checkpointPrepared: { commit: string; ref: string } | null;
+  checkpoint: CheckpointRecord | null;
   state: RunState;
   reason?: string;
   detail?: string;
@@ -56,6 +58,7 @@ export interface RunView {
 
 export function replayJournal(events: KernelEvent[]): RunView {
   const view: RunView = {
+    checkpointPrepared: null, checkpoint: null,
     state: 'awaiting_approval', contractDigest: null, approvedDigest: null, versionId: null, runnerToken: null,
     baselineRecorded: false, baseline: null, actions: new Map(), plan: null, planCount: 0,
     stepResults: new Map(), stepOrder: [], acceptance: null, acceptanceFailures: 0,
@@ -146,6 +149,8 @@ export function replayJournal(events: KernelEvent[]): RunView {
         view.acceptance = { stepId: event.stepId, passed: event.passed, findings: event.findings };
         if (!event.passed) { view.plan = null; view.acceptanceFailures += 1; }
         break;
+      case 'checkpoint_prepared': view.checkpointPrepared = { commit: event.commit, ref: event.ref }; break;
+      case 'checkpoint': view.checkpoint = { commit: event.commit, ref: event.ref, pushed: event.pushed, remote: event.remote }; break;
       case 'workspace_ready': view.workspaceReady = true; view.headCommit = event.head; break;
       // 同一個檢查會記兩次：spawn 完先記 pid，查到身分再補。
       case 'check_started': view.openCheck = { kind: event.kind, pid: event.pid, started: event.started, name: event.name }; break;

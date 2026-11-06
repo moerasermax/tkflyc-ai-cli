@@ -20,7 +20,8 @@ const runKernelLoop = deps => rawLoop(deps).catch(error => { if (error instanceo
 const { classifyJobResult, checkCitations, evaluateChecks, gitSnapshot, snapshotsEqual } = await load('verdict');
 const { parseDecision, buildDecidePrompt, actionMarker } = await load('plan');
 const { buildContract, DEFAULT_BUDGET } = await load('templates');
-const { cancelWithoutRunner } = await load('api');
+const { cancelWithoutRunner, aiCliKernelRollback, aiCliKernelStatus } = await load('api');
+const { runKernelCli } = await load('cli');
 const { remainingPercentFromUsage } = await load('runtime');
 const { KERNEL_TOOL_PREFIX, aiCliKernelToolDefinitions } = await load('mcp-tools');
 const { probeEvidence, mergeProbeResult } = await load('probe');
@@ -709,10 +710,11 @@ function newRepo() {
 const DEV_REPORT = '## 結論\n改好了，這裡多寫幾個字讓長度足夠通過檢查才行。\n## 改動\n加了 feature.txt。\n## 尚待確認\n無\n';
 const FEATURE_IS_GOOD = `node -e "process.exit(require('fs').readFileSync('feature.txt','utf8').trim()==='good'?0:1)"`;
 const DEV_PLAN = JSON.stringify({ action: 'plan', steps: [{ id: 's1', title: '寫', prompt: '寫', mode: 'write' }], report_step: 's1' });
-function newDevRun({ repo = newRepo(), budget = {}, ...input } = {}) {
+function newDevRun({ repo = newRepo(), budget = {}, origin, ...input } = {}) {
   const runId = newRunId();
   const dir = kernelRunDir(runId);
   const contract = buildContract({ goal: '加功能', workFolder: repo, template: 'develop', testCommand: FEATURE_IS_GOOD, budget, ...input }, new Date(), { runId, worktree: join(dir, 'wt') });
+  if (origin) contract.origin = origin;
   const store = new RunStore(dir);
   const digest = store.create(contract);
   store.append({ type: 'approved', contractDigest: digest, kind: 'contract' });
@@ -1097,6 +1099,221 @@ const rejecting = async promise => { try { await promise; return null; } catch (
   void contract; void store;
 }
 
+/* ---- L4 第一階段：回復點與 rollback ---- */
+{
+  const source = readFileSync(join(ROOT, 'src', 'ai-cli_kernel', 'workspace.ts'), 'utf8');
+  const pushMethod = source.slice(source.indexOf('  pushCheckpoint(spec, commit) {'), source.indexOf('  /** 可以重複呼叫'));
+  check('回復點：推送使用明確 commit refspec 且無強制旗標', pushMethod.includes("mustGit(spec.repoRoot, 'push', remote, `${commit}:${ref}`);") && !pushMethod.includes('--force'));
+}
+function bareOrigin(repo) {
+  const remote = mkdtempSync(join(tmpdir(), 'kernel-checkpoint-origin-'));
+  git(remote, 'init', '--bare', '-q');
+  git(repo, 'remote', 'add', 'origin', remote);
+  return remote;
+}
+function continueCheckpoint(store, overrides = ['checkpoint_push_failed']) {
+  store.append({ type: 'approved', contractDigest: store.contractDigest(), kind: 'continue', overrides });
+  store.append({ type: 'state', state: 'running' });
+}
+{
+  const repo = newRepo();
+  writeFileSync(join(repo, '.gitignore'), 'ignored.txt\n');
+  git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'ignore');
+  writeFileSync(join(repo, 'README.md'), 'staged\n'); git(repo, 'add', 'README.md');
+  writeFileSync(join(repo, 'README.md'), 'unstaged\n');
+  writeFileSync(join(repo, 'new.txt'), 'untracked\n');
+  writeFileSync(join(repo, 'ignored.txt'), 'ignored\n');
+  rmSync(join(repo, 'src', 'a.txt'));
+  const { store, contract, spec } = newDevRun({ repo });
+  const indexPath = join(repo, '.git', 'index');
+  const before = { head: git(repo, 'rev-parse', 'HEAD'), index: readFileSync(indexPath), status: git(repo, 'status', '--porcelain=v1') };
+  const state = await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n'))));
+  const cp = view(store).checkpoint;
+  check('回復點：無 origin 預設 local', spec.checkpoint.mode === 'local' && spec.checkpoint.remote === null && cp?.pushed === false);
+  check('回復點：包含未提交與未追蹤檔案', cp && git(repo, 'show', `${cp.commit}:README.md`) === 'unstaged' && git(repo, 'show', `${cp.commit}:new.txt`) === 'untracked');
+  check('回復點：忽略檔案與已刪檔案不進快照', cp && git(repo, 'ls-tree', '-r', '--name-only', cp.commit).split('\n').every(path => path !== 'ignored.txt' && path !== 'src/a.txt'));
+  check('回復點：來源 HEAD index 工作樹完全不變', state === 'completed' && git(repo, 'rev-parse', 'HEAD') === before.head && readFileSync(indexPath).equals(before.index) && git(repo, 'status', '--porcelain=v1') === before.status && readFileSync(join(repo, 'README.md'), 'utf8') === 'unstaged\n' && readFileSync(join(repo, 'new.txt'), 'utf8') === 'untracked\n' && readFileSync(join(repo, 'ignored.txt'), 'utf8') === 'ignored\n' && !existsSync(join(repo, 'src', 'a.txt')));
+  check('回復點：專用分支指向快照且 parent 是 HEAD', cp?.ref === `ai-cli_kernel/checkpoints/${store.runId}` && git(repo, 'rev-parse', cp.ref) === cp.commit && git(repo, 'rev-parse', `${cp.commit}^`) === before.head);
+  const events = store.read();
+  check('回復點：完成事件早於 workspace_ready 與派工', events.find(e => e.type === 'checkpoint')?.seq < events.find(e => e.type === 'workspace_ready')?.seq && events.find(e => e.type === 'checkpoint')?.seq < events.find(e => e.type === 'action_intent')?.seq);
+  const verdict = JSON.parse(readFileSync(store.verdictPath, 'utf8'));
+  check('回復點：報告裁決列出原始 commit 與本地模式', verdict.checkpoint?.commit === cp.commit && verdict.checkpointMode === 'local' && readFileSync(store.reportPath, 'utf8').includes(cp.commit));
+  const status = await aiCliKernelStatus({ runId: store.runId });
+  check('回復點：狀態列出目的地與實際結果', status.develop.checkpoint.ref === cp.ref && status.develop.checkpointResult.commit === cp.commit && status.develop.checkpointMode === 'local');
+  const refsBefore = git(repo, 'for-each-ref');
+  const preview = aiCliKernelRollback({ runId: store.runId });
+  check('rollback：預設只印安全還原指令且不建分支', !preview.applied && preview.command === `git switch -c restore/${store.runId} ${cp.commit}` && git(repo, 'for-each-ref') === refsBefore);
+  const applied = aiCliKernelRollback({ runId: store.runId, apply: true });
+  check('rollback：apply 只建 restore 分支不切換或動 index 工作樹', applied.applied && git(repo, 'rev-parse', applied.branch) === cp.commit && git(repo, 'rev-parse', 'HEAD') === before.head && readFileSync(indexPath).equals(before.index) && git(repo, 'status', '--porcelain=v1') === before.status);
+  check('rollback：既有 restore 分支不覆寫', !!failing(aiCliKernelRollback, { runId: store.runId, apply: true }) && git(repo, 'rev-parse', applied.branch) === cp.commit);
+  git(repo, 'update-ref', `refs/heads/${cp.ref}`, git(repo, 'rev-parse', spec.branch));
+  check('rollback：回復點被改動即拒絕', /回復點/.test(failing(aiCliKernelRollback, { runId: store.runId, apply: true })?.message ?? ''));
+}
+{
+  const { repo, spec } = newDevRun();
+  const commit = realWorkspace.checkpointSnapshot(spec);
+  check('回復點：乾淨工作樹直接使用 HEAD', commit === spec.baseCommit);
+  realWorkspace.checkpointRef(spec, commit);
+  realWorkspace.checkpointRef(spec, commit);
+  check('回復點：已存在時驗證並沿用，不重做快照', realWorkspace.checkpointSnapshot(spec) === commit && git(repo, 'rev-parse', spec.checkpoint.ref) === commit);
+  git(repo, 'update-ref', `refs/heads/${spec.checkpoint.ref}`, git(repo, 'commit-tree', `${spec.baseCommit}^{tree}`, '-m', 'unrelated'));
+  check('回復點：既有 ref 不符基準即拒絕且不覆寫', !!failing(realWorkspace.checkpointSnapshot, spec) && !!failing(realWorkspace.checkpointRef, spec, commit));
+}
+{
+  const repo = newRepo();
+  const remote = bareOrigin(repo);
+  writeFileSync(join(repo, 'untracked.txt'), 'snapshot\n');
+  const { store, contract, spec } = newDevRun({ repo });
+  const state = await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n'))));
+  const cp = view(store).checkpoint;
+  check('回復點：有 origin 預設 push 並只推專用分支', state === 'completed' && spec.checkpoint.mode === 'push' && cp?.pushed === true && cp.remote === 'origin' && git(remote, 'for-each-ref', '--format=%(refname)').trim() === `refs/heads/${cp.ref}` && git(remote, 'rev-parse', cp.ref) === cp.commit);
+  check('回復點：refs 排除本地及 remote-tracking 回復點', !realWorkspace.refs(spec).some(line => line.includes('/checkpoints/')) && git(repo, 'show-ref').includes(`refs/remotes/origin/${cp.ref}`));
+  const local = newDevRun({ repo, checkpoint: 'local' });
+  check('回復點：有 origin 也可明確只留本地', local.spec.checkpoint.mode === 'local' && local.spec.checkpoint.remote === null);
+  const { runId } = store;
+  const readonly = { goal: 'g', workFolder: repo, checkpoint: 'off' };
+  check('回復點：唯讀範本拒絕 checkpoint 選項', /只有 develop/.test(failing(buildContract, readonly)?.message ?? ''));
+  check('回復點：拒絕未知模式', /checkpoint/.test(failing(buildContract, { goal: 'g', workFolder: repo, template: 'develop', testCommand: 'x', checkpoint: 'bad' }, new Date(), { runId, worktree: spec.worktree })?.message ?? ''));
+  const noOrigin = newRepo();
+  check('回復點：指定 push 但沒有 origin 時拒絕', /origin/.test(failing(buildContract, { goal: 'g', workFolder: noOrigin, template: 'develop', testCommand: 'x', checkpoint: 'push' }, new Date(), { runId, worktree: spec.worktree })?.message ?? ''));
+}
+for (const name of ['.env', '.env.production', 'a.pem', 'a.key', 'id_rsa', 'credentials.json', 'mySecret.txt', 'secret-dir/config.json']) {
+  const repo = newRepo();
+  const remote = bareOrigin(repo);
+  mkdirSync(dirname(join(repo, name)), { recursive: true });
+  writeFileSync(join(repo, name), 'not a real secret\n');
+  const { store, contract, spec } = newDevRun({ repo });
+  const executor = new FakeExecutor(writes('good\n'));
+  let pushes = 0;
+  const workspace = { ...realWorkspace, pushCheckpoint: (...args) => { pushes++; realWorkspace.pushCheckpoint(...args); } };
+  const state = await runKernelLoop(devDeps(store, contract, executor, { workspace }));
+  check(`回復點：疑似秘密不推送 ${name}`, state === 'waiting_human' && view(store).reason === 'checkpoint_secret_risk' && pushes === 0 && executor.started.length === 0 && !existsSync(spec.worktree) && git(remote, 'for-each-ref') === '');
+}
+{
+  const repo = newRepo();
+  const remote = bareOrigin(repo);
+  writeFileSync(join(remote, 'hooks', 'pre-receive'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const { store, contract, spec } = newDevRun({ repo });
+  const executor = new FakeExecutor(writes('good\n'));
+  const state = await runKernelLoop(devDeps(store, contract, executor));
+  check('回復點：push 失敗停在 waiting_human 不派工', state === 'waiting_human' && view(store).reason === 'checkpoint_push_failed' && executor.started.length === 0 && !existsSync(spec.worktree) && !view(store).checkpoint);
+  const original = view(store).checkpointPrepared.commit;
+  continueCheckpoint(store);
+  const second = await runKernelLoop(devDeps(store, contract, executor));
+  const verdict = existsSync(store.verdictPath) ? JSON.parse(readFileSync(store.verdictPath, 'utf8')) : null;
+  check('回復點：人核准後只留本地並記入裁決', second === 'completed' && view(store).checkpoint?.commit === original && view(store).checkpoint?.pushed === false && verdict?.checkpointMode === 'local' && git(remote, 'for-each-ref') === '');
+}
+{
+  const { store, contract } = newDevRun({ checkpoint: 'off' });
+  const state = await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n'))));
+  check('回復點：人手動核准可使用 off', state === 'completed' && !view(store).checkpoint && !view(store).checkpointPrepared && JSON.parse(readFileSync(store.verdictPath, 'utf8')).checkpointMode === 'off');
+  check('rollback：沒有回復點就拒絕', /沒有回復點/.test(failing(aiCliKernelRollback, { runId: store.runId })?.message ?? ''));
+}
+{
+  const { store, contract, spec } = newDevRun();
+  const executor = new FakeExecutor(writes('good\n'));
+  const state = await runKernelLoop(devDeps(store, contract, executor, { workspace: { ...realWorkspace, checkpointSnapshot: () => { throw new Error('snapshot unavailable'); } } }));
+  check('回復點：快照失敗即暫停不派工', state === 'waiting_human' && view(store).reason === 'checkpoint_failed' && executor.started.length === 0 && !existsSync(spec.worktree));
+}
+{
+  const repo = newRepo(), runId = newRunId();
+  const contract = buildContract({ goal: 'legacy', workFolder: repo, template: 'develop', testCommand: FEATURE_IS_GOOD }, new Date(), { runId, worktree: join(kernelRunDir(runId), 'wt') });
+  delete contract.develop.checkpoint;
+  const store = new RunStore(kernelRunDir(runId));
+  const digest = store.create(contract);
+  store.append({ type: 'approved', contractDigest: digest, kind: 'contract' });
+  store.append({ type: 'state', state: 'running' });
+  const state = await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n'))));
+  check('回復點：舊委任書接回不新增未核准操作', state === 'completed' && !view(store).checkpoint && !view(store).checkpointPrepared && store.contractDigest() === digest);
+}
+{
+  const { store, contract, spec } = newDevRun({ checkpoint: 'off', origin: { kind: 'trigger', mandate: 'test', digest: 'x' } });
+  const executor = new FakeExecutor(writes('good\n'));
+  const state = await runKernelLoop(devDeps(store, contract, executor));
+  check('回復點：觸發 run 拒絕 off 且不派工', state === 'waiting_human' && view(store).reason === 'checkpoint_off_forbidden' && executor.started.length === 0 && !existsSync(spec.worktree));
+}
+{
+  const repo = newRepo(); bareOrigin(repo);
+  const { store, contract } = newDevRun({ repo, origin: { kind: 'trigger', mandate: 'test', digest: 'x' } });
+  let pushes = 0;
+  const workspace = { ...realWorkspace, pushCheckpoint: () => { pushes++; throw new Error('unavailable'); } };
+  const executor = new FakeExecutor(writes('good\n'));
+  await runKernelLoop(devDeps(store, contract, executor, { workspace }));
+  continueCheckpoint(store); // 即使有人手寫了覆寫事件，觸發 run 也不能降成本地。
+  const state = await runKernelLoop(devDeps(store, contract, executor, { workspace }));
+  check('回復點：觸發 run 推送失敗不能降成本地', state === 'waiting_human' && view(store).reason === 'checkpoint_push_failed' && pushes === 2 && executor.started.length === 0 && !view(store).checkpoint);
+}
+for (const crashAt of ['prepared', 'ref', 'push', 'event']) {
+  const repo = newRepo();
+  const remote = bareOrigin(repo);
+  const { store, contract, spec } = newDevRun({ repo });
+  let snapshots = 0, pushes = 0;
+  const workspace = { ...realWorkspace,
+    checkpointSnapshot: (...args) => { snapshots++; return realWorkspace.checkpointSnapshot(...args); },
+    checkpointRef: (...args) => { realWorkspace.checkpointRef(...args); if (crashAt === 'ref') throw new Crash('ref'); },
+    pushCheckpoint: (...args) => { pushes++; realWorkspace.pushCheckpoint(...args); if (crashAt === 'push') throw new Crash('push'); },
+  };
+  class CheckpointCrashStore extends RunStore {
+    append(body) {
+      if (body.type === 'checkpoint_prepared' && crashAt === 'prepared') { super.append(body); throw new Crash('prepared'); }
+      if (body.type === 'checkpoint' && crashAt === 'event') { super.append(body); throw new Crash('event'); }
+      return super.append(body);
+    }
+  }
+  // ref/push 的 I/O 例外會安全暫停；prepared/event 的落盤例外模擬程序直接中斷。
+  await rejecting(rawLoop(devDeps(new CheckpointCrashStore(store.dir), contract, new FakeExecutor(writes('good\n')), { workspace })));
+  const original = view(store).checkpointPrepared?.commit;
+  if (view(store).state !== 'running') continueCheckpoint(store, []);
+  const resumedWorkspace = { ...realWorkspace, checkpointSnapshot: workspace.checkpointSnapshot, pushCheckpoint: (...args) => { pushes++; realWorkspace.pushCheckpoint(...args); } };
+  const state = await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n')), { workspace: resumedWorkspace }));
+  check(`回復點：當在 ${crashAt} 接回不重建原始快照`, state === 'completed' && snapshots === 1 && view(store).checkpoint?.commit === original && git(remote, 'rev-parse', spec.checkpoint.ref) === original && store.read().filter(e => e.type === 'checkpoint_prepared').length === 1 && store.read().filter(e => e.type === 'checkpoint').length === 1);
+  check(`回復點：當在 ${crashAt} 接回沒有多推 commit`, git(remote, 'rev-list', '--count', spec.checkpoint.ref) === '1' && (crashAt !== 'event' || pushes === 1));
+}
+{
+  const { store, contract, repo, spec } = newDevRun();
+  const executor = new FakeExecutor(writes('good\n', action => {
+    git(action.cwd, 'add', '-A'); git(action.cwd, 'commit', '-q', '--allow-empty', '-m', 'worker commit');
+    git(repo, 'update-ref', `refs/heads/${spec.checkpoint.ref}`, git(repo, 'rev-parse', spec.branch));
+  }));
+  const state = await runKernelLoop(devDeps(store, contract, executor));
+  check('回復點：交付前 ref 被動過即驗收失敗', state !== 'completed' && view(store).acceptance?.passed === false && view(store).acceptance.findings.join().includes('回復點') && !existsSync(store.reportPath));
+}
+{
+  const { store, contract, repo, spec } = newDevRun();
+  class PauseAtAcceptance extends RunStore {
+    append(body) { const result = super.append(body); if (body.type === 'acceptance' && body.passed) throw new Crash('before delivery'); return result; }
+  }
+  await rejecting(rawLoop(devDeps(new PauseAtAcceptance(store.dir), contract, new FakeExecutor(writes('good\n')))));
+  git(repo, 'update-ref', `refs/heads/${spec.checkpoint.ref}`, git(repo, 'rev-parse', spec.branch));
+  const state = await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n'))));
+  check('回復點：驗收後接回仍重驗 ref', state !== 'completed' && !existsSync(store.reportPath) && store.read().some(event => event.type === 'acceptance' && !event.passed && event.findings.join().includes('回復點')));
+}
+{
+  const repo = newRepo();
+  const remote = bareOrigin(repo);
+  const { store, contract, spec } = newDevRun({ repo });
+  const cp = realWorkspace.checkpointSnapshot(spec);
+  realWorkspace.checkpointRef(spec, cp);
+  const other = git(repo, 'commit-tree', `${cp}^{tree}`, '-p', cp, '-m', 'remote drift');
+  git(remote, 'fetch', repo, `${other}:refs/heads/${spec.checkpoint.ref}`);
+  const state = await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n'))));
+  check('回復點：遠端 ref 漂移拒絕推送不帶 force', state === 'waiting_human' && view(store).reason === 'checkpoint_push_failed' && git(remote, 'rev-parse', spec.checkpoint.ref) === other);
+}
+{
+  const { store, contract, spec } = newDevRun();
+  let output = '', error = '';
+  const io = { stdout: text => { output += text; }, stderr: text => { error += text; } };
+  const absent = await runKernelCli(['rollback', store.runId], io);
+  check('rollback CLI：未建回復點時回報失敗', absent === 1 && error.includes('沒有回復點'));
+  await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n'))));
+  output = ''; error = '';
+  const code = await runKernelCli(['rollback', store.runId], io);
+  check('rollback CLI：預設輸出 switch 指令', code === 0 && output.includes(`git switch -c restore/${store.runId}`) && !error);
+  output = '';
+  const apply = await runKernelCli(['rollback', store.runId, '--apply', '--json'], io);
+  check('rollback CLI：apply 建分支並支援 JSON', apply === 0 && JSON.parse(output).applied === true && git(spec.repoRoot, 'rev-parse', `restore/${store.runId}`) === view(store).checkpoint.commit);
+}
+
 /* ---- develop：獨立稽核找到的問題 ---- */
 {
   // F1：驗收通過後暫停，暫停期間分支又多了 commit。
@@ -1183,6 +1400,9 @@ const rejecting = async promise => { try { await promise; return null; } catch (
   realWorkspace.prepare(spec);
   store.append({ type: 'baseline', git: gitSnapshot(contract.workFolder) });
   store.writeOutput('refs-baseline', realWorkspace.refs(spec).join('\n'));
+  const checkpoint = realWorkspace.checkpointSnapshot(spec);
+  realWorkspace.checkpointRef(spec, checkpoint);
+  store.append({ type: 'checkpoint', commit: checkpoint, ref: spec.checkpoint.ref, pushed: false, remote: null });
   store.append({ type: 'workspace_ready', head: spec.baseCommit });
   writeFileSync(join(spec.worktree, 'junk.txt'), '上次測試留下的');
   store.append({ type: 'check_started', kind: 'test', pid: 999999, started: 'x', name: 'x' });

@@ -44,11 +44,16 @@ export interface KernelBudget {
 
 export type StepMode = 'read' | 'write';
 
+export interface CheckpointSpec { mode: 'push' | 'local' | 'off'; remote: string | null; ref: string }
+export interface CheckpointRecord { commit: string; ref: string; pushed: boolean; remote: string | null }
+
 /**
  * develop 範本才有。worker 拿的是全權限，所以這裡寫明的是 kernel 事後查核的範圍，不是隔離：
  * worktree 只隔開正常路徑的寫入，擋不住蓄意的操作。
  */
 export interface DevelopSpec {
+  /** 舊委任書沒有此欄位，接回時維持原來的行為。 */
+  checkpoint?: CheckpointSpec;
   repoRoot: string;
   /** workFolder 相對 repo 根目錄的路徑，結尾有 /；就在根目錄時是空字串。 */
   prefix: string;
@@ -82,6 +87,8 @@ export type AcceptanceCheck =
 
 /** 委任書。核准後不可變：內容的 digest 記在日誌，runner 每次啟動都會重算。 */
 export interface KernelContract {
+  /** 觸發入口由下一階段建立；此處先守住不能略過回復點的邊界。 */
+  origin?: { kind: 'trigger'; mandate: string; digest: string };
   schemaVersion: typeof KERNEL_SCHEMA_VERSION;
   template: string;
   goal: string;
@@ -166,6 +173,9 @@ export type KernelEventBody =
   | { type: 'step_checked'; actionId: string; stepId: string; passed: boolean; failureClass?: FailureClass; findings: string[]; commit?: string }
   | { type: 'acceptance'; stepId: string; passed: boolean; findings: string[] }
   | { type: 'workspace_ready'; head: string }
+  /** 先記 commit，再建立 ref：當在兩次寫入之間也能核對原本的快照。 */
+  | { type: 'checkpoint_prepared'; commit: string; ref: string }
+  | ({ type: 'checkpoint' } & CheckpointRecord)
   /** kernel 自己跑的指令。記下身分，當掉後才有辦法確認它停了。 */
   | { type: 'check_started'; kind: 'setup' | 'test'; pid: number; started: string; name: string }
   | { type: 'check_finished'; pid: number }
@@ -224,6 +234,11 @@ export interface CheckHandle {
 
 /** kernel 只透過這個介面碰 git 和檢查指令，loop.ts 本身沒有 I/O 細節。 */
 export interface WorkspaceOps {
+  checkpointSnapshot(spec: DevelopSpec): string;
+  checkpointRef(spec: DevelopSpec, commit: string): void;
+  checkpointValid(spec: DevelopSpec, checkpoint: Pick<CheckpointRecord, 'commit' | 'ref'>): boolean;
+  checkpointSecretPaths(spec: DevelopSpec, commit: string): string[];
+  pushCheckpoint(spec: DevelopSpec, commit: string): void;
   prepare(spec: DevelopSpec): void;
   inspect(spec: DevelopSpec): WorkspaceState;
   commit(spec: DevelopSpec, message: string): string;

@@ -3549,5 +3549,149 @@
     "from": "if (existsSync(join(repoRoot, '.codex', 'hooks.json')) && models.some(model => resolveAgentIdForModel(model) === 'codex')) {",
     "to": "if (false as boolean) {",
     "expect": "repo 有專案層 Codex hook 時，委任書警告它可能不生效"
+  },
+  {
+    "name": "kernel L4 快照誤用來源 index",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "GIT_INDEX_FILE: join(dir, 'index')",
+    "to": "GIT_INDEX_FILE: join(spec.repoRoot, '.git', 'index')",
+    "expect": "回復點：來源 HEAD index 工作樹完全不變"
+  },
+  {
+    "name": "kernel L4 快照漏掉未追蹤檔案",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "indexed('add', '-A');",
+    "to": "indexed('add', '-u');",
+    "expect": "回復點：包含未提交與未追蹤檔案"
+  },
+  {
+    "name": "kernel L4 快照誤收忽略檔案",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "indexed('add', '-A');",
+    "to": "indexed('add', '-A', '-f');",
+    "expect": "回復點：忽略檔案與已刪檔案不進快照"
+  },
+  {
+    "name": "kernel L4 快照誤沿用 HEAD",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "if (tree === mustGit(spec.repoRoot, 'rev-parse', 'HEAD^{tree}').trim()) return head;",
+    "to": "if (tree) return head;",
+    "expect": "回復點：包含未提交與未追蹤檔案"
+  },
+  {
+    "name": "kernel L4 既有回復點被覆寫",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "if (existing.stdout.trim() !== commit) throw new Error('回復點 ref 已變動');",
+    "to": "if (false) throw new Error('回復點 ref 已變動');",
+    "expect": "回復點：既有 ref 不符基準即拒絕且不覆寫"
+  },
+  {
+    "name": "kernel L4 回復點驗證不比 commit",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "result.stdout.trim() === checkpoint.commit &&",
+    "to": "true &&",
+    "expect": "rollback：回復點被改動即拒絕"
+  },
+  {
+    "name": "kernel L4 疑似秘密路徑漏擋",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "if (secrets.length) {",
+    "to": "if (false) {",
+    "expect": "回復點：疑似秘密不推送"
+  },
+  {
+    "name": "kernel L4 回復點推送失敗不暫停",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "catch (error) { setState('waiting_human', 'checkpoint_push_failed', (error as Error).message); return false; }",
+    "to": "catch (error) { /* mutated */ }",
+    "expect": "回復點：push 失敗停在 waiting_human 不派工"
+  },
+  {
+    "name": "kernel L4 未核准便降成本地",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "const localOnly = view.overrides.has('checkpoint_push_failed') && contract.origin?.kind !== 'trigger';",
+    "to": "const localOnly = true;",
+    "expect": "回復點：有 origin 預設 push 並只推專用分支"
+  },
+  {
+    "name": "kernel L4 觸發 run 可降成本地",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "const localOnly = view.overrides.has('checkpoint_push_failed') && contract.origin?.kind !== 'trigger';",
+    "to": "const localOnly = view.overrides.has('checkpoint_push_failed');",
+    "expect": "回復點：觸發 run 推送失敗不能降成本地"
+  },
+  {
+    "name": "kernel L4 觸發 run 可關閉回復點",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "if (contract.origin?.kind === 'trigger') {",
+    "to": "if (false) {",
+    "expect": "回復點：觸發 run 拒絕 off 且不派工"
+  },
+  {
+    "name": "kernel L4 遺失已準備回復點",
+    "file": "src/ai-cli_kernel/replay.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "view.checkpointPrepared = { commit: event.commit, ref: event.ref };",
+    "to": "view.checkpointPrepared = null;",
+    "expect": "回復點：當在 prepared 接回不重建原始快照"
+  },
+  {
+    "name": "kernel L4 遺失完成回復點",
+    "file": "src/ai-cli_kernel/replay.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "view.checkpoint = { commit: event.commit, ref: event.ref, pushed: event.pushed, remote: event.remote };",
+    "to": "view.checkpoint = null;",
+    "expect": "develop：改完而且測試通過才走到 completed"
+  },
+  {
+    "name": "kernel L4 交付不驗回復點",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "if (develop!.checkpoint && develop!.checkpoint.mode !== 'off') {",
+    "to": "if (false) {",
+    "expect": "回復點：交付前 ref 被動過即驗收失敗"
+  },
+  {
+    "name": "kernel L4 遠端回復點漂移不拒絕",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "if (remoteRef.split(/\\s/)[0] !== commit) throw new Error('遠端回復點已指向其他 commit');",
+    "to": "if (false) throw new Error('遠端回復點已指向其他 commit');",
+    "expect": "回復點：遠端 ref 漂移拒絕推送不帶 force"
+  },
+  {
+    "name": "kernel L4 rollback 預覽也建立分支",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "if (apply) mustGit(spec.repoRoot, 'branch', branch, checkpoint.commit);",
+    "to": "mustGit(spec.repoRoot, 'branch', branch, checkpoint.commit);",
+    "expect": "rollback：預設只印安全還原指令且不建分支"
+  },
+  {
+    "name": "kernel L4 回復點推送偷偷帶強制旗標",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "mustGit(spec.repoRoot, 'push', remote, `${commit}:${ref}`);",
+    "to": "mustGit(spec.repoRoot, 'push', '--force', remote, `${commit}:${ref}`);",
+    "expect": "回復點：推送使用明確 commit refspec 且無強制旗標"
+  },
+  {
+    "name": "kernel L4 refs 比對誤算回復點分支",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "script": "verify-ai-cli_kernel.mjs",
+    "from": "        return line && ref !== `refs/heads/${spec.branch}` && !ref.startsWith('refs/heads/ai-cli_kernel/checkpoints/') && !/^refs\\/remotes\\/[^/]+\\/ai-cli_kernel\\/checkpoints\\//.test(ref);",
+    "to": "        return line && ref !== `refs/heads/${spec.branch}`;",
+    "expect": "develop：改完而且測試通過才走到 completed"
   }
 ]

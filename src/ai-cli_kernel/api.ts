@@ -17,11 +17,11 @@ import { activeMinutes, nextStep, openActions, replayJournal, unprocessedActions
 import { agentForModel } from './runtime.js';
 import { buildContract, TEMPLATES, type KernelStartInput } from './templates.js';
 import { isTerminalState, workDirOf, type ActionOutcome, type BoundaryStatus, type DevelopSpec, type KernelContract, type KernelExecutor, type RunState } from './types.js';
-import { cleanupWorkspace, realWorkspace } from './workspace.js';
+import { aiCliKernelRestoreCheckpointBranch, cleanupWorkspace, realWorkspace } from './workspace.js';
 
 export type { KernelStartInput } from './templates.js';
 
-const OVERRIDABLE_REASONS = new Set(['quota_low', 'quota_unknown', 'worktree_changed', 'repo_refs_changed', 'mandate_expired']);
+const OVERRIDABLE_REASONS = new Set(['quota_low', 'quota_unknown', 'worktree_changed', 'repo_refs_changed', 'mandate_expired', 'checkpoint_push_failed']);
 
 /* ---- 開關：預設關閉，開了 MCP 才會多出 ai-cli_kernel_* 工具 ---- */
 function enablePath(): string { return join(CONFIG_DIR, 'kernel.json'); }
@@ -54,7 +54,7 @@ export interface KernelRunStatus {
   template: string;
   models: { decide: KernelContract['decide']; worker: KernelContract['worker']; allowedWorkers: string[] };
   /** develop 範本才有。委任書要讓人看清楚的東西都在這裡。 */
-  develop: (Pick<DevelopSpec, 'repoRoot' | 'branch' | 'baseCommit' | 'worktree' | 'testCommand' | 'setupCommand' | 'allowedPaths' | 'dirtyAtStart' | 'expiresAt' | 'notices'> & { testFailures: number; verifiedCommit: string | null }) | null;
+  develop: (Pick<DevelopSpec, 'repoRoot' | 'branch' | 'baseCommit' | 'worktree' | 'testCommand' | 'setupCommand' | 'allowedPaths' | 'dirtyAtStart' | 'expiresAt' | 'notices' | 'checkpoint'> & { testFailures: number; verifiedCommit: string | null; checkpointResult: RunView['checkpoint']; checkpointPrepared: RunView['checkpointPrepared']; checkpointMode: string | null }) | null;
   contractDigest: string | null;
   boundary: Record<string, BoundaryStatus>;
   boundaryLabel: string;
@@ -82,6 +82,8 @@ function nextActionFor(state: EffectiveState, runId: string, reason?: string): s
     case 'awaiting_approval': return `讀完委任書後，同意就執行 ai-cli kernel approve ${runId}，不要就執行 ai-cli kernel cancel ${runId}`;
     case 'running': return `不用做事。可用 ai-cli kernel wait ${runId} 等它停下來。`;
     case 'waiting_human':
+      if (reason === 'checkpoint_push_failed') return `回復點沒有推成功。人手動建立的 run 可用 ai-cli kernel approve ${runId} 同意只留本地；觸發的 run 必須先排除遠端問題。`;
+      if (reason === 'checkpoint_secret_risk') return `回復點含疑似秘密，不會推送或派工。請取消此 run，處理秘密後重新建立委任書。`;
       if (reason === 'boundary_unverified') return `先跑 ai-cli kernel probe --agent <agent>，通過後再 ai-cli kernel approve ${runId}`;
       if (reason === 'decide_question') return `回答問題：ai-cli kernel approve ${runId} --note "你的回答"`;
       return `確認上面的原因後，要繼續就執行 ai-cli kernel approve ${runId}，不要就執行 ai-cli kernel cancel ${runId}`;
@@ -98,7 +100,7 @@ function nextActionFor(state: EffectiveState, runId: string, reason?: string): s
 function developNextAction(contract: KernelContract, state: EffectiveState, runId: string): string | null {
   if (!contract.develop) return null;
   if (state === 'awaiting_approval') return `worker 會拿到等於你本人的權限，只靠 worktree 隔開正常路徑的寫入。讀完委任書後，同意就執行 ai-cli kernel approve ${runId} --acknowledge-unisolated，不要就執行 ai-cli kernel cancel ${runId}`;
-  if (state === 'completed') return `看報告：ai-cli kernel result ${runId}。沒問題就自己合併 git merge ${contract.develop.branch}，之後用 ai-cli kernel cleanup ${runId} 清掉 worktree。kernel 不會替你合併或 push。`;
+  if (state === 'completed') return `看報告：ai-cli kernel result ${runId}。沒問題就自己合併 git merge ${contract.develop.branch}，之後用 ai-cli kernel cleanup ${runId} 清掉 worktree。kernel 不會替你合併或推交付分支。`;
   return null;
 }
 
@@ -151,6 +153,8 @@ async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRun
       ...(contract.develop.setupCommand ? { setupCommand: contract.develop.setupCommand } : {}), allowedPaths: contract.develop.allowedPaths,
       dirtyAtStart: contract.develop.dirtyAtStart, expiresAt: contract.develop.expiresAt, notices: contract.develop.notices ?? [], testFailures: view.testFailures,
       verifiedCommit: view.verification?.passed ? view.verification.commit : null,
+      checkpoint: contract.develop.checkpoint, checkpointResult: view.checkpoint, checkpointPrepared: view.checkpointPrepared,
+      checkpointMode: contract.develop.checkpoint?.mode === 'push' && view.overrides.has('checkpoint_push_failed') && contract.origin?.kind !== 'trigger' ? 'local' : contract.develop.checkpoint?.mode ?? null,
     } : null,
     boundaryLabel: contract.develop ? '未隔離：worker 權限等於你本人，worktree 只隔開正常路徑的寫入' : contract.allowUnverifiedBoundary ? '未驗證（呼叫端明確允許）' : passed ? '工具受限，非隔離' : '尚未通過探針',
     progress: {
@@ -211,6 +215,17 @@ export async function aiCliKernelStart(input: KernelStartInput): Promise<KernelR
   return statusOf(store);
 }
 
+/** 預設只印還原方式；apply 也只建分支，絕不移動 HEAD 或工作樹。 */
+export function aiCliKernelRollback(input: { runId: string; apply?: boolean }): ReturnType<typeof aiCliKernelRestoreCheckpointBranch> {
+  const store = storeFor(input.runId);
+  const contract = store.readContract();
+  const view = replayJournal(store.read());
+  const checkpoint = view.checkpoint ?? (view.checkpointPrepared ? { ...view.checkpointPrepared, pushed: false, remote: contract.develop?.checkpoint?.remote ?? null } : null);
+  if (!contract.develop || !checkpoint) throw new Error('這個 run 沒有回復點，不能 rollback');
+  if (store.contractDigest() !== view.contractDigest) throw new Error('委任書內容已變動，拒絕 rollback');
+  return aiCliKernelRestoreCheckpointBranch(contract.develop, checkpoint, store.runId, input.apply === true);
+}
+
 export interface KernelApproveInput { runId: string; note?: string; reconcile?: string; acknowledgeUnisolated?: boolean }
 
 export async function aiCliKernelApprove(input: KernelApproveInput): Promise<KernelRunStatus> {
@@ -252,7 +267,7 @@ export async function aiCliKernelApprove(input: KernelApproveInput): Promise<Ker
   } else {
     const lock = acquireActiveLock(input.runId);
     if (!lock.ok) throw new Error(`受治理任務一次只能跑一個，目前被 ${lock.heldBy} 佔用`);
-    const overrides = view.reason && OVERRIDABLE_REASONS.has(view.reason) && view.state === 'waiting_human' ? [view.reason] : [];
+    const overrides = view.reason && OVERRIDABLE_REASONS.has(view.reason) && view.state === 'waiting_human' && !(view.reason === 'checkpoint_push_failed' && contract.origin?.kind === 'trigger') ? [view.reason] : [];
     store.append({ type: 'approved', contractDigest: digest, kind: 'continue', ...(input.note ? { note: input.note } : {}), ...(overrides.length ? { overrides } : {}) });
   }
   store.append({ type: 'state', state: 'running' });

@@ -164,6 +164,11 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
   const developFindings = (view: RunView): string[] => {
     const state = ws!.inspect(develop!);
     const findings: string[] = [];
+    if (develop!.checkpoint && develop!.checkpoint.mode !== 'off') {
+      try {
+        if (!view.checkpoint || !ws!.checkpointValid(develop!, view.checkpoint)) findings.push('回復點 ref 已變動或不存在');
+      } catch { findings.push('回復點無法驗證'); }
+    }
     if (state.branch !== develop!.branch) findings.push(`目前在 ${state.branch ?? 'detached HEAD'}，不是 ${develop!.branch}`);
     if (!state.ancestorOk) findings.push(`基準 commit ${develop!.baseCommit.slice(0, 10)} 不再是 HEAD 的祖先，歷史被改寫了`);
     if (state.changed.length === 0) findings.push('沒有任何改動，開發任務沒有交付東西');
@@ -309,6 +314,52 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
     return true;
   };
 
+  /** 回復點必須先完成，才可以準備工作區、跑指令或派模型。 */
+  const prepareCheckpoint = (view: RunView): boolean => {
+    const spec = develop!.checkpoint;
+    if (!spec) return true; // 舊委任書的 digest 不變，不能偷偷加上新操作。
+    if (spec.mode === 'off') {
+      if (contract.origin?.kind === 'trigger') {
+        setState('waiting_human', 'checkpoint_off_forbidden', '觸發的 run 不能關閉回復點');
+        return false;
+      }
+      return true;
+    }
+    if (view.checkpoint) {
+      if (!ws!.checkpointValid(develop!, view.checkpoint)) {
+        setState('waiting_human', 'checkpoint_changed', '回復點 ref 已變動或不存在');
+        return false;
+      }
+      return true;
+    }
+    let prepared = view.checkpointPrepared;
+    if (!prepared) {
+      let snapshot: string;
+      try { snapshot = ws!.checkpointSnapshot(develop!); }
+      catch (error) { setState('waiting_human', 'checkpoint_failed', (error as Error).message); return false; }
+      prepared = { commit: snapshot, ref: spec.ref };
+      commit({ type: 'checkpoint_prepared', ...prepared });
+    }
+    try { ws!.checkpointRef(develop!, prepared.commit); }
+    catch (error) { setState('waiting_human', 'checkpoint_failed', (error as Error).message); return false; }
+    const localOnly = view.overrides.has('checkpoint_push_failed') && contract.origin?.kind !== 'trigger';
+    let pushed = false;
+    if (spec.mode === 'push' && !localOnly) {
+      let secrets: string[];
+      try { secrets = ws!.checkpointSecretPaths(develop!, prepared.commit); }
+      catch (error) { setState('waiting_human', 'checkpoint_failed', (error as Error).message); return false; }
+      if (secrets.length) {
+        setState('waiting_human', 'checkpoint_secret_risk', `回復點含疑似秘密路徑，不會推送：${secrets.slice(0, 8).join('、')}`);
+        return false;
+      }
+      try { ws!.pushCheckpoint(develop!, prepared.commit); }
+      catch (error) { setState('waiting_human', 'checkpoint_push_failed', (error as Error).message); return false; }
+      pushed = true;
+    }
+    commit({ type: 'checkpoint', ...prepared, pushed, remote: spec.remote });
+    return true;
+  };
+
   const prepareWorkspace = async (view: RunView): Promise<boolean> => {
     try { ws!.prepare(develop!); }
     catch (error) { setState('waiting_human', 'workspace_failed', (error as Error).message); return false; }
@@ -421,7 +472,8 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
 - 最新：${delivered.head}
 - 測試：${develop.testCommand} 在最新 commit 上通過
 - worktree：${develop.worktree}
-- 還沒合併、也沒有 push。看過沒問題再自己合併：git merge ${develop.branch}
+- 回復點：${view.checkpoint ? `${view.checkpoint.ref} @ ${view.checkpoint.commit}（${view.checkpoint.pushed ? `已推到 ${view.checkpoint.remote}` : '只留本地'}）` : develop.checkpoint?.mode === 'off' ? '人手動核准關閉' : '舊委任書未設定'}
+- 交付分支還沒合併、也沒有 push。看過沒問題再自己合併：git merge ${develop.branch}
 
 \`\`\`
 ${stat}
@@ -432,6 +484,8 @@ ${stat}
       execution: { ok: true, jobStatus: worker?.jobStatus ?? null, exitCode: worker?.exitCode ?? null },
       delivery: { ok: true, reportStep: stepId, checks: contract.acceptance.map(check => check.type) },
       ...(develop && delivered ? {
+        checkpoint: view.checkpoint,
+        checkpointMode: develop.checkpoint?.mode === 'push' && view.overrides.has('checkpoint_push_failed') && contract.origin?.kind !== 'trigger' ? 'local' : develop.checkpoint?.mode ?? null,
         mainFolder: readOnly,
         develop: { branch: develop.branch, baseCommit: develop.baseCommit, headCommit: delivered.head, changedFiles: delivered.changed, testCommand: develop.testCommand, testPassedOn: view.verification?.commit ?? null, testFailures: view.testFailures, worktree: develop.worktree },
       } : { readOnly }),
@@ -524,6 +578,7 @@ ${stat}
     if (view.state !== 'running') return view.state;
     if (develop && !await clearOrphanCheck(view)) return read().state;
     if (store.cancelRequested() && openActions(view).length === 0) { setState('cancelled', 'user_cancelled'); return 'cancelled'; }
+    if (develop && !view.workspaceReady && !prepareCheckpoint(view)) return read().state;
     if (develop && !view.workspaceReady) {
       if (!await prepareWorkspace(view)) return read().state;
       continue;

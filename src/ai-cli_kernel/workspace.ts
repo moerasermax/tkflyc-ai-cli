@@ -5,12 +5,13 @@
  * 「事後」是重點：改到範圍外的東西會被抓到、不會被 commit，但已經發生的副作用撤不回來。
  */
 import { execFile, spawn, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { mayBeAlive, sameIdentity } from '../core/job-store.js';
 import { lookupIdentities } from '../core/live-jobs.js';
-import type { CheckHandle, DevelopSpec, WorkspaceOps, WorkspaceState } from './types.js';
+import type { CheckHandle, CheckpointRecord, CheckpointSpec, DevelopSpec, WorkspaceOps, WorkspaceState } from './types.js';
 
 const exec = promisify(execFile);
 const TAIL_BYTES = 8192;
@@ -35,6 +36,33 @@ export function describeRepo(folder: string): { root: string; prefix: string; he
   const status = git(folder, 'status', '--porcelain=v1');
   if (root.status !== 0 || prefix.status !== 0 || head.status !== 0 || status.status !== 0) return null;
   return { root: resolve(root.stdout.trim()), prefix: prefix.stdout.trim(), head: head.stdout.trim(), dirty: status.stdout.split('\n').filter(Boolean).length };
+}
+
+/** 遠端只選已設定的 origin，不把其他使用者分支當備份目的地。 */
+export function aiCliKernelCheckpointSpec(repoRoot: string, runId: string, mode?: string): CheckpointSpec {
+  if (mode !== undefined && !['push', 'local', 'off'].includes(mode)) throw new Error('checkpoint 必須是 push、local 或 off');
+  const origin = git(repoRoot, 'remote', 'get-url', 'origin').status === 0;
+  const selected = (mode ?? (origin ? 'push' : 'local')) as CheckpointSpec['mode'];
+  if (selected === 'push' && !origin) throw new Error('checkpoint push 需要 origin 遠端');
+  const ref = `ai-cli_kernel/checkpoints/${runId}`;
+  mustGit(repoRoot, 'check-ref-format', `refs/heads/${ref}`);
+  return { mode: selected, remote: selected === 'push' ? 'origin' : null, ref };
+}
+
+function checkpointName(spec: DevelopSpec): string {
+  const ref = spec.checkpoint?.ref;
+  if (!ref?.startsWith('ai-cli_kernel/checkpoints/')) throw new Error('不是 kernel 的回復點 ref');
+  mustGit(spec.repoRoot, 'check-ref-format', `refs/heads/${ref}`);
+  return `refs/heads/${ref}`;
+}
+
+/** 只建新分支，既有同名分支即拒絕；不 checkout、不 reset。 */
+export function aiCliKernelRestoreCheckpointBranch(spec: DevelopSpec, checkpoint: CheckpointRecord, runId: string, apply: boolean): { branch: string; commit: string; command: string; applied: boolean } {
+  if (!realWorkspace.checkpointValid(spec, checkpoint)) throw new Error('回復點 ref 已變動或 commit 不存在，拒絕 rollback');
+  const branch = `restore/${runId}`;
+  mustGit(spec.repoRoot, 'check-ref-format', `refs/heads/${branch}`);
+  if (apply) mustGit(spec.repoRoot, 'branch', branch, checkpoint.commit);
+  return { branch, commit: checkpoint.commit, command: `git switch -c ${branch} ${checkpoint.commit}`, applied: apply };
 }
 
 /** 使用者給的路徑是相對 workFolder。轉成相對 repo 根目錄，才能和 git 回報的路徑比。 */
@@ -100,6 +128,72 @@ async function killTree(pid: number): Promise<void> {
 }
 
 export const realWorkspace: WorkspaceOps = {
+  checkpointSnapshot(spec) {
+    const ref = checkpointName(spec);
+    const existing = git(spec.repoRoot, 'show-ref', '--verify', '--hash', ref);
+    if (existing.status === 0) {
+      const commit = existing.stdout.trim();
+      mustGit(spec.repoRoot, 'cat-file', '-e', `${commit}^{commit}`);
+      // 尚未落盤的舊 ref 只能是基準本身或以基準為單一 parent 的快照。
+      const parents = mustGit(spec.repoRoot, 'rev-list', '--parents', '-n', '1', commit).trim().split(' ');
+      if (commit !== spec.baseCommit && (parents.length !== 2 || parents[1] !== spec.baseCommit)) throw new Error('既有回復點和基準不符');
+      return commit;
+    }
+    const head = mustGit(spec.repoRoot, 'rev-parse', 'HEAD').trim();
+    if (head !== spec.baseCommit) throw new Error('來源 HEAD 和委任書基準不符，請重新建立委任書');
+    const dir = mkdtempSync(join(tmpdir(), 'ai-cli_kernel-index-'));
+    const env = { ...process.env, GIT_INDEX_FILE: join(dir, 'index'), GIT_TERMINAL_PROMPT: '0' };
+    const indexed = (...args: string[]) => {
+      const result = spawnSync('git', ['-C', spec.repoRoot, ...args], { encoding: 'utf8', windowsHide: true, timeout: 120000, maxBuffer: 64 * 1024 * 1024, env });
+      if (result.status !== 0) throw new Error(`回復點 git ${args[0]} 失敗：${(result.stderr || String(result.error ?? '')).slice(0, 600)}`);
+      return result.stdout.trim();
+    };
+    try {
+      indexed('read-tree', 'HEAD');
+      indexed('add', '-A');
+      const tree = indexed('write-tree');
+      if (tree === mustGit(spec.repoRoot, 'rev-parse', 'HEAD^{tree}').trim()) return head;
+      return indexed('commit-tree', tree, '-p', head, '-m', `ai-cli_kernel checkpoint ${spec.checkpoint!.ref}`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  },
+
+  checkpointRef(spec, commit) {
+    const ref = checkpointName(spec);
+    mustGit(spec.repoRoot, 'cat-file', '-e', `${commit}^{commit}`);
+    const existing = git(spec.repoRoot, 'show-ref', '--verify', '--hash', ref);
+    if (existing.status === 0) {
+      if (existing.stdout.trim() !== commit) throw new Error('回復點 ref 已變動');
+      return;
+    }
+    // 空 old-value 表示 ref 必須不存在，不能覆寫同時被人建立的分支。
+    mustGit(spec.repoRoot, 'update-ref', ref, commit, '');
+  },
+
+  checkpointValid(spec, checkpoint) {
+    if (checkpoint.ref !== spec.checkpoint?.ref) return false;
+    const result = git(spec.repoRoot, 'show-ref', '--verify', '--hash', checkpointName(spec));
+    return result.status === 0 && result.stdout.trim() === checkpoint.commit && git(spec.repoRoot, 'cat-file', '-e', `${checkpoint.commit}^{commit}`).status === 0;
+  },
+
+  checkpointSecretPaths(spec, commit) {
+    return mustGit(spec.repoRoot, 'diff', '--no-renames', '--name-only', '-z', spec.baseCommit, commit).split('\0').filter(path => {
+      return path.split('/').some(name => /^\.env(?:\.|$)|\.(?:pem|key)$|^id_rsa$|^credentials|secret/i.test(name));
+    });
+  },
+
+  pushCheckpoint(spec, commit) {
+    const remote = spec.checkpoint?.remote;
+    if (!remote || remote.startsWith('-')) throw new Error('回復點沒有有效遠端');
+    const ref = checkpointName(spec);
+    // push 完但事件沒落盤時，先查遠端，不能再推一次或覆寫別人的變更。
+    const remoteRef = mustGit(spec.repoRoot, 'ls-remote', '--heads', remote, ref).trim();
+    if (remoteRef) {
+      if (remoteRef.split(/\s/)[0] !== commit) throw new Error('遠端回復點已指向其他 commit');
+      return;
+    }
+    mustGit(spec.repoRoot, 'push', remote, `${commit}:${ref}`);
+  },
+
   /** 可以重複呼叫：當在中間時，下次會接著用已經開好的 worktree。 */
   prepare(spec) {
     if (existsSync(join(spec.worktree, '.git'))) {
@@ -143,7 +237,10 @@ export const realWorkspace: WorkspaceOps = {
   /** 主 repo 的 ref，不含這個 run 自己的分支。push 成功時 remote-tracking ref 也會動，看得出來。 */
   refs(spec) {
     return mustGit(spec.repoRoot, 'for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads', 'refs/remotes', 'refs/tags')
-      .split('\n').filter(line => line && !line.endsWith(` refs/heads/${spec.branch}`)).sort();
+      .split('\n').filter(line => {
+        const ref = line.slice(line.indexOf(' ') + 1);
+        return line && ref !== `refs/heads/${spec.branch}` && !ref.startsWith('refs/heads/ai-cli_kernel/checkpoints/') && !/^refs\/remotes\/[^/]+\/ai-cli_kernel\/checkpoints\//.test(ref);
+      }).sort();
   },
 
   diffStat(spec) {

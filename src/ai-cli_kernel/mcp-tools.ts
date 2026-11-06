@@ -13,7 +13,7 @@ const RUN_ID = { type: 'string', description: 'run id，例如 kr-20261106-01234
 const TOOLS = [
   {
     name: 'ai-cli_kernel_start',
-    description: 'Create a mandate for a supervised agent run. Nothing executes until ai-cli_kernel_approve. The kernel plans with a tool-less model call, dispatches workers through ai-cli, verifies the deliverable with deterministic checks, and recovers across restarts. Template readonly-audit (default) is read-only: tool-limited, not isolated. Template develop can change code: workers run with full user permissions in a dedicated git worktree and branch, the kernel itself runs testCommand and only accepts a commit that passes it, and it never merges or pushes. develop is NOT isolated: show the mandate to the user first.',
+    description: 'Create a mandate for a supervised agent run. Nothing executes until ai-cli_kernel_approve. The kernel plans with a tool-less model call, dispatches workers through ai-cli, verifies the deliverable with deterministic checks, and recovers across restarts. Template readonly-audit (default) is read-only: tool-limited, not isolated. Template develop can change code: workers run with full user permissions in a dedicated git worktree and branch, the kernel itself runs testCommand and only accepts a commit that passes it. It never merges or pushes the delivery branch; it may push a dedicated checkpoint branch before work. develop is NOT isolated: show the mandate to the user first.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -29,6 +29,7 @@ const TOOLS = [
         setupCommand: { type: 'string', description: 'develop：新 worktree 要先跑的準備指令，例如 npm ci。新 worktree 沒有 node_modules。' },
         allowedPaths: { type: 'array', items: { type: 'string' }, description: 'develop：只能改這些路徑（相對 workFolder）。不給就是整個 repo。' },
         mandateHours: { type: 'number', description: 'develop：委任書幾小時後失效，預設 24。' },
+        checkpoint: { type: 'string', enum: ['push', 'local', 'off'], description: 'develop 開工前回復點：有 origin 預設 push，否則 local；推到專用分支，off 僅限人手動核准。' },
         budget: {
           type: 'object',
           properties: {
@@ -118,6 +119,7 @@ export async function aiCliKernelHandleTool(name: string, args: Record<string, u
         ...Object.fromEntries(Object.entries({
           workerModels: optionalStrings(args, 'workerModels'), testCommand: optionalString(args, 'testCommand'), setupCommand: optionalString(args, 'setupCommand'),
           allowedPaths: optionalStrings(args, 'allowedPaths'), mandateHours: typeof args.mandateHours === 'number' ? args.mandateHours : undefined,
+          checkpoint: optionalString(args, 'checkpoint'),
         }).filter(([, value]) => value !== undefined)),
       });
     case 'ai-cli_kernel_approve':

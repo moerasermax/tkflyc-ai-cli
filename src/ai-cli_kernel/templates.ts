@@ -6,7 +6,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { KNOWN_BAD_MODELS, isKnownModelTarget, isRemovedModel, removedModelMessage, resolveAgentIdForModel, resolveModelAlias } from '../models/catalog.js';
 import { ALLOWED_REASONING_EFFORTS } from '../core/reasoning.js';
 import { KERNEL_SCHEMA_VERSION, type DevelopSpec, type KernelBudget, type KernelContract } from './types.js';
-import { describeRepo, normalizeAllowedPaths } from './workspace.js';
+import { aiCliKernelCheckpointSpec, describeRepo, normalizeAllowedPaths } from './workspace.js';
 
 export const DEFAULT_MODEL = 'gpt-6.1-sol';
 export const DEFAULT_EFFORT = 'medium';
@@ -21,6 +21,7 @@ const DEVELOP_BUDGET: Partial<KernelBudget> = { maxWorkerSteps: 10, maxDecides: 
 const DEFAULT_MANDATE_HOURS = 24;
 
 export interface KernelStartInput {
+  checkpoint?: string;
   goal: string;
   workFolder: string;
   template?: string;
@@ -84,7 +85,7 @@ export const TEMPLATES = {
     }),
   },
   develop: {
-    description: '開發：在獨立的 worktree 和分支裡改程式、跑測試，做到測試通過。不合併、不 push。worker 權限等於你本人，未隔離。',
+    description: '開發：在獨立的 worktree 和分支裡改程式、跑測試，做到測試通過。不合併、不推交付分支；可推專用回復點。worker 權限等於你本人，未隔離。',
     reportInstructions: `用繁體中文，依序包含這三個段落，標題照寫：
 ## 結論
 做完了什麼，一兩句。
@@ -126,6 +127,7 @@ function buildDevelopSpec(input: KernelStartInput, workFolder: string, now: Date
   const hours = input.mandateHours ?? DEFAULT_MANDATE_HOURS;
   if (!Number.isFinite(hours) || hours <= 0) throw new Error('mandateHours 必須是正數');
   return {
+    checkpoint: aiCliKernelCheckpointSpec(repo.root, context.runId, input.checkpoint),
     repoRoot: repo.root, prefix: repo.prefix, baseCommit: repo.head, branch: `ai-cli_kernel/${context.runId}`, worktree: context.worktree, testCommand,
     ...(input.setupCommand?.trim() ? { setupCommand: input.setupCommand.trim() } : {}),
     allowedPaths: normalizeAllowedPaths(input.allowedPaths ?? [], repo.prefix), dirtyAtStart: repo.dirty,
@@ -146,7 +148,7 @@ export function buildContract(input: KernelStartInput, now = new Date(), context
   try { if (!statSync(workFolder).isDirectory()) throw new Error('not a directory'); }
   catch { throw new Error(`工作目錄不存在：${workFolder}`); }
   const isDevelop = templateName === 'develop';
-  if (!isDevelop && (input.testCommand !== undefined || input.setupCommand !== undefined || input.allowedPaths !== undefined || input.mandateHours !== undefined)) {
+  if (!isDevelop && (input.checkpoint !== undefined || input.testCommand !== undefined || input.setupCommand !== undefined || input.allowedPaths !== undefined || input.mandateHours !== undefined)) {
     throw new Error(`testCommand、setupCommand、allowedPaths、mandateHours 只有 develop 範本能用，${templateName} 不會改檔`);
   }
   const workerModel = assertDispatchableModel(input.model ?? DEFAULT_MODEL);

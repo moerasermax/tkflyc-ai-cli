@@ -24,6 +24,7 @@
 
 ### 新增
 
+- **`ai-cli_kernel` L4 第一階段回復點與 rollback**：develop 開工前用暫存 index 保存未提交／未追蹤內容，有 origin 預設備份到專用 checkpoints 分支。疑似秘密不傳送、備份失敗暫停；人核准可只留本地，觸發 run 不得降級。事件重播支援中斷接回，交付前驗證回復點；`kernel rollback` 預覽還原指令，`--apply` 只建分支。單次放行與 L5 尚未實作。（Codex）
 - **`ai-cli_kernel` 能動手開發了：新範本 `develop`。** 每個 run 開自己的 git worktree 和分支，worker 在裡面改檔，kernel 自己跑呼叫端給的測試指令，最新 commit 通過才算完成。不合併、不 push。（Claude Opus 5.5）
   - 為什麼沒有隔離：L2 只能換文字、不能跑測試，滿足不了開發；Docker 要處理訂閱 CLI 的登入憑證，也沒實測過。這是藍圖討論過的「明示未隔離」模式，所以委任書要寫明範圍、預算、期限，核准時要明確承認（`--acknowledge-unisolated`）。worker 權限等於使用者本人，風險和直接用 `run` 派寫入工作一樣。
   - 為什麼查完才 commit：範圍外的改動不會進分支。測試結果綁定 commit，HEAD 一動就失效，所以模型沒辦法拿舊結果結案。
