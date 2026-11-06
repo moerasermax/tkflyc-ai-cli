@@ -23,6 +23,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         goal: { type: 'string', description: '要達成什麼。' },
+        contextCommand: { type: 'string', description: '使用者提供的唯讀外部資料命令。核准後開工前跑一次，失敗不擋；命令以本人權限執行，不是隔離環境，也不受 AI hook 管制。請先顯示命令讓使用者確認；kernel 不提供 Planner／Knowledge 寫入工具。' },
         workFolder: { type: 'string', description: '工作目錄的絕對路徑。' },
         template: { type: 'string', enum: ['readonly-audit', 'develop'], description: '範本，預設 readonly-audit。develop 會改程式，未隔離。' },
         model: { type: 'string', description: 'worker 模型，預設 gpt-6.1-sol。' },
@@ -120,6 +121,7 @@ export async function aiCliKernelHandleTool(name: string, args: Record<string, u
     case 'ai-cli_kernel_start':
       return aiCliKernelStart({
         goal: requireString(args, 'goal'), workFolder: requireString(args, 'workFolder'), template: optionalString(args, 'template'),
+        contextCommand: optionalString(args, 'contextCommand'),
         model: optionalString(args, 'model'), effort: optionalString(args, 'effort'),
         decideModel: optionalString(args, 'decideModel'), decideEffort: optionalString(args, 'decideEffort'),
         ...(args.budget && typeof args.budget === 'object' ? { budget: args.budget as Record<string, number> } : {}),

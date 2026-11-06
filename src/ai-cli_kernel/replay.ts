@@ -6,6 +6,7 @@
  */
 import { NEEDS_HUMAN_FAILURES, type ActionOutcome, type ActionSpec, type CheckpointRecord, type FailureClass, type GitSnapshot, type JobRef, type KernelEvent, type PlanStep, type RunState, type StopDecision } from './types.js';
 import type { KernelReleaseEvent, KernelReleaseView } from './types.js';
+import type { KernelMemory } from './memory.js';
 
 /** 純重播：意圖後沒有結果就是 unknown，不可能再變成 available。損毀紀錄直接拒絕。 */
 export function aiCliKernelReplayReleases(events: KernelReleaseEvent[]): Map<string, KernelReleaseView> {
@@ -34,6 +35,9 @@ export interface ActionRecord { spec: ActionSpec; job?: JobRef; startedAt?: numb
 export interface StepResult { stepId: string; title: string; actionId: string; passed: boolean; failureClass?: FailureClass; findings: string[]; preview: string; messageFile: string | null }
 
 export interface RunView {
+  candidateMemories: KernelMemory[];
+  contextStarted: boolean;
+  context: { ok: boolean; outputFile: string | null; exitCode: number | null; timedOut: boolean; detail: string } | null;
   checkpointPrepared: { commit: string; ref: string } | null;
   checkpoint: CheckpointRecord | null;
   state: RunState;
@@ -62,7 +66,7 @@ export interface RunView {
   verification: { commit: string; passed: boolean; exitCode: number | null; timedOut: boolean; tail: string } | null;
   testFailures: number;
   /** kernel 自己跑的指令還沒回報結束。當掉後要先確認它停了才能動工作目錄。 */
-  openCheck: { kind: 'setup' | 'test'; pid: number; started: string; name: string } | null;
+  openCheck: { kind: 'setup' | 'test' | 'context'; pid: number; started: string; name: string } | null;
   /** decide 要結案，但驗收可能還沒寫（當在兩次寫入之間）。 */
   pendingFinish: string | null;
   counters: { decides: number; workerSteps: number; inputTokens: number; cachedTokens: number; outputTokens: number; unknownUsage: number; quotaUnknownDispatches: number };
@@ -82,6 +86,7 @@ export interface RunView {
 
 export function replayJournal(events: KernelEvent[]): RunView {
   const view: RunView = {
+    candidateMemories: [], contextStarted: false, context: null,
     checkpointPrepared: null, checkpoint: null,
     state: 'awaiting_approval', contractDigest: null, approvedDigest: null, versionId: null, runnerToken: null,
     baselineRecorded: false, baseline: null, actions: new Map(), plan: null, planCount: 0,
@@ -103,6 +108,8 @@ export function replayJournal(events: KernelEvent[]): RunView {
     view.lastSeq = event.seq;
     switch (event.type) {
       case 'created': view.contractDigest = event.contractDigest; break;
+      case 'context_intent': view.contextStarted = true; break;
+      case 'context_result': view.context = { ok: event.ok, outputFile: event.outputFile, exitCode: event.exitCode, timedOut: event.timedOut, detail: event.detail }; break;
       case 'approved':
         view.approvedDigest = event.contractDigest;
         if (event.note) view.notes.push(event.note);
@@ -144,6 +151,7 @@ export function replayJournal(events: KernelEvent[]): RunView {
       case 'decide_processed': {
         const a = view.actions.get(event.actionId); if (a) a.processed = true;
         if (event.ok) {
+          if (event.memories) view.candidateMemories.push(...event.memories);
           view.rejectedDecides = 0;
           if (event.plan) { view.plan = event.plan; view.planCount += 1; view.acceptance = null; }
           if (event.stop) view.pendingStop = event.stop;

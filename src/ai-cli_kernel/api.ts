@@ -20,8 +20,20 @@ import { agentForModel } from './runtime.js';
 import { buildContract, TEMPLATES, type KernelStartInput } from './templates.js';
 import { isTerminalState, workDirOf, type ActionOutcome, type BoundaryStatus, type DevelopSpec, type KernelContract, type KernelExecutor, type RunState } from './types.js';
 import { aiCliKernelRestoreCheckpointBranch, cleanupWorkspace, realWorkspace } from './workspace.js';
+import { AiCliKernelMemoryStore, aiCliKernelMemoryRepo, type KernelMemory } from './memory.js';
 
 export type { KernelStartInput } from './templates.js';
+
+/** 只有本機人工 CLI 有記憶變更入口；沒有遠端服務或任意 tool 分派。 */
+export function aiCliKernelMemory(input: { operation: 'list' | 'add' | 'promote' | 'revoke'; workFolder: string; id?: string; text?: string; scope?: KernelMemory['scope'] }): KernelMemory[] | KernelMemory {
+  if (!['list', 'add', 'promote', 'revoke'].includes(input.operation)) throw new Error('不認識的 memory 操作');
+  const repo = aiCliKernelMemoryRepo(input.workFolder);
+  if (!repo) throw new Error('記憶需要至少有一個 commit 的 git repo');
+  const store = new AiCliKernelMemoryStore(repo.repoKey);
+  if (input.operation === 'list') return store.read();
+  if (input.operation === 'add') return store.add(input.text ?? '', input.scope);
+  return store.status(input.id ?? '', input.operation === 'promote' ? 'active' : 'revoked');
+}
 
 function releaseDeps(store: RunStore): KernelReleaseDeps {
   return {
@@ -66,6 +78,8 @@ export function aiCliKernelSetEnabled(enabled: boolean): { enabled: boolean; pat
 export type EffectiveState = RunState | 'interrupted';
 
 export interface KernelRunStatus {
+  contextCommand: string | null;
+  context: RunView['context'];
   runId: string;
   state: RunState;
   effectiveState: EffectiveState;
@@ -170,6 +184,7 @@ async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRun
   const boundary = withBoundary ? boundaries(contract) : {};
   const passed = Object.values(boundary).every(status => status === 'PASS');
   return {
+    contextCommand: contract.contextCommand ?? null, context: view.context,
     runId: store.runId, state: view.state, effectiveState, stateLabel: STATE_LABELS[effectiveState],
     reason: view.reason ?? null, detail: view.detail ?? null, goal: contract.goal, workFolder: contract.develop ? workDirOf(contract.develop) : contract.workFolder, template: contract.template,
     models: { decide: contract.decide, worker: contract.worker, allowedWorkers: contract.allowedWorkerModels }, contractDigest: view.contractDigest, boundary,
@@ -401,12 +416,12 @@ export async function aiCliKernelCancel(input: { runId: string; timeoutSec?: num
   return statusOf(store);
 }
 
-export async function aiCliKernelResult(input: { runId: string }): Promise<{ runId: string; state: RunState; report: string | null; verdict: unknown; nextAction: string; detail: string | null; reportPath: string | null }> {
+export async function aiCliKernelResult(input: { runId: string }): Promise<{ runId: string; state: RunState; report: string | null; verdict: unknown; nextAction: string; detail: string | null; reportPath: string | null; context: RunView['context'] }> {
   const store = storeFor(input.runId);
   const status = await statusOf(store, false);
   const report = existsSync(store.reportPath) ? readFileSync(store.reportPath, 'utf8') : null;
   const verdict = existsSync(store.verdictPath) ? JSON.parse(readFileSync(store.verdictPath, 'utf8')) : null;
-  return { runId: input.runId, state: status.state, report, verdict, nextAction: status.nextAction, detail: status.detail, reportPath: status.reportPath };
+  return { runId: input.runId, state: status.state, report, verdict, nextAction: status.nextAction, detail: status.detail, reportPath: status.reportPath, context: status.context };
 }
 
 export async function aiCliKernelProbe(input: { agent: string; timeoutSec?: number }): Promise<ProbeRecord> {

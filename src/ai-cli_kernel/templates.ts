@@ -21,6 +21,7 @@ const DEVELOP_BUDGET: Partial<KernelBudget> = { maxWorkerSteps: 10, maxDecides: 
 const DEFAULT_MANDATE_HOURS = 24;
 
 export interface KernelStartInput {
+  contextCommand?: string;
   checkpoint?: string;
   goal: string;
   workFolder: string;
@@ -141,6 +142,7 @@ export function buildContract(input: KernelStartInput, now = new Date(), context
   if (!Object.hasOwn(TEMPLATES, templateName)) throw new Error(`沒有這個範本：${templateName}。目前可用：${Object.keys(TEMPLATES).join('、')}`);
   const template = TEMPLATES[templateName as KernelTemplateName];
   const goal = input.goal?.trim();
+  if (input.contextCommand !== undefined && (typeof input.contextCommand !== 'string' || !input.contextCommand.trim() || input.contextCommand.length > 8000 || input.contextCommand.includes('\0'))) throw new Error('contextCommand 必須是 1–8000 字元的命令，不能含 NUL');
   if (!goal) throw new Error('必須提供目標（goal）');
   if (goal.length > 8000) throw new Error('目標太長，請控制在 8000 字內');
   if (!input.workFolder) throw new Error('必須提供工作目錄（workFolder）');
@@ -163,6 +165,7 @@ export function buildContract(input: KernelStartInput, now = new Date(), context
   const allowedWorkerModels = [...new Set([workerModel, ...(input.workerModels ?? []).map(assertDispatchableModel)])];
   return {
     schemaVersion: KERNEL_SCHEMA_VERSION, template: templateName, goal, workFolder,
+    ...(input.contextCommand !== undefined ? { contextCommand: input.contextCommand.trim() } : {}),
     decide: { model: decideModel, effort: decideEffort }, worker: { model: workerModel, effort: workerEffort },
     allowedWorkerModels, budget, stepChecks: checks.stepChecks, acceptance: checks.acceptance,
     reportInstructions: template.reportInstructions,

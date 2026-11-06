@@ -32,7 +32,7 @@ function keys(value: Record<string, unknown>, allowed: string[]): void {
 }
 function inputShape(input: unknown): asserts input is KernelStartInput {
   if (!plain(input)) throw new Error('委任範本 input 必須是物件');
-  const strings = ['goal', 'workFolder', 'template', 'model', 'effort', 'decideModel', 'decideEffort', 'testCommand', 'setupCommand', 'checkpoint'];
+  const strings = ['goal', 'workFolder', 'template', 'model', 'effort', 'decideModel', 'decideEffort', 'testCommand', 'setupCommand', 'checkpoint', 'contextCommand'];
   keys(input, [...strings, 'workerModels', 'allowedPaths', 'budget', 'allowUnverifiedBoundary', 'mandateHours']);
   if (typeof input.goal !== 'string' || !input.goal.trim() || typeof input.workFolder !== 'string' || !input.workFolder) throw new Error('委任範本缺少 goal 或 workFolder');
   for (const key of strings) if (input[key] !== undefined && typeof input[key] !== 'string') throw new Error(`${key} 必須是字串`);
@@ -126,6 +126,7 @@ export function aiCliKernelMandateSave(request: { name: string; input: KernelSta
   const contract = buildContract(request.input, new Date(), { runId: 'kr-20000101-000000-0000', worktree: join(directory(), 'validation-only') });
   const input: KernelStartInput = {
     goal: contract.goal, workFolder: contract.workFolder, template: contract.template,
+    ...(contract.contextCommand ? { contextCommand: contract.contextCommand } : {}),
     model: contract.worker.model, effort: contract.worker.effort, decideModel: contract.decide.model, decideEffort: contract.decide.effort,
     workerModels: contract.allowedWorkerModels, budget: contract.budget, allowUnverifiedBoundary: contract.allowUnverifiedBoundary,
     ...(contract.develop ? {

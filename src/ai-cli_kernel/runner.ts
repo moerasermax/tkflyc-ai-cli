@@ -13,6 +13,7 @@ import { acquireRunnerLock, releaseRunnerLock } from './runner-lock.js';
 import { agentForModel, kernelVersionId, readQuota } from './runtime.js';
 import { gitSnapshot } from './verdict.js';
 import { realWorkspace } from './workspace.js';
+import { aiCliKernelMemoryForContract } from './memory.js';
 import { isTerminalState } from './types.js';
 
 async function main(): Promise<void> {
@@ -23,8 +24,9 @@ async function main(): Promise<void> {
   if (!await acquireRunnerLock(store, self, lookupIdentities)) return;
   const executor = new FileJobExecutor();
   try {
+    const contract = store.readContract();
     const state = await runKernelLoop({
-      store, contract: store.readContract(), executor,
+      store, contract, executor, memory: aiCliKernelMemoryForContract(contract),
       boundary: async agent => boundaryStatus(agent), quota: readQuota, agentFor: agentForModel,
       versionId: kernelVersionId, snapshot: gitSnapshot, now: () => Date.now(),
       sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), pollMs: 2000, killConfirmMs: 20000, pid: process.pid, workspace: realWorkspace,

@@ -3482,7 +3482,7 @@
     "name": "kernel develop：不理會上次留下的檢查指令",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/loop.ts",
-    "from": "if (develop && !await clearOrphanCheck(view)) return read().state;",
+    "from": "if (view.openCheck && !await clearOrphanCheck(view)) return read().state;",
     "to": "",
     "expect": "上次的檢查指令還活著就不動工作目錄"
   },
@@ -4010,7 +4010,7 @@
     "name": "kernel：finish 當掉就遺失",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/loop.ts",
-    "from": "commit({ type: 'decide_processed', actionId, ok: true, decision: 'finish', finishStep: decision.reportStep });",
+    "from": "commit({ type: 'decide_processed', actionId, ok: true, decision: 'finish', finishStep: decision.reportStep, memories });",
     "to": "commit({ type: 'decide_processed', actionId, ok: true, decision: 'finish' });",
     "expect": "finish 當在兩次寫入之間"
   },
@@ -4549,5 +4549,213 @@
     "from": "      inputTokens: { used: view.counters.inputTokens - view.counters.cachedTokens, max: contract.budget.maxInputTokens },",
     "to": "      inputTokens: { used: view.counters.inputTokens, max: contract.budget.maxInputTokens },",
     "expect": "用量記錄只計未快取 input，快取與 output 分開保留"
+  },
+  {
+    "name": "kernel memory-context：候選不給決策",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/memory.ts",
+    "from": "if (item.status !== 'active') continue;",
+    "to": "if (item.status === 'revoked') continue;",
+    "expect": "L5 記憶：候選不給 decide"
+  },
+  {
+    "name": "kernel memory-context：撤銷不再參考",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/memory.ts",
+    "from": "if (item.status !== 'active') continue;",
+    "to": "if (item.status === 'candidate') continue;",
+    "expect": "L5 記憶：撤銷立即生效"
+  },
+  {
+    "name": "kernel memory-context：範本範圍",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/memory.ts",
+    "from": "if (item.scope.template && item.scope.template !== template) continue;",
+    "to": "// removed",
+    "expect": "L5 記憶：只給範圍符合的 active"
+  },
+  {
+    "name": "kernel memory-context：路徑範圍",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/memory.ts",
+    "from": "if (item.scope.paths?.length && paths.length && !item.scope.paths.some(a => paths.some(b => overlap(pathScope(a), pathScope(b))))) continue;",
+    "to": "// removed",
+    "expect": "L5 記憶：只給範圍符合的 active"
+  },
+  {
+    "name": "kernel memory-context：記憶條數上限",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/memory.ts",
+    "from": "selected.length >= 20",
+    "to": "selected.length >= 200",
+    "expect": "L5 記憶：最多二十條"
+  },
+  {
+    "name": "kernel memory-context：記憶字數上限",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/memory.ts",
+    "from": "const left = 4000 - selected.join('\\n').length - (selected.length ? 1 : 0);",
+    "to": "const left = 40000 - selected.join('\\n').length - (selected.length ? 1 : 0);",
+    "expect": "L5 記憶：最多四千字元"
+  },
+  {
+    "name": "kernel memory-context：不可信文字逃脫",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/memory.ts",
+    "from": "return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');",
+    "to": "return text;",
+    "expect": "L5 記憶：不可信標示和只是參考"
+  },
+  {
+    "name": "kernel memory-context：僅存模型候選",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/memory.ts",
+    "from": "scope, status: 'candidate', createdAt }));",
+    "to": "scope, status: 'active', createdAt }));",
+    "expect": "L5 lessons：工廠一律 candidate"
+  },
+  {
+    "name": "kernel memory-context：候選同步限制",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/memory.ts",
+    "from": "if (item.source.kind !== 'run' || item.status !== 'candidate' || item.text.length > 500)",
+    "to": "if (false)",
+    "expect": "L5 記憶：候選同步拒絕模型指定 active 或 human"
+  },
+  {
+    "name": "kernel memory-context：候選同步不覆蓋",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/memory.ts",
+    "from": "if (!ids.has(item.id)) { append(item); ids.add(item.id); }",
+    "to": "{ append(item); ids.add(item.id); }",
+    "expect": "L5 記憶：候選同步去重且不覆蓋人工升級"
+  },
+  {
+    "name": "kernel memory-context：人工記憶防遞迴",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/memory.ts",
+    "from": "if (process.env.AI_CLI_WORKER === '1')",
+    "to": "if (false)",
+    "expect": "L5 記憶：worker 即使允許巢狀也不能"
+  },
+  {
+    "name": "kernel memory-context：記憶殘行拒絕",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/memory.ts",
+    "from": "if (text && !text.endsWith('\\n')) throw new Error('記憶紀錄殘行，請人工對帳');",
+    "to": "if (text && !text.endsWith('\\n')) text = text.slice(0, text.lastIndexOf('\\n') + 1);",
+    "expect": "L5 記憶：殘行不忽略"
+  },
+  {
+    "name": "kernel memory-context：lessons驗證",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "z.array(z.string().trim().min(1).max(500)).max(3).optional()",
+    "to": "z.array(z.string().trim().min(1).max(5000)).max(30).optional()",
+    "expect": "L5 lessons：超過條數長度型別"
+  },
+  {
+    "name": "kernel memory-context：記憶不可信標籤",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "<memory untrusted=\"true\">",
+    "to": "<memory>",
+    "expect": "L5 記憶：不可信標示和只是參考"
+  },
+  {
+    "name": "kernel memory-context：context不可信標籤",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "<context untrusted=\"true\">",
+    "to": "<context>",
+    "expect": "L5 context：資料給 decide 且標示不可信"
+  },
+  {
+    "name": "kernel memory-context：決策重讀記憶",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "memories: deps.memory?.read()",
+    "to": "memories: []",
+    "expect": "L5 記憶：每次 decide 重讀"
+  },
+  {
+    "name": "kernel memory-context：恢復同步候選",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "deps.memory?.candidates(view.candidateMemories);",
+    "to": "// removed",
+    "expect": "L5 lessons：執行路徑只存 candidate"
+  },
+  {
+    "name": "kernel memory-context：context不重試",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (view.contextStarted) {",
+    "to": "if (false) {",
+    "expect": "L5 context：中斷後先確認舊程序停止且不重跑"
+  },
+  {
+    "name": "kernel memory-context：context先寫意圖",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "commit({ type: 'context_intent' });",
+    "to": "// removed",
+    "expect": "L5 context：意圖未落盤絕不執行命令"
+  },
+  {
+    "name": "kernel memory-context：context輸出上限",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "(result.output ?? '').slice(0, 8000)",
+    "to": "(result.output ?? '')",
+    "expect": "L5 context：輸出最多八千字元存 outputs"
+  },
+  {
+    "name": "kernel memory-context：context失敗不提供",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "view.context?.ok && view.context.outputFile",
+    "to": "view.context?.outputFile",
+    "expect": "L5 context：失敗輸出不送 decide"
+  },
+  {
+    "name": "kernel memory-context：context範本保存",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "...(contract.contextCommand ? { contextCommand: contract.contextCommand } : {}),",
+    "to": "// removed",
+    "expect": "L5 context CLI：mandate save 沿用選項"
+  },
+  {
+    "name": "kernel memory-context：contextMCP接線",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mcp-tools.ts",
+    "from": "contextCommand: optionalString(args, 'contextCommand'),",
+    "to": "// removed",
+    "expect": "L5 context MCP：通用命令進委任書"
+  },
+  {
+    "name": "kernel memory-context：拒絕任意寫入工具",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/mcp-tools.ts",
+    "from": "throw new Error(`不認識的工具：${name}`);",
+    "to": "return {};",
+    "expect": "L5 唯讀介面：不暴露寫入或直接執行工具"
+  },
+  {
+    "name": "kernel memory-context：context前綴與stderr隔離",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "from": "...(outputChars !== undefined ? { output: contextPrefix(logPath, outputChars) } : {})",
+    "to": "...(outputChars !== undefined ? { output: readTail(stderrPath) } : {})",
+    "expect": "L5 context：真實命令擷取 UTF8 前八千字元"
+  },
+  {
+    "name": "kernel memory-context：context回復點先行",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "    if (develop && !view.workspaceReady && !prepareCheckpoint(view)) return read().state;",
+    "to": "    // mutation: checkpoint guard removed",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 context：先守住回復點才跑命令"
   }
 ]

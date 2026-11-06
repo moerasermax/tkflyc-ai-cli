@@ -7,6 +7,7 @@ import {
   aiCliKernelApprove, aiCliKernelCancel, aiCliKernelCleanup, aiCliKernelEnabled, aiCliKernelProbe, aiCliKernelResult, aiCliKernelSetEnabled,
   aiCliKernelMandateSave, aiCliKernelMandateApprove, aiCliKernelMandateList, aiCliKernelMandateShow, aiCliKernelMandateRevoke,
   aiCliKernelTrigger, aiCliKernelTriggersSetEnabled, aiCliKernelSchedule,
+  aiCliKernelMemory,
   aiCliKernelStart, aiCliKernelStatus, aiCliKernelTemplates, aiCliKernelWait, aiCliKernelRollback, aiCliKernelReleaseCreate, aiCliKernelReleaseRun, type KernelRunStatus,
 } from './api.js';
 import type { KernelStartInput } from './templates.js';
@@ -29,6 +30,7 @@ readonly-audit（預設）只讀不改。develop 會在獨立的 worktree 和分
       [--worker-models <a,b>]            另外允許 decide 挑選的 worker 模型
       [--max-steps <數>] [--max-decides <數>] [--max-minutes <數>] [--max-tokens <數>]
       [--allow-unverified]               探針沒過也照跑，標籤會寫「未驗證」
+      [--context-command <唯讀指令>]     核准後開工前讀一次外部資料；以本人權限執行，不受 AI hook 限制
     develop 範本：
       --test <指令>                      kernel 自己跑的驗收指令（必填），模型不能改
       [--setup <指令>]                   新 worktree 要先跑的準備指令，例如 npm ci
@@ -56,6 +58,11 @@ readonly-audit（預設）只讀不改。develop 會在獨立的 worktree 和分
                                          人工核准，develop 要承認未隔離；預設 30 天到期
   mandate list | show <name> | revoke <name>
                                          列表／檢視／取消核准（保留範本）
+  memory list [--cwd <repo>]             列出本機記憶與狀態
+  memory add --text <文字> [--paths <a,b>] [--template <名稱>] [--cwd <repo>]
+                                         新增 candidate，只是參考；promote 後才提供 decide
+  memory promote|revoke <id> [--cwd <repo>]
+                                         人工啟用／撤銷；worker 不可操作
   triggers on|off                        主動觸發總開關，預設關閉，獨立於 MCP 開關
   trigger <name>                         檢查核准、每日帳本與鎖；不過就記原因、不重試
   schedule <name> --daily HH:MM | --every-hours N
@@ -124,6 +131,7 @@ function startInput(flags: Map<string, string | true>): KernelStartInput {
       workerModels: listFlag(flags, 'worker-models'), testCommand: stringFlag(flags, 'test'), setupCommand: stringFlag(flags, 'setup'),
       allowedPaths: listFlag(flags, 'allow-path'), mandateHours: numberFlag(flags, 'mandate-hours'),
       checkpoint: stringFlag(flags, 'checkpoint'),
+      contextCommand: stringFlag(flags, 'context-command'),
     }),
   };
 }
@@ -143,6 +151,7 @@ export function formatStatus(status: KernelRunStatus): string {
     `目標     ${status.goal}`,
     `目錄     ${status.workFolder}`,
     `範本     ${status.template}`,
+    ...(status.contextCommand ? [`外部資料 ${status.contextCommand}（以本人權限執行，不受 AI hook 限制；請只接唯讀命令）`, ...(status.context ? [`讀取結果 ${status.context.ok ? '成功' : `失敗（不阻擋開工）：${status.context.detail}`}`] : [])] : []),
     `模型     決策 ${status.models.decide.model}（${status.models.decide.effort}）、worker ${status.models.worker.model}（${status.models.worker.effort}）`,
     ...(status.models.allowedWorkers.length > 1 ? [`可用模型 ${status.models.allowedWorkers.join('、')}`] : []),
     `權限     ${status.boundaryLabel}${Object.keys(status.boundary).length ? `（${Object.entries(status.boundary).map(([agent, state]) => `${agent}: ${state}`).join('、')}）` : ''}`,
@@ -188,6 +197,16 @@ export async function runKernelCli(argv: string[], io: Io, deps: { schedule?: Ke
         emit(status, formatStatus(status));
         return 0;
       }
+      case 'memory': {
+        const [operation, id] = positionals;
+        if (!['list', 'add', 'promote', 'revoke'].includes(operation) || positionals.length !== (['promote', 'revoke'].includes(operation) ? 2 : 1)) throw new Error('用法：memory list|add|promote <id>|revoke <id>');
+        const allowed = operation === 'add' ? ['cwd', 'text', 'paths', 'template', 'json'] : ['cwd', 'json'];
+        for (const flag of flags.keys()) if (!allowed.includes(flag)) throw new Error(`memory ${operation} 不接受 --${flag}`);
+        if (flags.has('json') && flags.get('json') !== true) throw new Error('--json 不接受值');
+        const value = aiCliKernelMemory({ operation: operation as 'list' | 'add' | 'promote' | 'revoke', id, text: stringFlag(flags, 'text'), workFolder: stringFlag(flags, 'cwd') ?? process.cwd(), scope: optionalFields({ paths: listFlag(flags, 'paths'), template: stringFlag(flags, 'template') }) });
+        emit(value, JSON.stringify(value, null, 2) + '\n');
+        return 0;
+      }
       case 'triggers': case 'trigger': case 'schedule': {
         const allowed = action === 'schedule' ? ['daily', 'every-hours', 'apply', 'remove', 'json'] : ['json'];
         for (const flag of flags.keys()) if (!allowed.includes(flag)) throw new Error(`${action} 不接受 --${flag}`);
@@ -213,7 +232,7 @@ export async function runKernelCli(argv: string[], io: Io, deps: { schedule?: Ke
         const [operation, name] = positionals;
         if (!['save', 'approve', 'list', 'show', 'revoke'].includes(operation) ||
           positionals.length !== (operation === 'list' ? 1 : 2)) throw new Error('用法：mandate save|approve|show|revoke <name>，或 mandate list');
-        const startFlags = ['goal', 'goal-file', 'cwd', 'template', 'model', 'effort', 'decide-model', 'decide-effort', 'worker-models', 'test', 'setup', 'allow-path', 'mandate-hours', 'checkpoint', 'max-steps', 'max-decides', 'max-minutes', 'max-tokens', 'max-test-failures', 'allow-unverified'];
+        const startFlags = ['goal', 'goal-file', 'cwd', 'template', 'model', 'effort', 'decide-model', 'decide-effort', 'worker-models', 'test', 'setup', 'allow-path', 'mandate-hours', 'checkpoint', 'max-steps', 'max-decides', 'max-minutes', 'max-tokens', 'max-test-failures', 'allow-unverified', 'context-command'];
         const allowed = operation === 'save' ? [...startFlags, 'max-runs-per-day', 'max-tokens-per-day', 'json']
           : operation === 'approve' ? ['acknowledge-unisolated', 'days', 'json'] : ['json'];
         for (const flag of flags.keys()) if (!allowed.includes(flag)) throw new Error(`mandate ${operation} 不接受 --${flag}`);
@@ -253,7 +272,7 @@ export async function runKernelCli(argv: string[], io: Io, deps: { schedule?: Ke
         const result = await aiCliKernelResult({ runId: needRun() });
         emit(result, result.report
           ? `${result.report.trimEnd()}\n\n---\n裁決：${JSON.stringify(result.verdict)}\n`
-          : `沒有最終報告。狀態：${result.state}${result.detail ? `（${result.detail}）` : ''}\n下一步：${result.nextAction}\n`);
+          : `沒有最終報告。狀態：${result.state}${result.detail ? `（${result.detail}）` : ''}\n${result.context && !result.context.ok ? `contextCommand 失敗（不阻擋開工）：${result.context.detail}\n` : ''}下一步：${result.nextAction}\n`);
         return 0;
       }
       case 'cancel': {

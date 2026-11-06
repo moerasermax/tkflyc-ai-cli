@@ -16,6 +16,16 @@ import type { CheckHandle, CheckpointRecord, CheckpointSpec, DevelopSpec, Worksp
 const exec = promisify(execFile);
 const TAIL_BYTES = 8192;
 
+/** UTF-8 最多四個 bytes 一字元；只讀有界前綴，context 不把 stderr 當成資料。 */
+function contextPrefix(path: string, chars: number): string {
+  const fd = openSync(path, 'r');
+  try {
+    const buffer = Buffer.alloc(chars * 4);
+    const size = readSync(fd, buffer, 0, buffer.length, 0);
+    return buffer.subarray(0, size).toString('utf8').slice(0, chars);
+  } finally { closeSync(fd); }
+}
+
 function git(cwd: string, ...args: string[]) {
   return spawnSync('git', ['-C', cwd, ...args], {
     encoding: 'utf8', windowsHide: true, timeout: 120000, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
@@ -305,12 +315,15 @@ export const realWorkspace: WorkspaceOps & ReleaseWorkspaceOps = {
     return text.length > maxChars ? `${text.slice(0, maxChars)}\n…（diff 太長，只附前 ${maxChars} 字元）` : text;
   },
 
-  startCheck(command, cwd, logPath) {
+  startCheck(command, cwd, logPath, outputChars) {
     mkdirSync(dirname(logPath), { recursive: true });
     const fd = openSync(logPath, 'a', 0o600);
+    const stderrPath = outputChars !== undefined ? `${logPath}.stderr` : logPath;
+    const errFd = outputChars !== undefined ? openSync(stderrPath, 'a', 0o600) : fd;
     // 輸出直接寫檔不走 pipe：runner 當掉時指令不會因為 pipe 斷掉而異常。
-    const child = spawn(command, { cwd, shell: true, stdio: ['ignore', fd, fd], detached: process.platform !== 'win32', windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+    const child = spawn(command, { cwd, shell: true, stdio: ['ignore', fd, errFd], detached: process.platform !== 'win32', windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
     closeSync(fd);
+    if (errFd !== fd) closeSync(errFd);
     const pid = child.pid;
     if (!pid) throw new Error(`無法啟動指令：${command}`);
     let settled: { exitCode: number | null } | null = null;
@@ -331,7 +344,7 @@ export const realWorkspace: WorkspaceOps & ReleaseWorkspaceOps = {
       },
       async wait(ms) {
         if (!settled) await Promise.race([done, new Promise(resolve => setTimeout(resolve, ms))]);
-        return settled ? { exitCode: (settled as { exitCode: number | null }).exitCode, tail: readTail(logPath) } : null;
+        return settled ? { exitCode: (settled as { exitCode: number | null }).exitCode, tail: readTail(stderrPath), ...(outputChars !== undefined ? { output: contextPrefix(logPath, outputChars) } : {}) } : null;
       },
       async kill() {
         await killTree(pid);

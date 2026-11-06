@@ -7,6 +7,7 @@
  */
 
 import { join } from 'node:path';
+import type { KernelMemory } from './memory.js';
 
 export const KERNEL_SCHEMA_VERSION = 1 as const;
 
@@ -126,6 +127,8 @@ export type AcceptanceCheck =
 
 /** 委任書。核准後不可變：內容的 digest 記在日誌，runner 每次啟動都會重算。 */
 export interface KernelContract {
+  /** 人提供的唯讀資料命令；核准 digest 包含它，decide 不能設定或更換。 */
+  contextCommand?: string;
   /** 觸發入口由下一階段建立；此處先守住不能略過回復點的邊界。 */
   origin?: { kind: 'trigger'; mandate: string; digest: string };
   schemaVersion: typeof KERNEL_SCHEMA_VERSION;
@@ -208,7 +211,9 @@ export type KernelEventBody =
   | { type: 'action_result'; actionId: string; outcome: ActionOutcome }
   /** refund 只有在確認沒啟動過時才是 true。 */
   | { type: 'action_abandoned'; actionId: string; reason: string; refund: boolean }
-  | { type: 'decide_processed'; actionId: string; ok: boolean; decision?: string; reason?: string; plan?: { planId: string; steps: PlanStep[]; reportStep?: string }; stop?: StopDecision; finishStep?: string }
+  | { type: 'decide_processed'; actionId: string; ok: boolean; decision?: string; reason?: string; plan?: { planId: string; steps: PlanStep[]; reportStep?: string }; stop?: StopDecision; finishStep?: string; memories?: KernelMemory[] }
+  | { type: 'context_intent' }
+  | { type: 'context_result'; ok: boolean; outputFile: string | null; exitCode: number | null; timedOut: boolean; detail: string }
   | { type: 'step_checked'; actionId: string; stepId: string; passed: boolean; failureClass?: FailureClass; findings: string[]; commit?: string }
   | { type: 'acceptance'; stepId: string; passed: boolean; findings: string[] }
   | { type: 'workspace_ready'; head: string }
@@ -216,7 +221,7 @@ export type KernelEventBody =
   | { type: 'checkpoint_prepared'; commit: string; ref: string }
   | ({ type: 'checkpoint' } & CheckpointRecord)
   /** kernel 自己跑的指令。記下身分，當掉後才有辦法確認它停了。 */
-  | { type: 'check_started'; kind: 'setup' | 'test'; pid: number; started: string; name: string }
+  | { type: 'check_started'; kind: 'setup' | 'test' | 'context'; pid: number; started: string; name: string }
   | { type: 'check_finished'; pid: number }
   | { type: 'verification'; commit: string; passed: boolean; exitCode: number | null; timedOut: boolean; tail: string }
   | { type: 'quota_unknown'; agent: string }
@@ -265,7 +270,7 @@ export interface CheckHandle {
   pid: number;
   identify(): Promise<{ started: string; name: string }>;
   /** 等最多 ms 毫秒。還沒結束回 null。 */
-  wait(ms: number): Promise<{ exitCode: number | null; tail: string } | null>;
+  wait(ms: number): Promise<{ exitCode: number | null; tail: string; output?: string } | null>;
   /** 連同子行程一起停掉。回 true 才代表確認退出了，送出訊號不算。 */
   kill(): Promise<boolean>;
   tail(): string;
@@ -286,7 +291,7 @@ export interface WorkspaceOps {
   diffStat(spec: DevelopSpec): string;
   /** 相對基準 commit 的 diff，超過 maxChars 會截斷並註明。給唯讀審查者看。 */
   diffText(spec: DevelopSpec, maxChars: number): string;
-  startCheck(command: string, cwd: string, logPath: string): CheckHandle;
+  startCheck(command: string, cwd: string, logPath: string, outputChars?: number): CheckHandle;
   /** 回 true 表示確定不在了。 */
   stopOrphanCheck(check: { pid: number; started: string; name: string }): Promise<boolean>;
 }

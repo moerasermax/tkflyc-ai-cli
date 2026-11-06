@@ -13,6 +13,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { activeMinutes, derivedStop, nextStep, openActions, replayJournal, unprocessedActions, type ActionRecord, type RunView } from './replay.js';
 import { actionMarker, buildDecidePrompt, buildWorkerPrompt, parseDecision } from './plan.js';
+import { aiCliKernelMemoryCandidates, type KernelMemoryOps } from './memory.js';
 import { classifyJobResult, evaluateChecks, snapshotsEqual } from './verdict.js';
 import type { RunStore } from './journal.js';
 import { outOfScope } from './workspace.js';
@@ -34,8 +35,9 @@ export interface KernelLoopDeps {
   killConfirmMs: number;
   /** 這個 runner 的 pid，只寫進日誌供查核。 */
   pid: number;
-  /** develop 範本才用得到。 */
+  /** develop 工作區及兩種範本的 contextCommand 執行器。 */
   workspace?: WorkspaceOps;
+  memory?: KernelMemoryOps;
 }
 
 const PREVIEW_CHARS = 1500;
@@ -349,8 +351,13 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
   };
 
   /** kernel 自己跑指令。回傳 null 表示 run 被取消或被接手，呼叫端要停。 */
-  const runCheck = async (kind: 'setup' | 'test', command: string, seq: number): Promise<{ exitCode: number | null; timedOut: boolean; tail: string } | null> => {
-    const handle = ws!.startCheck(command, workDir, join(store.dir, 'checks', `${kind}-${seq}.log`));
+  const runCheck = async (kind: 'setup' | 'test' | 'context', command: string, seq: number): Promise<{ exitCode: number | null; timedOut: boolean; tail: string; output?: string } | null> => {
+    let handle;
+    try { handle = ws!.startCheck(command, kind === 'context' ? contract.workFolder : workDir, join(store.dir, 'checks', `${kind}-${seq}.log`), kind === 'context' ? 8000 : undefined); }
+    catch (error) {
+      if (kind !== 'context') throw error;
+      return { exitCode: null, timedOut: false, tail: (error as Error).message };
+    }
     /** 確認真的停了才算數。送出訊號不等於停了，舊程序可能還在動工作目錄。 */
     const stopConfirmed = async (): Promise<boolean> => {
       if (await handle.kill()) { commit({ type: 'check_finished', pid: handle.pid }); return true; }
@@ -381,7 +388,7 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
       const done = await handle.wait(Math.max(20, Math.min(deps.pollMs, 500)));
       if (done) {
         commit({ type: 'check_finished', pid: handle.pid });
-        return { exitCode: done.exitCode, timedOut: false, tail: done.tail };
+        return { exitCode: done.exitCode, timedOut: false, tail: done.tail, ...(done.output !== undefined ? { output: done.output } : {}) };
       }
     }
   };
@@ -503,9 +510,11 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
       commit({ type: 'decide_processed', actionId, ok: false, reason: (error as Error).message });
       return;
     }
+    const memories = decision.action === 'plan' || decision.action === 'finish'
+      ? aiCliKernelMemoryCandidates(decision.lessons ?? [], store.runId, actionId, { template: contract.template, ...(deps.memory?.paths.length ? { paths: deps.memory.paths } : {}) }, new Date(deps.now()).toISOString()) : [];
     switch (decision.action) {
       case 'plan':
-        commit({ type: 'decide_processed', actionId, ok: true, decision: 'plan', plan: { planId: decision.planId, steps: decision.steps, ...(decision.reportStep ? { reportStep: decision.reportStep } : {}) } });
+        commit({ type: 'decide_processed', actionId, ok: true, decision: 'plan', memories, plan: { planId: decision.planId, steps: decision.steps, ...(decision.reportStep ? { reportStep: decision.reportStep } : {}) } });
         return;
       case 'ask_human':
         // 問題和處理標記寫在同一筆：當在中間也不會漏掉人工閘。
@@ -521,7 +530,7 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
           return;
         }
         // 要結案哪一步和處理標記寫在同一筆：當在中間時，接回還知道要驗收，不會多花一次 decide。
-        commit({ type: 'decide_processed', actionId, ok: true, decision: 'finish', finishStep: decision.reportStep });
+        commit({ type: 'decide_processed', actionId, ok: true, decision: 'finish', finishStep: decision.reportStep, memories });
         runAcceptance(decision.reportStep, step.messageFile);
         return;
       }
@@ -575,6 +584,7 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
 ${stat}
 \`\`\`
 ` : report);
+    if (view.context && !view.context.ok) store.writeReport(`${store.readOutput(store.reportPath).trimEnd()}\n\n## 外部資料讀取\ncontextCommand 失敗（不阻擋開工）：${view.context.detail}\n`);
     store.writeVerdict({
       authorization: { ok: true, contractDigest: view.approvedDigest },
       execution: { ok: true, jobStatus: worker?.jobStatus ?? null, exitCode: worker?.exitCode ?? null },
@@ -587,6 +597,7 @@ ${stat}
       } : { readOnly }),
       boundaryLabel: develop ? 'declared-not-isolated' : contract.allowUnverifiedBoundary ? 'unverified_allowed_by_caller' : 'tool-limited-not-isolated',
       usage: view.counters,
+      context: view.context,
       finishedAt: new Date(deps.now()).toISOString(),
     });
     setState('completed', 'delivered');
@@ -654,7 +665,8 @@ ${stat}
     const marker = actionMarker(store.runId, actionId);
     const placement = develop ? { cwd: workDir } : {};
     if (kind === 'decide') {
-      return { actionId, kind, model: contract.decide.model, ...(contract.decide.effort ? { effort: contract.decide.effort } : {}), marker, prompt: buildDecidePrompt(contract, view, marker, deps.now()), ...placement };
+      const context = view.context?.ok && view.context.outputFile ? store.readOutput(view.context.outputFile) : undefined;
+      return { actionId, kind, model: contract.decide.model, ...(contract.decide.effort ? { effort: contract.decide.effort } : {}), marker, prompt: buildDecidePrompt(contract, view, marker, deps.now(), { memories: deps.memory?.read(), paths: deps.memory?.paths, context }), ...placement };
     }
     const isReport = view.plan?.reportStep === step!.id;
     const mode = step!.mode ?? 'read';
@@ -672,9 +684,24 @@ ${stat}
     const view = read();
     if (superseded(view)) return view.state; // 別的 runner 接手了，這裡不再寫任何東西。
     if (view.state !== 'running') return view.state;
-    if (develop && !await clearOrphanCheck(view)) return read().state;
+    if (view.openCheck && !await clearOrphanCheck(view)) return read().state;
+    // 日誌先存候選，再補本機記憶。當在兩次寫入之間也不遺失；已 promote/revoke 的 id 不覆蓋。
+    deps.memory?.candidates(view.candidateMemories);
     if (store.cancelRequested() && openActions(view).length === 0) { setState('cancelled', 'user_cancelled'); return 'cancelled'; }
     if (develop && !view.workspaceReady && !prepareCheckpoint(view)) return read().state;
+    if (contract.contextCommand && !view.context) {
+      if (view.contextStarted) {
+        commit({ type: 'context_result', ok: false, outputFile: null, exitCode: null, timedOut: false, detail: '上次 contextCommand 執行中斷，結果不明；不重試，繼續開工' });
+        continue;
+      }
+      commit({ type: 'context_intent' });
+      const result = await runCheck('context', contract.contextCommand, view.lastSeq);
+      if (!result) return read().state;
+      const ok = result.exitCode === 0 && !result.timedOut;
+      const outputFile = store.writeOutput('context', ok ? (result.output ?? '').slice(0, 8000) : '');
+      commit({ type: 'context_result', ok, outputFile, exitCode: result.exitCode, timedOut: result.timedOut, detail: ok ? '' : `${result.timedOut ? '逾時' : `exit ${result.exitCode}`}：${result.tail.slice(-1500)}` });
+      continue;
+    }
     if (develop && !view.workspaceReady) {
       if (!await prepareWorkspace(view)) return read().state;
       continue;

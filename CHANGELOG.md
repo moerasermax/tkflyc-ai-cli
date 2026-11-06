@@ -10,6 +10,8 @@
 
 ### 新增
 
+- **`ai-cli_kernel` L5 記憶與唯讀資料介面**：新增依 repo 分開的 JSONL 記憶與人工 CLI `memory list/add/promote/revoke`；decide lessons 僅存候選，日誌先落盤且可恢復。每次決策只參考符合範圍的 active 記憶，限制 20 條／4000 字元並標不可信。委任書／範本支援 contextCommand，開工前只讀一次、輸出前 8000 字元，失敗與中斷不重試並留下原因。無私人服務 SDK 或 Planner／Knowledge 寫入工具；外部命令以使用者權限執行，需自行提供唯讀 accessor，未宣稱隔離。補具名斷言、突變與規格對照；歸檔包留待下一步，完整 npm test 由外層 kernel 驗收。（@moerasermax；Codex）
+
 - **`ai-cli_kernel` L5 第一部分收尾驗收**：補強啟動當下名額落盤、有效 JSON 殘行、重複名額／未結束動作、來源種類與每日預算不擴大等斷言，新增對應突變；提供工作目錄內隔離快照的定向 harness，區分清單健康與實際指定斷言殺死突變。更新範本五項操作、總開關、每日帳本及排程的用法和限制；完整 npm test 留由外層 kernel 驗收。（@moerasermax；Codex）
 
 - **`ai-cli_kernel` L5 主動觸發與排程**：新增預設關閉的獨立 `kernel triggers on/off`、一次性 `trigger <name>` 與 `schedule`。觸發逐項重驗範本授權、每日次數／未快取 input 用量與 run 鎖；名額先落盤，保留觸發來源並重用回復點與放行防線，失敗不排隊、不重試。排程預設預覽，Windows 僅 `--apply` 登記／移除，POSIX 只印 crontab；測試全用假執行器，未操作真實排程。補具名斷言、突變定義及共通規則／工作包二驗收對應。（@moerasermax；Codex）
