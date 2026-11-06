@@ -4395,7 +4395,7 @@
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/schedule.ts",
     "from": "if (deps.platform !== 'win32')",
-    "to": "if (false)",
+    "to": "if (Boolean(0))",
     "expect": "只印 crontab 並跳脫空白引號百分號"
   },
   {
@@ -4429,5 +4429,117 @@
     "from": "if (process.env.AI_CLI_WORKER === '1')",
     "to": "if (false)",
     "expect": "排程：worker 不可 apply"
+  },
+  {
+    "name": "kernel L5 收尾：worker 可以開總開關",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "if (process.env.AI_CLI_WORKER === '1') throw new Error('worker 不能變更主動觸發開關');",
+    "to": "// removed",
+    "expect": "主動觸發：worker 不可開啟開關"
+  },
+  {
+    "name": "kernel L5 收尾：觸發鎖不排他",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "fd = openSync(lockPath, 'wx', 0o600);",
+    "to": "fd = openSync(lockPath, 'w', 0o600);",
+    "expect": "主動觸發：觸發殘鎖不重試"
+  },
+  {
+    "name": "kernel L5 收尾：忽略用量歸屬日期",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "record.mandate === name && record.day === day",
+    "to": "record.mandate === name",
+    "expect": "主動觸發：跨本機午夜重開當日額度"
+  },
+  {
+    "name": "kernel L5 收尾：output 也扣每日帳",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "tokens += Math.max(0, view.counters.inputTokens - view.counters.cachedTokens);",
+    "to": "tokens += Math.max(0, view.counters.inputTokens - view.counters.cachedTokens) + view.counters.outputTokens;",
+    "expect": "主動觸發：只扣未快取 input 並排除 output"
+  },
+  {
+    "name": "kernel L5 收尾：忽略重複名額",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "if (seen.has(record.runId!))",
+    "to": "if (false)",
+    "expect": "主動觸發：重複名額拒絕而非默默重扣"
+  },
+  {
+    "name": "kernel L5 收尾：每日餘額放大原預算",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "Math.min(mandate.input.budget?.maxInputTokens ?? Infinity, mandate.limits.maxInputTokensPerDay - usage.tokens)",
+    "to": "mandate.limits.maxInputTokensPerDay - usage.tokens",
+    "expect": "主動觸發：每日餘額不能放大原本 run 預算"
+  },
+  {
+    "name": "kernel L5 收尾：名額延至啟動後落盤",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "    record(result('started', 'reserved'), 'reserved', mandate.digest); // 先扣名額；崩潰不退款。\n    const store = new RunStore(kernelRunDir(runId));\n    store.create(contract);\n    const root = contract.develop?.repoRoot ?? describeRepo(contract.workFolder)?.root ?? contract.workFolder;\n    const hooks = existsSync(join(root, '.codex', 'hooks.json')) && contract.allowedWorkerModels.some(model => agentForModel(model) === 'codex');\n    const note = `委任範本 ${name}（${mandate.digest}）主動觸發。${hooks ? '專案層 .codex/hooks.json 在新 worktree 可能不生效。' : ''}`;\n    record(result('started', 'starting'), 'attempt');\n    starting = true;\n    await deps.approveAndStart(store, note);",
+    "to": "    const store = new RunStore(kernelRunDir(runId));\n    store.create(contract);\n    const root = contract.develop?.repoRoot ?? describeRepo(contract.workFolder)?.root ?? contract.workFolder;\n    const hooks = existsSync(join(root, '.codex', 'hooks.json')) && contract.allowedWorkerModels.some(model => agentForModel(model) === 'codex');\n    const note = `委任範本 ${name}（${mandate.digest}）主動觸發。${hooks ? '專案層 .codex/hooks.json 在新 worktree 可能不生效。' : ''}`;\n    record(result('started', 'starting'), 'attempt');\n    starting = true;\n    await deps.approveAndStart(store, note);\n    record(result('started', 'reserved'), 'reserved', mandate.digest);",
+    "expect": "主動觸發：啟動當下名額與意圖已落盤"
+  },
+  {
+    "name": "kernel L5 收尾：任意真假值可 apply",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/schedule.ts",
+    "from": "if (input[key] !== undefined && typeof input[key] !== 'boolean')",
+    "to": "if (false)",
+    "expect": "排程：非法參數拒絕"
+  },
+  {
+    "name": "kernel L5 收尾：daily 接受非法時間",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/schedule.ts",
+    "from": "if (input.daily !== undefined && !/^(?:[01]\\d|2[0-3]):[0-5]\\d$/.test(input.daily))",
+    "to": "if (false)",
+    "expect": "排程：非法參數拒絕"
+  },
+  {
+    "name": "kernel L5 收尾：hourly 接受非法間隔",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/schedule.ts",
+    "from": "if (input.everyHours !== undefined && (!Number.isInteger(input.everyHours) || input.everyHours < 1 || input.everyHours > 999))",
+    "to": "if (false)",
+    "expect": "排程：非法參數拒絕"
+  },
+  {
+    "name": "kernel L5 收尾：移除接受時程參數",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/schedule.ts",
+    "from": "if (input.remove ? input.daily !== undefined || input.everyHours !== undefined : (input.daily === undefined) === (input.everyHours === undefined))",
+    "to": "if (false)",
+    "expect": "排程：非法參數拒絕"
+  },
+  {
+    "name": "kernel L5 收尾：排程不檢查範本",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/schedule.ts",
+    "from": "  aiCliKernelMandateShow({ name: input.name });",
+    "to": "  // removed",
+    "expect": "排程：缺少與非法範本拒絕"
+  },
+  {
+    "name": "kernel L5 收尾：補驗未結束動作當零用量",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": " || [...view.actions.values()].some(action => !action.outcome)",
+    "to": "",
+    "expect": "主動觸發：未結束動作不能當成已知零用量"
+  },
+  {
+    "name": "kernel L5 收尾：補驗排程失敗自動重試",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/schedule.ts",
+    "from": "    deps.execute('schtasks', args);",
+    "to": "    try { deps.execute('schtasks', args); } catch { deps.execute('schtasks', args); }",
+    "expect": "排程：執行失敗原樣回報且不重試"
   }
 ]

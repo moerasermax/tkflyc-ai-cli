@@ -406,7 +406,7 @@ npm run typecheck  # 只型別檢查
 
 ## ai-cli_kernel：受監督的 agent run
 
-給目標和委任書，它自己規劃、派唯讀 worker、用確定性檢查驗收（每個 `路徑:行號` 都會實際打開核對），當掉可以接回，做過的步驟不會重做。第一版只跑唯讀任務，權限是工具受限，**不是隔離**。
+給目標和委任書，它自己規劃、派 worker、用確定性檢查驗收，當掉可以接回，做過的步驟不會重做。預設唯讀範本會實際打開核對每個 `路徑:行號`；工作者**沒有隔離**。
 
 ```
 ai-cli kernel probe --agent codex
@@ -416,7 +416,9 @@ ai-cli kernel wait <run>
 ai-cli kernel result <run>
 ```
 
-有兩個範本。`readonly-audit`（預設）只讀不改。`develop` 會改程式：每個 run 有自己的 git worktree 和分支，kernel 自己跑你給的測試指令，通過才算完成，不會合併也不會 push。`develop` 的 worker 權限等於你本人，也會載入你完整的 CLI 設定，包含 MCP server。**它沒有隔離**，核准時要明確承認，只用在你信任的專案。
+有兩個範本。`readonly-audit`（預設）只讀不改。`develop` 會改程式：每個 run 有自己的 git worktree 和分支，kernel 自己跑你給的測試指令，通過才算完成，不會自動合併或推送交付分支。開工前的預設回復點使用專用位置，有 `origin` 就會推送，推送失敗便停下來。`develop` 的 worker 權限等於你本人，也會載入你完整的 CLI 設定，包含 MCP server。**它沒有隔離**，核准時要明確承認，只用在你信任的專案。
+
+常用委任書可用 `kernel mandate save/approve/list/show/revoke` 保存與管理。同意預設 30 天到期，重新保存或撤銷就失效。`kernel trigger <name>` 每次只觸發一次，另有預設關閉的 `kernel triggers on|off` 與持久每日次數／用量帳本。`kernel schedule <name> --daily HH:MM` 先預覽，Windows 加 `--apply` 才登記，POSIX 只印 crontab。觸發任務不能關閉回復點，也不能使用 release 單次放行；完整操作與限制見教學手冊。
 
 MCP 工具 `ai-cli_kernel_*` 預設關閉，`ai-cli kernel enable` 後才出現，原生工具不受影響。手把手教學看[教學手冊](docs/ai-cli_kernel/教學手冊.md)，內部設計看[技術手冊](docs/ai-cli_kernel/技術手冊.md)。
 

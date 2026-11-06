@@ -10,9 +10,11 @@
 
 ### 新增
 
+- **`ai-cli_kernel` L5 第一部分收尾驗收**：補強啟動當下名額落盤、有效 JSON 殘行、重複名額／未結束動作、來源種類與每日預算不擴大等斷言，新增對應突變；提供工作目錄內隔離快照的定向 harness，區分清單健康與實際指定斷言殺死突變。更新範本五項操作、總開關、每日帳本及排程的用法和限制；完整 npm test 留由外層 kernel 驗收。（@moerasermax；Codex）
+
 - **`ai-cli_kernel` L5 主動觸發與排程**：新增預設關閉的獨立 `kernel triggers on/off`、一次性 `trigger <name>` 與 `schedule`。觸發逐項重驗範本授權、每日次數／未快取 input 用量與 run 鎖；名額先落盤，保留觸發來源並重用回復點與放行防線，失敗不排隊、不重試。排程預設預覽，Windows 僅 `--apply` 登記／移除，POSIX 只印 crontab；測試全用假執行器，未操作真實排程。補具名斷言、突變定義及共通規則／工作包二驗收對應。（@moerasermax；Codex）
 
-- **`ai-cli_kernel` L5 委任範本（第一部分）**：新增 CLI `kernel mandate save/approve/list/show/revoke`，沿用 start 輸入驗證；範本保存於狀態目錄 `mandates/<name>.json`，每日上限預設 1 次／2000000 未快取 input tokens。人工同意綁定完整輸入與上限，預設 30 天到期，覆寫與撤銷立即取消核准；develop 要明確承認未隔離，worker 不能核准。MCP 僅提供唯讀 `ai-cli_kernel_mandate_list`，沒有範本核准工具；本步不啟動 run、不含 trigger、每日帳本或排程。補上正常／拒絕／邊界測試、突變定義及後續驗收對照。（@moerasermax；Codex）
+- **`ai-cli_kernel` L5 委任範本（第一部分）**：新增 CLI `kernel mandate save/approve/list/show/revoke`，沿用 start 輸入驗證；範本保存於狀態目錄 `mandates/<name>.json`，每日上限預設 1 次／2000000 未快取 input tokens。人工同意綁定完整輸入與上限，預設 30 天到期，覆寫與撤銷立即取消核准；develop 要明確承認未隔離，worker 不能核准。MCP 僅提供唯讀 `ai-cli_kernel_mandate_list`，沒有範本核准工具；save／approve 本身不啟動 run，trigger、每日帳本與排程見上列接續功能。補上正常／拒絕／邊界測試、突變定義及後續驗收對照。（@moerasermax；Codex）
 
 - **`ai-cli_kernel` L4 單次放行**：CLI `kernel release create/run` 將人的 merge／push 同意綁定 completed develop 的精確交付 commit、基準、目標目前版本及有效期限（預設一小時）。執行前重驗測試、交付分支、回復點及目標；merge 僅允許目前 target 的乾淨工作樹快轉，push 不帶強制旗標且抑制額外 tag／mirror／子模組推送。遠端預設分支需額外承認可能部署。意圖先落盤，失敗或中斷結果不明一律 unknown、不重試；worker 與 trigger run 禁用，不提供 MCP 工具。新增 stub／暫存 bare repo 測試與驗收對照；完整 npm test、E2E 及三平台 CI 待外層 kernel 驗收。（@moerasermax；Codex）
 

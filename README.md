@@ -599,7 +599,7 @@ not in the npm package either; get it from git.
 
 ## ai-cli_kernel: supervised agent runs
 
-Give it a goal and a mandate. It plans with a tool-less model call, dispatches read-only workers, verifies the deliverable with deterministic checks (every cited `path:line` is opened and checked), and recovers across restarts without re-dispatching finished steps. The first version is read-only and tool-limited, **not isolated**.
+Give it a goal and a mandate. It plans with a tool-less model call, dispatches workers, verifies the deliverable with deterministic checks, and recovers across restarts without re-dispatching finished steps. The default read-only template checks every cited `path:line`. Workers are **not isolated**.
 
 ```
 ai-cli kernel probe --agent codex
@@ -609,7 +609,9 @@ ai-cli kernel wait <run>
 ai-cli kernel result <run>
 ```
 
-Two templates exist. `readonly-audit` (default) only reads. `develop` changes code: each run gets its own git worktree and branch, the kernel itself runs your test command and only accepts a commit that passes it, and it never merges or pushes. Workers in `develop` run with your full user permissions and your full CLI configuration, including MCP servers. **It is not isolated**, and approving it requires an explicit acknowledgement. Only use it on projects you trust.
+Two templates exist. `readonly-audit` (default) only reads. `develop` changes code: each run gets its own git worktree and branch, and the kernel itself runs your test command and only accepts a commit that passes it. It does not automatically merge or push the delivery branch. Before work starts, the default checkpoint uses a dedicated ref and pushes it when an `origin` exists; a failed checkpoint push stops work. Workers in `develop` run with your full user permissions and your full CLI configuration, including MCP servers. **It is not isolated**, and approving it requires an explicit acknowledgement. Only use it on projects you trust.
+
+Reusable mandates support `kernel mandate save/approve/list/show/revoke`. Approval expires after 30 days by default; saving again or revoking clears it. One-shot `kernel trigger <name>` uses an independent, default-off `kernel triggers on|off` switch and a persistent daily run/token ledger. `kernel schedule <name> --daily HH:MM` previews the command; Windows registers it only with `--apply`, while POSIX only prints a crontab line. Triggered runs cannot disable checkpoints or use single-use release. See the tutorial for commands and operational limits.
 
 The MCP tools (`ai-cli_kernel_*`) are off by default; `ai-cli kernel enable` turns them on. Existing tools are unaffected. Docs (Traditional Chinese): [tutorial](docs/ai-cli_kernel/教學手冊.md), [technical manual](docs/ai-cli_kernel/技術手冊.md).
 
