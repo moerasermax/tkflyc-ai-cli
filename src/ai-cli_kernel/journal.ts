@@ -6,7 +6,7 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, truncateSync, writeFileSync, writeSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { jobStateDir } from '../core/live-jobs.js';
 import type { KernelContract, KernelEvent, KernelEventBody, KernelReleaseEvent } from './types.js';
 
@@ -16,10 +16,15 @@ export function kernelRunDir(runId: string): string {
   if (!/^kr-[0-9]{8}-[0-9]{6}-[0-9a-f]{4}$/.test(runId)) throw new Error(`不是有效的 run id：${runId}`);
   return join(kernelRunsDir(), runId);
 }
-export function newRunId(now = new Date()): string {
+/** 同一秒可能建好幾個 run，2 bytes 亂數會撞。撞到已存在的就換一個；真的搶輸了，create 會拒絕。 */
+export function newRunId(now = new Date(), random: () => string = () => randomBytes(2).toString('hex')): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   const stamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}-${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
-  return `kr-${stamp}-${randomBytes(2).toString('hex')}`;
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const runId = `kr-${stamp}-${random()}`;
+    if (!existsSync(kernelRunDir(runId))) return runId;
+  }
+  throw new Error('run id 連續撞號，請稍後再試');
 }
 
 export function atomicWrite(path: string, content: string): void {
@@ -75,6 +80,10 @@ export class RunStore {
 
   /** 建立 run 目錄並寫入委任書。回傳 digest。 */
   create(contract: KernelContract): string {
+    // 目錄是這個 run 的所有權：不帶 recursive 才是原子的，已存在就丟 EEXIST。
+    // 不擋的話，撞號時會蓋掉別人已核准的委任書，還接著寫同一份日誌。
+    mkdirSync(dirname(this.dir), { recursive: true });
+    mkdirSync(this.dir);
     mkdirSync(this.outputsDir, { recursive: true });
     const text = JSON.stringify(contract, null, 2) + '\n';
     atomicWrite(this.contractPath, text);

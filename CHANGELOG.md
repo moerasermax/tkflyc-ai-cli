@@ -26,6 +26,8 @@
 
 ### 修復
 
+- **`ai-cli_kernel`：run id 撞號時會蓋掉別人的委任書。** id 只有秒加 2 bytes 亂數，`RunStore.create` 又不檢查 run 是否已存在，撞到就覆寫委任書、接著寫同一份日誌。是最後一次 `npm test` 偶發失敗才查出來的：日誌裡有兩筆 `created`。真實使用機率低，但委任書決定 worker 的權限範圍，不能賭機率。改成建立時原子地建目錄，已存在就拒絕；產生 id 時也避開已存在的。（Claude Opus 5.5）
+
 - **`ai-cli_kernel`：`develop` 不再因為主目錄或 ref 動過而卡在交付前。** 真實走一圈時，自動 run 做完、測試也過了，卻因為 planner 的 SessionStart hook 在主目錄寫了 `.planner-id` 而停下來等人，還佔著鎖。使用者白天在主目錄工作時也會這樣。成果只在分支上，停下來救不回已發生的事，所以改成寫進報告、裁決和狀態說明，收下前看得到。派下一個 worker 之前的 ref 檢查保留。（Claude Opus 5.5）
 
 - **`ai-cli_kernel` L4、L5 的獨立稽核**：由 kernel 派 gpt-6.1-sol（effort high）唯讀稽核程式碼，都是 gpt-6.1-sol 自己寫的。找到 5 項，對照原始碼都成立，全部修了。（Claude Opus 5.5）

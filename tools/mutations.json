@@ -4973,5 +4973,21 @@
     "from": "else if (develop) readOnly = 'changed';",
     "to": "else if (false as boolean) readOnly = 'changed';",
     "expect": "主目錄動過也能交付"
+  },
+  {
+    "name": "kernel：複驗 run 已存在也能建立",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "from": "    mkdirSync(this.dir);\n",
+    "to": "    mkdirSync(this.dir, { recursive: true });\n",
+    "expect": "run 已存在時 create 要拒絕"
+  },
+  {
+    "name": "kernel：複驗 產生 run id 不避開已存在的",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "from": "if (!existsSync(kernelRunDir(runId))) return runId;",
+    "to": "return runId;",
+    "expect": "產生 run id 時會避開已存在的"
   }
 ]

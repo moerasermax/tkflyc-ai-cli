@@ -2661,6 +2661,24 @@ const { aiCliKernelArchiveList: archiveList, aiCliKernelArchiveShow: archiveShow
   check('清理：刪到一半的 worktree 會明確回報，分支照常清', result.worktreeRemoved === false && result.branchRemoved === true && result.detail.includes('自己刪除') && existsSync(join(repo, 'README.md')), JSON.stringify(result));
 }
 
+/* ---- run id 撞號：npm test 偶發失敗查出來的真 bug ---- */
+{
+  const runId = newRunId();
+  const dir = kernelRunDir(runId);
+  const contract = buildContract({ goal: '原本的委任書', workFolder: WORK });
+  const first = new RunStore(dir);
+  first.create(contract);
+  first.append({ type: 'quota_unknown', agent: 'codex' });
+  const before = first.read().length;
+  const collided = failing(() => new RunStore(dir).create(buildContract({ goal: '別人的委任書', workFolder: WORK })));
+  check('run 已存在時 create 要拒絕，不能蓋掉別人的委任書', collided?.code === 'EEXIST' && first.readContract().goal === '原本的委任書' && first.read().length === before, collided?.message);
+  const suffix = runId.slice(-4);
+  const now = new Date(Date.UTC(Number(runId.slice(3, 7)), Number(runId.slice(7, 9)) - 1, Number(runId.slice(9, 11)), Number(runId.slice(12, 14)), Number(runId.slice(14, 16)), Number(runId.slice(16, 18))));
+  const sequence = [suffix, suffix === 'abcd' ? 'abce' : 'abcd'];
+  const next = newRunId(now, () => sequence.shift());
+  check('產生 run id 時會避開已存在的', next !== runId && next.startsWith(runId.slice(0, -4)), next);
+}
+
 /* ---- 命名與依賴方向 ---- */
 {
   const walk = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? walk(join(dir, entry.name)) : entry.name.endsWith('.ts') ? [join(dir, entry.name)] : []);

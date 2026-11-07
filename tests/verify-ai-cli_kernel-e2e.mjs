@@ -120,7 +120,7 @@ try {
   const beforeDecide = logCount('decide'), beforeWorker = logCount('worker');
   const second = json(START);
   const secondId = second.data?.runId;
-  const started = json(['approve', secondId], { KERNEL_STUB_DELAY_MS: '6000' });
+  const started = json(['approve', secondId], { KERNEL_STUB_DELAY_MS: '20000' }); // 下面要連跑好幾次 CLI，忙的機器上 6 秒不夠，run 會先正常結束。
   check('第二個 run 開始執行', started.code === 0, started.out + started.err);
   // 等到 worker 真的開始跑。
   let current = null;
