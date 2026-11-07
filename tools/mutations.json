@@ -4853,5 +4853,77 @@
     "to": "pendingArchiveCount: 0",
     "script": "verify-ai-cli_kernel.mjs",
     "expect": "L5 歸檔 status：計數遍歷全部而非最近二十筆"
+  },
+  {
+    "name": "kernel memory-context：finish拒絕寫入欄位",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "  z.object({ action: z.literal('finish'), lessons: LessonsSchema, reason: z.string().max(2000).optional(), report_step: z.string().max(64) }).strict(),",
+    "to": "  z.object({ action: z.literal('finish'), lessons: LessonsSchema, reason: z.string().max(2000).optional(), report_step: z.string().max(64) }).passthrough(),",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 唯讀介面：finish 同樣拒絕"
+  },
+  {
+    "name": "kernel archive：回傳不可共用輸入",
+    "file": "src/ai-cli_kernel/archive.ts",
+    "from": "return structuredClone({",
+    "to": "return ({",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔純函式：輸出與輸入沒有共享"
+  },
+  {
+    "name": "kernel archive：未快取用量不得含快取",
+    "file": "src/ai-cli_kernel/archive.ts",
+    "from": "uncachedInputTokens: view.counters.inputTokens - view.counters.cachedTokens",
+    "to": "uncachedInputTokens: view.counters.inputTokens",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔純函式：用量保留快取"
+  },
+  {
+    "name": "kernel archive：失敗不能漏掉拒絕的決策",
+    "file": "src/ai-cli_kernel/archive.ts",
+    "from": "decisions: events.filter(event => event.type === 'decide_processed' && !event.ok).length",
+    "to": "decisions: 0",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔純函式：測試歷程與精確失敗次數"
+  },
+  {
+    "name": "kernel archive：MCP也拒絕執行欄位",
+    "file": "src/ai-cli_kernel/mcp-tools.ts",
+    "from": "if (!allowed.includes(key)) throw new Error(`archive 不接受 ${key}`);",
+    "to": "if (false) throw new Error(`archive 不接受 ${key}`);",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔邊界：API MCP 拒絕額外執行參數"
+  },
+  {
+    "name": "kernel archive：CLI也拒絕執行欄位",
+    "file": "src/ai-cli_kernel/cli.ts",
+    "from": "if (!allowed.includes(flag)) throw new Error(`archive ${operation} 不接受 --${flag}`);",
+    "to": "if (false) throw new Error(`archive ${operation} 不接受 --${flag}`);",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔 CLI：拒絕不合法輸入"
+  },
+  {
+    "name": "kernel archive：執行中不可標記",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "if (packet.effectiveState === 'running') throw new Error('執行中的 run 不可標記歸檔，請先等它停止');",
+    "to": "if (false) throw new Error('執行中的 run 不可標記歸檔，請先等它停止');",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔 API：活著的 run 不待歸檔也不能 done"
+  },
+  {
+    "name": "kernel memory-context：lessons拒絕物件偽裝",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "const LessonsSchema = z.array(z.string().trim().min(1).max(500)).max(3).optional();",
+    "to": "const LessonsSchema = z.array(z.any()).max(3).optional();",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 lessons：plan 和 finish 均拒絕物件偽裝"
+  },
+  {
+    "name": "kernel archive：revision與路徑必須分隔",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "from": "    return mustGit(spec.worktree, 'rev-list', '--reverse', `${spec.baseCommit}..HEAD`, '--').split('\\n').filter(Boolean);",
+    "to": "    return mustGit(spec.worktree, 'rev-list', '--reverse', `${spec.baseCommit}..HEAD`).split('\\n').filter(Boolean);",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "L5 歸檔歷史：revision 不得被同名路徑"
   }
 ]

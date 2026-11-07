@@ -283,7 +283,7 @@ export const realWorkspace: WorkspaceOps & ReleaseWorkspaceOps = {
   },
 
   commitHistory(spec) {
-    return mustGit(spec.worktree, 'rev-list', '--reverse', `${spec.baseCommit}..HEAD`).split('\n').filter(Boolean);
+    return mustGit(spec.worktree, 'rev-list', '--reverse', `${spec.baseCommit}..HEAD`, '--').split('\n').filter(Boolean);
   },
 
   /** hooks 照常跑：kernel 不替使用者跳過 repo 自己的規矩。 */

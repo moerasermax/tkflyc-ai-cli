@@ -3,16 +3,19 @@
  * 不 commit、不建立分支；沿用正式 mutation-test harness，不複製另一套斷言。
  */
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const evidence = join(ROOT, 'docs', 'ai-cli_kernel', 'memory-mutations.log');
 mkdirSync(evidence, { recursive: true });
 const home = mkdtempSync(join(evidence, 'run-'));
-const snapshot = join(home, 'snapshot'), scratch = join(home, 'scratch');
-mkdirSync(scratch);
+const snapshot = join(home, 'snapshot');
+const scratchRoot = join(ROOT, 'docs', 'ai-cli_kernel', 't.log');
+mkdirSync(scratchRoot, { recursive: true });
+const scratch = mkdtempSync(join(scratchRoot, 'm-'));
 const env = { ...process.env, TEMP: scratch, TMP: scratch, TMPDIR: scratch, GIT_CEILING_DIRECTORIES: scratch };
 const read = path => readFileSync(join(ROOT, path), 'utf8').replace(/\r\n/g, '\n');
 const source = read('tests/verify-ai-cli_kernel.mjs');
@@ -54,12 +57,19 @@ try {
     const result = spawnSync(process.execPath, [join(snapshot, 'tools', 'mutation-test.mjs'), snapshot, '--script', 'verify-ai-cli_kernel.mjs'], { cwd: ROOT, env, encoding: 'utf8', windowsHide: true, timeout: 1800000, maxBuffer: 4 * 1024 * 1024 });
     const output = (result.stdout ?? '') + (result.stderr ?? '');
     writeFileSync(join(home, `group-${index}.log`), output);
-    console.log(`group ${index}: ${result.status === 0 ? 'PASS' : 'FAIL'} (${group.length} mutations)`);
-    results.push({ group: index, exitCode: result.status, mutations: group.map(item => item.name) });
-    if (result.status !== 0) { console.log(output.slice(-4000)); break; }
+    const killed = [...output.matchAll(/^\[\d+\/\d+\] KILLED\s+/gm)].length;
+    const restored = [...originals].every(([path, bytes]) => readFileSync(join(snapshot, path)).equals(bytes));
+    const valid = result.status === 0 && killed === group.length && !/KILLED\(其他斷言\)|SURVIVED（|BUILD_FAILED|\] ERROR/.test(output) && restored;
+    console.log(`group ${index}: ${valid ? 'PASS' : 'FAIL'} (${killed}/${group.length} expected kills)`);
+    results.push({ group: index, total: group.length, killed, restored, valid, exitCode: result.status, mutations: group.map(item => item.name), error: result.error?.message });
+    if (!valid) { console.log(output.slice(-4000)); break; }
   }
   for (const [path, bytes] of originals) if (!readFileSync(join(snapshot, path)).equals(bytes)) throw new Error(`快照未還原：${path}`);
-} finally { unlinkSync(link); }
+} finally {
+  unlinkSync(link);
+  if (!existsSync(join(ROOT, 'node_modules', 'typescript', 'package.json'))) throw new Error('相依套件檢查失敗');
+  writeFileSync(join(home, 'result.json'), JSON.stringify({ testSha256: createHash('sha256').update(source).digest('hex'), extractedFrom: 'tests/verify-ai-cli_kernel.mjs', harness: 'tools/mutation-test.mjs (unmodified copy)', groups: results }, null, 2) + '\n');
+}
 writeFileSync(join(home, 'summary.json'), JSON.stringify(results, null, 2));
-console.log(`evidence: ${home}`);
-process.exit(results.length === groups.size && results.every(item => item.exitCode === 0) ? 0 : 1);
+console.log(`evidence: ${relative(ROOT, home)}`);
+process.exit(results.length === groups.size && results.every(item => item.valid) ? 0 : 1);

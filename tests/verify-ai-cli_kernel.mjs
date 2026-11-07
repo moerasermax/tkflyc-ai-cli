@@ -1840,6 +1840,8 @@ const referenceBody = (prompt, tag) => prompt.match(new RegExp(`<${tag} untruste
     { ...plan, lessons: ['a', 'b', 'c', 'd'] }, { ...finish, lessons: ['a'.repeat(501)] }, { ...plan, lessons: [1] }, { ...plan, lessons: [' '] }, { action: 'ask_human', question: 'q', lessons: ['x'] }, { action: 'give_up', reason: 'r', lessons: ['x'] },
   ].every(obj => !!failing(parse, obj)));
   check('L5 唯讀介面：decide 無記憶升級或遠端寫入契約', ['contextCommand', 'knowledge_write', 'planner_session_append', 'memory', 'status'].every(key => !!failing(parse, { ...plan, [key]: key === 'status' ? 'active' : 'write' })));
+  check('L5 唯讀介面：finish 同樣拒絕命令服務寫入或記憶升級欄位', ['contextCommand', 'knowledge_write', 'planner_session_append', 'memory', 'status'].every(key => !!failing(parse, { ...finish, [key]: key === 'status' ? 'active' : 'write' })));
+  check('L5 lessons：plan 和 finish 均拒絕物件偽裝 active 或服務寫入', [plan, finish].every(obj => [{ text: 'x', status: 'active' }, { knowledge_write: 'x' }, { planner_session_append: 'x' }].every(lesson => !!failing(parse, { ...obj, lessons: [lesson] }))));
 }
 {
   const repo = memoryRepo();
@@ -2421,10 +2423,10 @@ const { aiCliKernelArchiveList: archiveList, aiCliKernelArchiveShow: archiveShow
   check('L5 歸檔純函式：測試歷程與精確失敗次數', packet.tests.command === 'test-fixed' && packet.tests.results.length === 2 && packet.tests.results[0].exitCode === 3 && packet.tests.results[1].passed && JSON.stringify(packet.failures) === JSON.stringify({ actions: 1, steps: 1, tests: 1, acceptance: 1, decisions: 1 }));
   check('L5 歸檔純函式：用量保留快取與模型實際選擇', packet.usage.inputTokens === 120 && packet.usage.cachedTokens === 80 && packet.usage.uncachedInputTokens === 40 && packet.usage.outputTokens === 7 && packet.models.used.join() === 'actual-model');
   check('L5 歸檔純函式：包含失敗與未執行步驟標題結果', packet.steps.length === 2 && packet.steps[0].title === '第一步' && packet.steps[0].status === 'failed' && packet.steps[0].attempts[0].findings[0] === 'step-failed' && packet.steps[1].status === 'pending');
-  check('L5 歸檔純函式：回復點放行 unknown 候選與 context 失敗', packet.checkpoint.commit === 'cp' && packet.checkpoint.pushed && packet.checkpointPrepared.ref === 'checkpoints/run' && packet.releases[0].status === 'unknown' && packet.candidateMemories[0].status === 'candidate' && packet.context.detail === 'reader-failed');
+  check('L5 歸檔純函式：回復點放行 unknown 候選與 context 失敗', packet.checkpoint.commit === 'cp' && packet.checkpoint.pushed && packet.checkpointPrepared.ref === 'checkpoints/run' && packet.releases[0].status === 'unknown' && packet.candidateMemories[0]?.status === 'candidate' && packet.context.detail === 'reader-failed');
   check('L5 歸檔純函式：下一步由狀態推導且待人工標記', packet.pendingArchive && packet.nextActions[0].includes('approve fixture') && packet.nextActions[1].includes('archive done fixture'));
-  packet.changedFiles.push('only-return-value'); packet.steps[0].attempts[0].findings.push('changed');
-  check('L5 歸檔純函式：輸出與輸入沒有共享可變物件', JSON.stringify(snapshot) === before && buildArchive(snapshot).changedFiles.length === 2);
+  const editError = failing(() => { packet.changedFiles.push('only-return-value'); packet.steps[0].attempts[0].findings.push('changed'); });
+  check('L5 歸檔純函式：輸出與輸入沒有共享可變物件', !editError && JSON.stringify(snapshot) === before && buildArchive(snapshot).changedFiles.length === 2);
   const stop = buildArchive({ ...snapshot, events: [...snapshot.events.slice(0, 2), { type: 'decide_processed', seq: 3, at: '2026-01-01', actionId: 'a0', ok: true, stop: { state: 'waiting_human', reason: 'decide_question', detail: 'answer' } }] });
   check('L5 歸檔純函式：當在停止提案和 state 之間仍可歸檔', stop.state === 'running' && stop.effectiveState === 'waiting_human' && stop.pendingArchive && stop.reason === 'decide_question');
   const liveSnapshot = { ...snapshot, events: snapshot.events.slice(0, 2) };
@@ -2434,6 +2436,7 @@ const { aiCliKernelArchiveList: archiveList, aiCliKernelArchiveShow: archiveShow
 }
 {
   const previousState = process.env.AI_CLI_STATE_DIR;
+  mkdirSync(previousState, { recursive: true });
   process.env.AI_CLI_STATE_DIR = mkdtempSync(join(previousState, 'archive-integration-'));
   try {
     const run = newDevRun({ contextCommand: 'read-fixed-context' });
@@ -2445,7 +2448,7 @@ const { aiCliKernelArchiveList: archiveList, aiCliKernelArchiveShow: archiveShow
       return ok(DEV_REPORT);
     });
     const state = await runKernelLoop(devDeps(run.store, run.contract, executor, { memory, workspace: { ...realWorkspace, startCheck(...args) { return args[0] === run.contract.contextCommand ? context.workspace.startCheck(...args) : realWorkspace.startCheck(...args); } } }));
-    const expectedCommits = git(run.spec.worktree, 'rev-list', '--reverse', `${run.spec.baseCommit}..HEAD`).split('\n');
+    const expectedCommits = git(run.spec.worktree, 'rev-list', '--reverse', `${run.spec.baseCommit}..HEAD`, '--').split('\n');
     const filesBefore = readdirSync(run.store.dir).sort().join();
     const packet = await archiveShow({ runId: run.store.runId });
     check('L5 歸檔整合：完整工作包三記憶 context develop 到歸檔包', state === 'completed' && packet.candidateMemories.length === 1 && packet.candidateMemories[0].status === 'candidate' && memory.read()[0].status === 'candidate' && context.calls.length === 1 && packet.context.ok && packet.tests.results[0].passed && packet.steps[0].title === '寫');
@@ -2469,6 +2472,7 @@ const { aiCliKernelArchiveList: archiveList, aiCliKernelArchiveShow: archiveShow
 }
 {
   const previousState = process.env.AI_CLI_STATE_DIR;
+  mkdirSync(previousState, { recursive: true });
   process.env.AI_CLI_STATE_DIR = mkdtempSync(join(previousState, 'archive-interfaces-'));
   const { aiCliKernelHandleTool } = await load('mcp-tools');
   const cli = async args => { let out = '', err = ''; const code = await runKernelCli(args, { stdout: text => out += text, stderr: text => err += text }); return { code, out, err }; };
@@ -2536,6 +2540,17 @@ const { aiCliKernelArchiveList: archiveList, aiCliKernelArchiveShow: archiveShow
     appendFileSync(runs[4].store.releasesPath, '{"type":"release_intent"');
     check('L5 歸檔錯誤：放行殘行結果不明拒絕猜測', !!await rejecting(archiveShow({ runId: runs[4].store.runId })));
   } finally { delete process.env.AI_CLI_KERNEL; delete process.env.AI_CLI_WORKER; delete process.env.AI_CLI_ALLOW_NESTED; process.env.AI_CLI_STATE_DIR = previousState; }
+}
+
+{
+  const repo = newRepo(), base = git(repo, 'rev-parse', 'HEAD');
+  writeFileSync(join(repo, 'feature.txt'), 'history\n'); git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'history');
+  const head = git(repo, 'rev-parse', 'HEAD');
+  // 真實同名檔案使沒有 -- 的 revision 查詢在各平台都會歧義；深層 Windows 路徑也會先 stat 失敗。
+  writeFileSync(join(repo, `${base}..HEAD`), 'revision-like path\n');
+  let history;
+  const error = failing(() => { history = realWorkspace.commitHistory({ worktree: repo, baseCommit: base }); });
+  check('L5 歸檔歷史：revision 不得被同名路徑或 Windows 長路徑誤判', !error && history?.join() === head, error?.message);
 }
 
 /* ---- 命名與依賴方向 ---- */
