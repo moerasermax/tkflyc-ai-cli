@@ -207,10 +207,13 @@ try {
   check('委任範本 E2E：MCP 列表看到 CLI 保存的範本', !mandateListCall?.result?.isError && mandateListText.includes('e2e-audit') && mandateListText.includes('unapproved'), mandateListText.slice(0, 300));
   const statusText = statusCall?.result?.content?.[0]?.text ?? '';
   check('MCP 查得到 CLI 建立的 run', statusText.includes(runId) && statusText.includes('completed'), statusText.slice(0, 300));
-  const [archiveShowCall, archiveListCall, archiveDoneCall, archiveBadCall] = await callMcp({}, [
+  const [archiveShowCall, archiveListCall] = await callMcp({}, [
     { method: 'tools/call', params: { name: 'ai-cli_kernel_archive_show', arguments: { runId } } },
     { method: 'tools/call', params: { name: 'ai-cli_kernel_archive_list', arguments: {} } },
-    { method: 'tools/call', params: { name: 'ai-cli_kernel_archive_done', arguments: { runId, note: 'main session handoff' } } },
+  ]);
+  const shownPacket = JSON.parse(archiveShowCall?.result?.content?.[0]?.text ?? '{}');
+  const [archiveDoneCall, archiveBadCall] = await callMcp({}, [
+    { method: 'tools/call', params: { name: 'ai-cli_kernel_archive_done', arguments: { runId, note: 'main session handoff', journalSeq: shownPacket.evidence?.journalSeq, releaseEvents: shownPacket.evidence?.releaseEvents } } },
     { method: 'tools/call', params: { name: 'ai-cli_kernel_archive_done', arguments: { runId, command: 'planner_session_append' } } },
   ]);
   check('歸檔 E2E：MCP 三介面可用且無任意執行參數', !archiveShowCall?.result?.isError && (archiveShowCall?.result?.content?.[0]?.text ?? '').includes('main session handoff') && !archiveListCall?.result?.isError && !archiveDoneCall?.result?.isError && (archiveBadCall?.result?.isError || archiveBadCall?.error), JSON.stringify(archiveBadCall).slice(0, 300));

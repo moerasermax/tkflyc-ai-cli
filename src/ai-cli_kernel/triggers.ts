@@ -2,7 +2,7 @@
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assertCanStartJob } from '../core/worker-env.js';
-import { acquireActiveLock, atomicWrite, kernelRunDir, kernelStateDir, newRunId, releaseActiveLock, RunStore } from './journal.js';
+import { acquireActiveLock, atomicWrite, kernelRunDir, kernelStateDir, newRunId, readActiveRun, releaseActiveLock, RunStore } from './journal.js';
 import { aiCliKernelMandateShow } from './mandates.js';
 import { replayJournal } from './replay.js';
 import { agentForModel } from './runtime.js';
@@ -16,6 +16,8 @@ interface TriggerRecord extends KernelTriggerResult { at: string; day: string; e
 export interface KernelTriggerDeps {
   now(): number;
   approveAndStart(store: RunStore, note: string): Promise<unknown>;
+  /** 測試用：在最後一次授權檢查之前插入事件。 */
+  beforeStart?(): void;
 }
 function safePath(name: string): string {
   const path = join(kernelStateDir(), name);
@@ -116,16 +118,35 @@ export async function aiCliKernelRunTrigger(name: string, deps: KernelTriggerDep
     } }, new Date(now), { runId, worktree: join(kernelRunDir(runId), 'wt') });
     contract.origin = { kind: 'trigger', mandate: name, digest: mandate.digest };
     if (contract.develop?.checkpoint?.mode === 'off') { runId = null; return record(result('skipped', 'checkpoint_off_forbidden')); }
-    const lock = acquireActiveLock(runId);
-    if (!lock.ok) { runId = null; return record(result('skipped', 'active_run_locked', lock.heldBy)); }
-    active = true;
-    record(result('started', 'reserved'), 'reserved', mandate.digest); // 先扣名額；崩潰不退款。
+    // 先看一次鎖：排程每小時跑時，不要每次跳過都留下一個空的 run。
+    const heldBy = readActiveRun();
+    if (heldBy) { runId = null; return record(result('skipped', 'active_run_locked', heldBy)); }
+    // 先建 run 再拿鎖：當掉時鎖指向的 run 一定存在，人才取消得了。反過來的話，鎖會指向查無此人的 run，連 cancel 都救不了。
     const store = new RunStore(kernelRunDir(runId));
     store.create(contract);
+    const lock = acquireActiveLock(runId);
+    if (!lock.ok) {
+      store.append({ type: 'state', state: 'cancelled', reason: 'trigger_lost_lock', detail: `被 ${lock.heldBy} 搶先` });
+      runId = null;
+      return record(result('skipped', 'active_run_locked', lock.heldBy));
+    }
+    active = true;
+    record(result('started', 'reserved'), 'reserved', mandate.digest); // 先扣名額；崩潰不退款。
     const root = contract.develop?.repoRoot ?? describeRepo(contract.workFolder)?.root ?? contract.workFolder;
     const hooks = existsSync(join(root, '.codex', 'hooks.json')) && contract.allowedWorkerModels.some(model => agentForModel(model) === 'codex');
     const note = `委任範本 ${name}（${mandate.digest}）主動觸發。${hooks ? '專案層 .codex/hooks.json 在新 worktree 可能不生效。' : ''}`;
     record(result('started', 'starting'), 'attempt');
+    deps.beforeStart?.();
+    // 上面檢查到這裡可能過了好幾秒，這段時間人可能撤銷範本或關掉開關。撤銷回報成功之後還開工，就等於沒有撤銷。
+    const current = aiCliKernelMandateShow({ name });
+    const revoked = !aiCliKernelTriggersEnabled() ? 'triggers_disabled'
+      : !current.approval ? 'mandate_unapproved'
+      : current.digest !== mandate.digest || current.approval.digest !== mandate.digest ? 'mandate_changed'
+      : Math.max(now, Date.now()) >= Date.parse(current.approval.expiresAt) ? 'mandate_expired' : null;
+    if (revoked) {
+      store.append({ type: 'state', state: 'cancelled', reason: revoked, detail: '開工前最後一次檢查，授權已經失效' });
+      return record(result('skipped', revoked));
+    }
     starting = true;
     await deps.approveAndStart(store, note);
     return record(result('started', 'started'));

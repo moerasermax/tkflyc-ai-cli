@@ -182,6 +182,10 @@ export const realWorkspace: WorkspaceOps & ReleaseWorkspaceOps = {
   },
 
   releaseExecute(spec, release) {
+    // merge 永遠作用在目前所在的分支，指令本身綁不了目標。檢查之後有人切分支的話，會合併到人沒同意的地方，所以動手前最後再確認一次。
+    if (release.action === 'merge' && git(spec.repoRoot, 'symbolic-ref', '-q', 'HEAD').stdout.trim() !== `refs/heads/${release.target}`) {
+      return { status: 'failed', detail: `repo 已經不在 ${release.target}，沒有執行 merge。這次放行已用掉，確認後請重新建立。` };
+    }
     const result = release.action === 'merge'
       ? git(spec.repoRoot, 'merge', '--ff-only', release.commit)
       : git(spec.repoRoot, '-c', `remote.${release.remote!}.mirror=false`, 'push', '--no-follow-tags', '--no-mirror', '--recurse-submodules=no', release.remote!, `${release.commit}:refs/heads/${release.target}`);
@@ -239,8 +243,12 @@ export const realWorkspace: WorkspaceOps & ReleaseWorkspaceOps = {
   },
 
   checkpointSecretPaths(spec, commit) {
-    return mustGit(spec.repoRoot, 'diff', '--no-renames', '--name-only', '-z', spec.baseCommit, commit).split('\0').filter(path => {
-      return path.split('/').some(name => /^\.env(?:\.|$)|\.(?:pem|key)$|^id_rsa$|^credentials|secret/i.test(name));
+    // 推上去的不只有這次沒 commit 的改動：還沒上遠端的 commit 都會跟著出去。已經在遠端的，推不推都一樣。
+    const remote = spec.checkpoint?.remote;
+    const paths = mustGit(spec.repoRoot, 'log', '--no-renames', '--format=', '--name-only', '-z', commit, '--not', ...(remote ? [`--remotes=${remote}`] : [spec.baseCommit]));
+    return [...new Set(paths.split('\0').map(path => path.trim()).filter(Boolean))].filter(path => {
+      // .env.example 這類範本本來就是要進版控的，擋了每個專案都開不了工。
+      return path.split('/').some(name => /^\.env(?:\.(?!example$|sample$|template$)|$)|\.(?:pem|key)$|^id_rsa$|^credentials|secret/i.test(name));
     });
   },
 
@@ -254,7 +262,8 @@ export const realWorkspace: WorkspaceOps & ReleaseWorkspaceOps = {
       if (remoteRef.split(/\s/)[0] !== commit) throw new Error('遠端回復點已指向其他 commit');
       return;
     }
-    mustGit(spec.repoRoot, 'push', remote, `${commit}:${ref}`);
+    // 明確關掉會擴大範圍的設定：使用者的 push.followTags、mirror 不能讓回復點多推東西出去。
+    mustGit(spec.repoRoot, '-c', `remote.${remote}.mirror=false`, 'push', '--no-follow-tags', '--no-mirror', '--recurse-submodules=no', remote, `${commit}:${ref}`);
   },
 
   /** 可以重複呼叫：當在中間時，下次會接著用已經開好的 worktree。 */
@@ -381,11 +390,18 @@ export const realWorkspace: WorkspaceOps & ReleaseWorkspaceOps = {
 
 /** 使用者看完結果後清掉 worktree。分支只有已合併才刪，沒合併的留著，不替人丟工作。 */
 export function cleanupWorkspace(spec: DevelopSpec): { worktreeRemoved: boolean; branchRemoved: boolean; detail: string } {
-  if (existsSync(spec.worktree)) assertOwnWorktree(spec);
-  const removal = existsSync(spec.worktree) ? git(spec.repoRoot, 'worktree', 'remove', spec.worktree) : { status: 0, stderr: '', stdout: '' };
-  if (removal.status !== 0) return { worktreeRemoved: false, branchRemoved: false, detail: `worktree 沒有移除：${String(removal.stderr).trim().slice(0, 400)}` };
+  // 上次刪到一半：git 已經取消登記，資料夾還在。這時 git 會往上找到別的 repo（家目錄也可能是），絕不能再當成 worktree 操作。
+  const halfRemoved = () => existsSync(spec.worktree) && !existsSync(join(spec.worktree, '.git'));
+  if (existsSync(spec.worktree) && !halfRemoved()) {
+    assertOwnWorktree(spec);
+    const removal = git(spec.repoRoot, 'worktree', 'remove', spec.worktree);
+    if (removal.status !== 0 && !halfRemoved()) return { worktreeRemoved: false, branchRemoved: false, detail: `worktree 沒有移除：${String(removal.stderr).trim().slice(0, 400)}` };
+  }
   git(spec.repoRoot, 'worktree', 'prune');
   const branch = git(spec.repoRoot, 'branch', '-d', spec.branch);
+  if (halfRemoved()) {
+    return { worktreeRemoved: false, branchRemoved: branch.status === 0, detail: `worktree 已從 git 移除，但這個資料夾有檔案刪不掉（可能被其他程式占用）：${spec.worktree}。確認沒有程式在用之後，請自己刪除。${branch.status === 0 ? '' : `分支 ${spec.branch} 還沒合併所以留著。`}` };
+  }
   return branch.status === 0
     ? { worktreeRemoved: true, branchRemoved: true, detail: `worktree 和分支 ${spec.branch} 都移除了` }
     : { worktreeRemoved: true, branchRemoved: false, detail: `worktree 移除了。分支 ${spec.branch} 還沒合併所以留著；確定不要的話自己執行 git branch -D ${spec.branch}` };

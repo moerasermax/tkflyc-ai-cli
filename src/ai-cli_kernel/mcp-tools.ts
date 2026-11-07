@@ -24,8 +24,8 @@ const TOOLS = [
   },
   {
     name: 'ai-cli_kernel_archive_done',
-    description: 'After the main session has handled handoff, mark the current journal snapshot archived locally in archived.json. Does not perform the handoff or write Planner or Knowledge; worker use is forbidden.',
-    inputSchema: { type: 'object', properties: { runId: RUN_ID, note: { type: 'string', description: '本機歸檔註記；只存文字，不執行。' } }, required: ['runId'], additionalProperties: false },
+    description: 'After the main session has handled handoff, mark the run archived locally in archived.json. Pass evidence.journalSeq and evidence.releaseEvents from the packet you actually read: if the run has newer events the call is refused, so nothing unread disappears from the list. Does not perform the handoff or write Planner or Knowledge; worker use is forbidden.',
+    inputSchema: { type: 'object', properties: { runId: RUN_ID, journalSeq: { type: 'number', description: '你讀到的歸檔包的 evidence.journalSeq。' }, releaseEvents: { type: 'number', description: '你讀到的歸檔包的 evidence.releaseEvents。' }, note: { type: 'string', description: '本機歸檔註記；只存文字，不執行。' } }, required: ['runId', 'journalSeq', 'releaseEvents'], additionalProperties: false },
   },
   {
     name: 'ai-cli_kernel_mandate_list',
@@ -135,10 +135,12 @@ export async function aiCliKernelHandleTool(name: string, args: Record<string, u
       return aiCliKernelArchiveList(args as Record<string, never>);
     case 'ai-cli_kernel_archive_show':
     case 'ai-cli_kernel_archive_done': {
-      const allowed = name === 'ai-cli_kernel_archive_done' ? ['runId', 'note'] : ['runId'];
+      const allowed = name === 'ai-cli_kernel_archive_done' ? ['runId', 'note', 'journalSeq', 'releaseEvents'] : ['runId'];
       for (const key of Object.keys(args)) if (!allowed.includes(key)) throw new Error(`archive 不接受 ${key}`);
       const runId = requireString(args, 'runId');
-      return name === 'ai-cli_kernel_archive_show' ? aiCliKernelArchiveShow({ runId }) : aiCliKernelArchiveDone({ runId, note: optionalString(args, 'note') });
+      if (name === 'ai-cli_kernel_archive_show') return aiCliKernelArchiveShow({ runId });
+      if (typeof args.journalSeq !== 'number' || typeof args.releaseEvents !== 'number') throw new Error('archive done 要帶你讀到的 journalSeq 和 releaseEvents');
+      return aiCliKernelArchiveDone({ runId, note: optionalString(args, 'note'), seen: { journalSeq: args.journalSeq, releaseEvents: args.releaseEvents } });
     }
     case 'ai-cli_kernel_mandate_list':
       if (Object.keys(args).length) throw new Error('mandate list 不接受參數');

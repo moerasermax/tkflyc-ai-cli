@@ -65,7 +65,7 @@ function releaseDelivery(deps: KernelReleaseDeps): { contract: KernelContract; s
   const contract = store.readContract();
   const view = replayJournal(store.read());
   if (contract.template !== 'develop' || !contract.develop || view.state !== 'completed') throw new Error('只能放行 completed 的 develop run');
-  if (contract.origin?.kind === 'trigger') throw new Error('觸發的 run 不能建立或執行放行');
+  // 觸發的 run 一樣可以放行：半夜自動開發的成果，人早上看過要收得下來。自動流程本身沒有呼叫放行的路徑，放行也只有 CLI。
   if (!view.approvedDigest || view.contractDigest !== view.approvedDigest || store.contractDigest() !== view.approvedDigest) throw new Error('委任書與核准 digest 不符，拒絕放行');
   const spec = contract.develop;
   const commit = view.headCommit;
@@ -558,24 +558,25 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
       if (findings.length > 0) { commit({ type: 'acceptance', stepId, passed: false, findings }); return; }
     }
     const step = view.stepResults.get(stepId)!;
-    let readOnly: 'unchanged' | 'changed_accepted' | 'not_git' | 'unverifiable' = 'not_git';
+    let readOnly: 'unchanged' | 'changed' | 'changed_accepted' | 'not_git' | 'unverifiable' = 'not_git';
     if (view.baseline) {
       const current = deps.snapshot(contract.workFolder);
       if (!current) readOnly = 'unverifiable';
       else if (snapshotsEqual(view.baseline, current)) readOnly = 'unchanged';
       else if (view.overrides.has('worktree_changed')) readOnly = 'changed_accepted';
+      // develop 的成果只在分支上，還沒合併。主目錄動過多半是使用者自己在工作或 hook 寫了檔，停下來救不回已發生的事，
+      // 只會讓跑完的任務卡到天亮、還佔著鎖。所以寫進報告讓人收下前看到，不擋交付。
+      else if (develop) readOnly = 'changed';
       else {
         setState('waiting_human', 'worktree_changed', `${develop ? '主目錄' : '工作目錄'}在 run 期間有變動（基準 ${view.baseline.head.slice(0, 8)}、${view.baseline.dirtyEntries} 筆未提交；目前 ${current.head.slice(0, 8)}、${current.dirtyEntries} 筆）。可能是其他 session，也可能是 worker，請先確認。`);
         return;
       }
     }
-    if (develop) {
-      const moved = refsChanged();
-      if (moved.length > 0 && !view.overrides.has('repo_refs_changed')) {
-        setState('waiting_human', 'repo_refs_changed', `repo 裡這些 ref 在 run 期間動過：${moved.slice(0, 8).join('、')}。可能是其他 session，也可能是 worker 動了分支或 push，請先確認。`);
-        return;
-      }
-    }
+    const movedRefs = develop ? refsChanged() : [];
+    const warnings = develop ? [
+      ...(readOnly === 'changed' || readOnly === 'changed_accepted' ? ['主目錄在 run 期間有變動。可能是你自己在工作、其他 session 或 hook，也可能是 worker 越界，收下前請確認。'] : []),
+      ...(movedRefs.length > 0 ? [`repo 裡這些 ref 在 run 期間動過：${movedRefs.slice(0, 8).join('、')}。可能是其他 session，也可能是 worker 動了分支或 push，收下前請確認。`] : []),
+    ] : [];
     const worker = view.actions.get(step.actionId)?.outcome;
     const delivered = develop ? ws!.inspect(develop) : null;
     if (develop) observeWorkspace();
@@ -583,7 +584,7 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
     const report = store.readOutput(step.messageFile!);
     store.writeReport(develop && delivered ? `${report.trimEnd()}
 
-## 交付（由 kernel 產生）
+${warnings.length > 0 ? `## 注意（由 kernel 產生）\n${warnings.map(warning => `- ${warning}`).join('\n')}\n\n` : ''}## 交付（由 kernel 產生）
 - 分支：${develop.branch}
 - 基準：${develop.baseCommit}
 - 最新：${delivered.head}
@@ -606,6 +607,7 @@ ${stat}
         checkpoint: view.checkpoint,
         checkpointMode: develop.checkpoint?.mode === 'push' && view.overrides.has('checkpoint_push_failed') && contract.origin?.kind !== 'trigger' ? 'local' : develop.checkpoint?.mode ?? null,
         mainFolder: readOnly,
+        refsChanged: movedRefs,
         develop: { branch: develop.branch, baseCommit: develop.baseCommit, headCommit: delivered.head, changedFiles: delivered.changed, testCommand: develop.testCommand, testPassedOn: view.verification?.commit ?? null, testFailures: view.testFailures, worktree: develop.worktree },
       } : { readOnly }),
       boundaryLabel: develop ? 'declared-not-isolated' : contract.allowUnverifiedBoundary ? 'unverified_allowed_by_caller' : 'tool-limited-not-isolated',
@@ -613,7 +615,7 @@ ${stat}
       context: view.context,
       finishedAt: new Date(deps.now()).toISOString(),
     });
-    setState('completed', 'delivered');
+    setState('completed', 'delivered', warnings.join(' '));
   };
 
   /** 閘：派工前最後一關。回傳 false 表示暫停。 */

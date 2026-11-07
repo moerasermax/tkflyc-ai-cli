@@ -355,21 +355,30 @@ export async function aiCliKernelArchiveList(input: Record<string, never> = {}):
   archiveInput(input, []);
   const packets: KernelArchivePacket[] = [];
   for (const runId of listRunIds()) {
-    const packet = await archivePacket(storeFor(runId));
-    if (packet.pendingArchive) packets.push(packet);
+    // 一筆壞掉不能讓整份清單出不來，否則其他任務也歸不了檔。壞掉的那筆要留在清單上，不能悄悄消失。
+    try {
+      const packet = await archivePacket(storeFor(runId));
+      if (packet.pendingArchive) packets.push(packet);
+    } catch (error) {
+      packets.push({ runId, effectiveState: 'unreadable', goal: `紀錄損毀，要人工處理：${(error as Error).message}`, origin: null, pendingArchive: true } as unknown as KernelArchivePacket);
+    }
   }
   return packets;
 }
 
 /** 主 session 完成交接後標記；模型 worker 不可替自己勾掉收尾。只寫 run/archived.json。 */
-export async function aiCliKernelArchiveDone(input: { runId: string; note?: string }): Promise<KernelArchiveMark> {
-  archiveInput(input, ['runId', 'note']);
+export async function aiCliKernelArchiveDone(input: { runId: string; note?: string; seen?: { journalSeq: number; releaseEvents: number } }): Promise<KernelArchiveMark> {
+  archiveInput(input, ['runId', 'note', 'seen']);
   if (process.env.AI_CLI_WORKER === '1') throw new Error('worker 不能標記歸檔完成，請交給主 session');
   if (input.note !== undefined && typeof input.note !== 'string') throw new Error('note 必須是字串');
   const store = storeFor(input.runId);
   const packet = await archivePacket(store);
   if (packet.effectiveState === 'running') throw new Error('執行中的 run 不可標記歸檔，請先等它停止');
   if (packet.archived) return packet.archived;
+  // 主 session 看歸檔包和標記之間可能又多了事件。不比對的話，沒看過的東西會跟著從清單消失。
+  if (input.seen && (input.seen.journalSeq !== packet.evidence.journalSeq || input.seen.releaseEvents !== packet.evidence.releaseEvents)) {
+    throw new Error(`歸檔包在你看過之後有新事件（看過 ${input.seen.journalSeq}／${input.seen.releaseEvents}，現在 ${packet.evidence.journalSeq}／${packet.evidence.releaseEvents}），請重新 archive show`);
+  }
   const mark: KernelArchiveMark = { runId: store.runId, archivedAt: new Date().toISOString(), note: input.note ?? '',
     journalSeq: packet.evidence.journalSeq, releaseEvents: packet.evidence.releaseEvents };
   atomicWrite(join(store.dir, 'archived.json'), JSON.stringify(mark, null, 2) + '\n');
@@ -501,9 +510,10 @@ export { nextStep };
 export { aiCliKernelMandateSave, aiCliKernelMandateApprove, aiCliKernelMandateList, aiCliKernelMandateShow, aiCliKernelMandateRevoke } from './mandates.js';
 
 /** 一次性觸發；測試可注入前景 runner，絕不啟動真正模型。 */
-export function aiCliKernelTrigger(input: { name: string }, deps: { now?: KernelTriggerDeps['now']; launch?: (store: RunStore) => Promise<void> } = {}) {
+export function aiCliKernelTrigger(input: { name: string }, deps: { now?: KernelTriggerDeps['now']; launch?: (store: RunStore) => Promise<void>; beforeStart?: () => void } = {}) {
   return aiCliKernelRunTrigger(input.name, {
     now: deps.now ?? Date.now,
+    ...(deps.beforeStart ? { beforeStart: deps.beforeStart } : {}),
     approveAndStart: (store, note) => aiCliKernelApprove({ runId: store.runId, acknowledgeUnisolated: true, note }, { launch: deps.launch }),
   });
 }

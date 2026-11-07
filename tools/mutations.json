@@ -3682,8 +3682,8 @@
     "name": "kernel L4 回復點推送偷偷帶強制旗標",
     "file": "src/ai-cli_kernel/workspace.ts",
     "script": "verify-ai-cli_kernel.mjs",
-    "from": "mustGit(spec.repoRoot, 'push', remote, `${commit}:${ref}`);",
-    "to": "mustGit(spec.repoRoot, 'push', '--force', remote, `${commit}:${ref}`);",
+    "from": "'push', '--no-follow-tags', '--no-mirror', '--recurse-submodules=no', remote, `${commit}:${ref}`);",
+    "to": "'push', '--force', '--no-follow-tags', '--no-mirror', '--recurse-submodules=no', remote, `${commit}:${ref}`);",
     "expect": "回復點：推送使用明確 commit refspec 且無強制旗標"
   },
   {
@@ -3701,14 +3701,6 @@
     "from": "  if (contract.template !== 'develop' || !contract.develop || view.state !== 'completed') throw new Error('只能放行 completed 的 develop run');",
     "to": "  if (contract.template !== 'develop' || !contract.develop || false) throw new Error('只能放行 completed 的 develop run');",
     "expect": "放行：非 completed 拒絕"
-  },
-  {
-    "name": "kernel release 2：throw new Error('觸發的 run 不能",
-    "file": "src/ai-cli_kernel/loop.ts",
-    "script": "verify-ai-cli_kernel.mjs",
-    "from": "  if (contract.origin?.kind === 'trigger') throw new Error('觸發的 run 不能建立或執行放行');",
-    "to": "  if (false) throw new Error('觸發的 run 不能建立或執行放行');",
-    "expect": "放行：觸發 run 不可建立放行"
   },
   {
     "name": "kernel release 3：throw new Error('委任書與核准 digest",
@@ -4482,8 +4474,8 @@
     "name": "kernel L5 收尾：名額延至啟動後落盤",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/triggers.ts",
-    "from": "    record(result('started', 'reserved'), 'reserved', mandate.digest); // 先扣名額；崩潰不退款。\n    const store = new RunStore(kernelRunDir(runId));\n    store.create(contract);\n    const root = contract.develop?.repoRoot ?? describeRepo(contract.workFolder)?.root ?? contract.workFolder;\n    const hooks = existsSync(join(root, '.codex', 'hooks.json')) && contract.allowedWorkerModels.some(model => agentForModel(model) === 'codex');\n    const note = `委任範本 ${name}（${mandate.digest}）主動觸發。${hooks ? '專案層 .codex/hooks.json 在新 worktree 可能不生效。' : ''}`;\n    record(result('started', 'starting'), 'attempt');\n    starting = true;\n    await deps.approveAndStart(store, note);",
-    "to": "    const store = new RunStore(kernelRunDir(runId));\n    store.create(contract);\n    const root = contract.develop?.repoRoot ?? describeRepo(contract.workFolder)?.root ?? contract.workFolder;\n    const hooks = existsSync(join(root, '.codex', 'hooks.json')) && contract.allowedWorkerModels.some(model => agentForModel(model) === 'codex');\n    const note = `委任範本 ${name}（${mandate.digest}）主動觸發。${hooks ? '專案層 .codex/hooks.json 在新 worktree 可能不生效。' : ''}`;\n    record(result('started', 'starting'), 'attempt');\n    starting = true;\n    await deps.approveAndStart(store, note);\n    record(result('started', 'reserved'), 'reserved', mandate.digest);",
+    "from": "    record(result('started', 'reserved'), 'reserved', mandate.digest); // 先扣名額；崩潰不退款。\n    const root = contract.develop?.repoRoot ?? describeRepo(contract.workFolder)?.root ?? contract.workFolder;\n    const hooks = existsSync(join(root, '.codex', 'hooks.json')) && contract.allowedWorkerModels.some(model => agentForModel(model) === 'codex');\n    const note = `委任範本 ${name}（${mandate.digest}）主動觸發。${hooks ? '專案層 .codex/hooks.json 在新 worktree 可能不生效。' : ''}`;\n    record(result('started', 'starting'), 'attempt');\n    deps.beforeStart?.();\n    // 上面檢查到這裡可能過了好幾秒，這段時間人可能撤銷範本或關掉開關。撤銷回報成功之後還開工，就等於沒有撤銷。\n    const current = aiCliKernelMandateShow({ name });\n    const revoked = !aiCliKernelTriggersEnabled() ? 'triggers_disabled'\n      : !current.approval ? 'mandate_unapproved'\n      : current.digest !== mandate.digest || current.approval.digest !== mandate.digest ? 'mandate_changed'\n      : Math.max(now, Date.now()) >= Date.parse(current.approval.expiresAt) ? 'mandate_expired' : null;\n    if (revoked) {\n      store.append({ type: 'state', state: 'cancelled', reason: revoked, detail: '開工前最後一次檢查，授權已經失效' });\n      return record(result('skipped', revoked));\n    }\n    starting = true;\n    await deps.approveAndStart(store, note);",
+    "to": "    const root = contract.develop?.repoRoot ?? describeRepo(contract.workFolder)?.root ?? contract.workFolder;\n    const hooks = existsSync(join(root, '.codex', 'hooks.json')) && contract.allowedWorkerModels.some(model => agentForModel(model) === 'codex');\n    const note = `委任範本 ${name}（${mandate.digest}）主動觸發。${hooks ? '專案層 .codex/hooks.json 在新 worktree 可能不生效。' : ''}`;\n    record(result('started', 'starting'), 'attempt');\n    deps.beforeStart?.();\n    // 上面檢查到這裡可能過了好幾秒，這段時間人可能撤銷範本或關掉開關。撤銷回報成功之後還開工，就等於沒有撤銷。\n    const current = aiCliKernelMandateShow({ name });\n    const revoked = !aiCliKernelTriggersEnabled() ? 'triggers_disabled'\n      : !current.approval ? 'mandate_unapproved'\n      : current.digest !== mandate.digest || current.approval.digest !== mandate.digest ? 'mandate_changed'\n      : Math.max(now, Date.now()) >= Date.parse(current.approval.expiresAt) ? 'mandate_expired' : null;\n    if (revoked) {\n      store.append({ type: 'state', state: 'cancelled', reason: revoked, detail: '開工前最後一次檢查，授權已經失效' });\n      return record(result('skipped', revoked));\n    }\n    starting = true;\n    await deps.approveAndStart(store, note);\n    record(result('started', 'reserved'), 'reserved', mandate.digest);",
     "expect": "主動觸發：啟動當下名額與意圖已落盤"
   },
   {
@@ -4925,5 +4917,61 @@
     "to": "    return mustGit(spec.worktree, 'rev-list', '--reverse', `${spec.baseCommit}..HEAD`).split('\\n').filter(Boolean);",
     "script": "verify-ai-cli_kernel.mjs",
     "expect": "L5 歸檔歷史：revision 不得被同名路徑"
+  },
+  {
+    "name": "kernel 稽核：開工前不再確認授權",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "if (revoked) {",
+    "to": "if (false as boolean) {",
+    "expect": "檢查之後才撤銷範本"
+  },
+  {
+    "name": "kernel 稽核：秘密檢查只看未提交的改動",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "from": "...(remote ? [`--remotes=${remote}`] : [spec.baseCommit]))",
+    "to": "...[spec.baseCommit])",
+    "expect": "已 commit 但還沒上遠端的秘密一樣不推"
+  },
+  {
+    "name": "kernel 稽核：回復點會多推 tag",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "from": "'push', '--no-follow-tags', '--no-mirror', '--recurse-submodules=no', remote, `${commit}:${ref}`",
+    "to": "'push', remote, `${commit}:${ref}`",
+    "expect": "push.followTags 不會多推 tag"
+  },
+  {
+    "name": "kernel 稽核：merge 不確認目前分支",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "from": "if (release.action === 'merge' && git(spec.repoRoot, 'symbolic-ref', '-q', 'HEAD').stdout.trim() !== `refs/heads/${release.target}`) {",
+    "to": "if (false as boolean) {",
+    "expect": "檢查之後切了分支"
+  },
+  {
+    "name": "kernel 稽核：標記歸檔不比對版本",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "if (input.seen && (input.seen.journalSeq !== packet.evidence.journalSeq || input.seen.releaseEvents !== packet.evidence.releaseEvents)) {",
+    "to": "if (false as boolean) {",
+    "expect": "看過之後才多的事件"
+  },
+  {
+    "name": "kernel 稽核：.env.example 也算秘密",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/workspace.ts",
+    "from": "/^\\.env(?:\\.(?!example$|sample$|template$)|$)|\\.(?:pem|key)$|^id_rsa$|^credentials|secret/i",
+    "to": "/^\\.env(?:\\.|$)|\\.(?:pem|key)$|^id_rsa$|^credentials|secret/i",
+    "expect": ".env.example 這類範本不算秘密"
+  },
+  {
+    "name": "kernel develop：主目錄動過就卡在交付前",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "else if (develop) readOnly = 'changed';",
+    "to": "else if (false as boolean) readOnly = 'changed';",
+    "expect": "主目錄動過也能交付"
   }
 ]

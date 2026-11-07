@@ -941,23 +941,18 @@ const rejecting = async promise => { try { await promise; return null; } catch (
   const { store, contract, repo } = newDevRun();
   const executor = new FakeExecutor(writes('good\n', () => git(repo, 'commit', '-q', '--allow-empty', '-m', '別的 session 動了主目錄')));
   const first = await runKernelLoop(devDeps(store, contract, executor));
-  check('主目錄在 run 期間動過，交付前停下來問人', first === 'waiting_human' && view(store).reason === 'worktree_changed', `${first} ${view(store).reason}`);
-  check('停下來的當下沒有交付報告', !existsSync(store.reportPath));
-  const digest = store.contractDigest();
-  store.append({ type: 'approved', contractDigest: digest, kind: 'continue', overrides: ['worktree_changed'] });
-  store.append({ type: 'state', state: 'running' });
-  const second = await runKernelLoop(devDeps(store, contract, executor));
-  check('ref 的變動要另外確認', second === 'waiting_human' && view(store).reason === 'repo_refs_changed', `${second} ${view(store).reason}`);
-  store.append({ type: 'approved', contractDigest: digest, kind: 'continue', overrides: ['repo_refs_changed'] });
-  store.append({ type: 'state', state: 'running' });
-  const third = await runKernelLoop(devDeps(store, contract, executor));
-  check('人確認後可以繼續交付', third === 'completed' && existsSync(store.reportPath), third);
+  check('主目錄動過也能交付：成果只在分支上，停下來救不回來', first === 'completed', `${first} ${view(store).reason}`);
+  const report = readFileSync(store.reportPath, 'utf8');
+  const verdict = JSON.parse(readFileSync(store.verdictPath, 'utf8'));
+  check('主目錄和 ref 動過要寫進報告，收下前看得到', report.includes('主目錄在 run 期間有變動') && report.includes('這些 ref'), report.slice(-400));
+  check('裁決也記下主目錄和 ref 的變動', verdict.mainFolder === 'changed' && verdict.refsChanged.length > 0, JSON.stringify(verdict.refsChanged));
+  check('查狀態也看得到這個提醒', view(store).detail.includes('主目錄'), view(store).detail);
 }
 {
   const { store, contract, repo } = newDevRun();
   const executor = new FakeExecutor(writes('good\n', () => git(repo, 'tag', 'worker-tag')));
   const state = await runKernelLoop(devDeps(store, contract, executor));
-  check('工作樹沒變但 ref 動了也抓得到（push、tag 都會落在這裡）', state === 'waiting_human' && view(store).reason === 'repo_refs_changed' && view(store).detail.includes('worker-tag') && !existsSync(store.reportPath), `${state} ${view(store).reason} ${view(store).detail}`);
+  check('工作樹沒變但 ref 動了也抓得到（push、tag 都會落在這裡）', state === 'completed' && readFileSync(store.reportPath, 'utf8').includes('worker-tag') && view(store).detail.includes('worker-tag'), `${state} ${view(store).reason} ${view(store).detail}`);
 }
 {
   const { store, contract } = newDevRun({ mandateHours: 0.0000001 });
@@ -1105,7 +1100,7 @@ const rejecting = async promise => { try { await promise; return null; } catch (
 {
   const source = readFileSync(join(ROOT, 'src', 'ai-cli_kernel', 'workspace.ts'), 'utf8');
   const pushMethod = source.slice(source.indexOf('  pushCheckpoint(spec, commit) {'), source.indexOf('  /** 可以重複呼叫'));
-  check('回復點：推送使用明確 commit refspec 且無強制旗標', pushMethod.includes("mustGit(spec.repoRoot, 'push', remote, `${commit}:${ref}`);") && !pushMethod.includes('--force'));
+  check('回復點：推送使用明確 commit refspec 且無強制旗標', pushMethod.includes("'push', '--no-follow-tags', '--no-mirror', '--recurse-submodules=no', remote, `${commit}:${ref}`);") && !pushMethod.includes('--force'));
 }
 function bareOrigin(repo) {
   const remote = mkdtempSync(join(tmpdir(), 'kernel-checkpoint-origin-'));
@@ -1318,27 +1313,21 @@ for (const crashAt of ['prepared', 'ref', 'push', 'event']) {
 
 /* ---- develop：獨立稽核找到的問題 ---- */
 {
-  // F1：驗收通過後暫停，暫停期間分支又多了 commit。
-  const { store, contract, repo, spec } = newDevRun();
-  let moved = false;
-  const executor = new FakeExecutor(action => {
-    if (action.kind === 'decide') return ok(DEV_PLAN);
-    writeFileSync(join(action.cwd, 'feature.txt'), moved ? 'good\n' : 'good\n');
-    if (!moved) git(repo, 'commit', '-q', '--allow-empty', '-m', '別的 session 讓交付前暫停');
-    return ok(DEV_REPORT);
-  });
-  const paused = await runKernelLoop(devDeps(store, contract, executor));
-  check('稽核 F1 前提：驗收通過後因主目錄變動暫停', paused === 'waiting_human' && view(store).reason === 'worktree_changed' && view(store).acceptance?.passed === true, `${paused} ${view(store).reason}`);
-  moved = true;
-  git(spec.worktree, 'commit', '-q', '--allow-empty', '-m', '暫停期間多出來、沒測過的 commit');
+  // F1：驗收通過後、交付前當掉，這段期間分支又多了 commit。
+  class CrashOnDelivered extends RunStore {
+    append(body) { if (body.type === 'state' && body.state === 'completed') throw new Crash('交付前當掉'); return super.append(body); }
+  }
+  const { store, contract, spec } = newDevRun();
+  const executor = new FakeExecutor(writes('good\n'));
+  let crashed = false;
+  try { await rawLoop(devDeps(new CrashOnDelivered(store.dir), contract, executor)); } catch (error) { crashed = error instanceof Crash; }
+  check('稽核 F1 前提：驗收通過後、交付前當掉', crashed && view(store).acceptance?.passed === true, `${crashed} ${JSON.stringify(view(store).acceptance)}`);
+  git(spec.worktree, 'commit', '-q', '--allow-empty', '-m', '這段期間多出來、沒測過的 commit');
   const untested = git(spec.worktree, 'rev-parse', 'HEAD');
-  const digest = store.contractDigest();
-  store.append({ type: 'approved', contractDigest: digest, kind: 'continue', overrides: ['worktree_changed', 'repo_refs_changed'] });
-  store.append({ type: 'state', state: 'running' });
   const resumed = await runKernelLoop(devDeps(store, contract, executor));
   const verdict = existsSync(store.verdictPath) ? JSON.parse(readFileSync(store.verdictPath, 'utf8')) : null;
   check('接回不沿用舊驗收：交付的 commit 一定是測過的那個', !verdict || verdict.develop?.testPassedOn === verdict.develop?.headCommit, JSON.stringify(verdict?.develop));
-  check('暫停期間多出來的 commit 會重測才交付', resumed === 'completed' && verdict?.develop?.headCommit === untested && store.read().some(event => event.type === 'verification' && event.commit === untested && event.passed), `${resumed} ${view(store).detail}`);
+  check('期間多出來的 commit 會重測才交付', resumed === 'completed' && verdict?.develop?.headCommit === untested && store.read().some(event => event.type === 'verification' && event.commit === untested && event.passed), `${resumed} ${view(store).detail}`);
 }
 {
   // F2：kill 失敗不能當成停了。
@@ -1532,7 +1521,7 @@ for (const state of ['running', 'awaiting_approval', 'failed', 'cancelled', 'wai
   run.store.append({ type: 'state', state: 'completed' });
   check('放行：唯讀 run 不可放行', /develop/.test(failing(aiCliKernelReleaseCreate, { runId: run.store.runId, action: 'merge', target: 'main', confirm: '0000000000' })?.message ?? ''));
   const triggered = releaseFixture({ origin: { kind: 'trigger', mandate: 'test', digest: 'digest' } });
-  check('放行：觸發 run 不可建立放行', /觸發/.test(failing(aiCliKernelReleaseCreate, releaseInput(triggered))?.message ?? ''));
+  check('放行：人看過觸發的 run 之後可以放行', aiCliKernelReleaseCreate(releaseInput(triggered)).action === 'merge');
   const manual = releaseFixture();
   const release = aiCliKernelReleaseCreate(releaseInput(manual));
   process.env.AI_CLI_WORKER = '1'; process.env.AI_CLI_ALLOW_NESTED = '1';
@@ -2331,7 +2320,7 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   check('主動觸發整合：develop 到交付分支與報告', development.status === 'started' && view(devStore).state === 'completed' && workers(devExecutor) === 1 && existsSync(devStore.reportPath) && delivered !== originalHead);
   check('主動觸發整合：專案 Codex hook 註記寫進 run', view(devStore).notes.some(note => note.includes('.codex/hooks.json')) && devContract.develop.notices.some(note => note.includes('.codex/hooks.json')));
   check('主動觸發整合：只推回復點且不合併主分支', pushed.join() === devContract.develop.checkpoint.ref && git(repo, 'rev-parse', 'HEAD') === originalHead && originalRemote === '' && git(remote, 'for-each-ref', '--format=%(refname)') === `refs/heads/${devContract.develop.checkpoint.ref}`);
-  check('主動觸發整合：trigger 交付不能建立單次放行', !!failing(aiCliKernelReleaseCreate, { runId: devStore.runId, action: 'merge', target: git(repo, 'branch', '--show-current'), confirm: delivered.slice(0, 10) }));
+  check('主動觸發整合：自動流程不會自己建立放行', !existsSync(join(devStore.dir, 'releases.jsonl')));
   clear();
   let badStore, badExecutor, failedPushes = 0;
   await invoke('trigger-dev', { launch: async store => {
@@ -2513,12 +2502,13 @@ const { aiCliKernelArchiveList: archiveList, aiCliKernelArchiveShow: archiveShow
     check('L5 歸檔 MCP：三工具與嚴格 schema', definitions.map(tool => tool.name).sort().join() === 'ai-cli_kernel_archive_done,ai-cli_kernel_archive_list,ai-cli_kernel_archive_show' && definitions.every(tool => tool.inputSchema.additionalProperties === false));
     check('L5 歸檔 MCP：list 與 show 共用 API', (await aiCliKernelHandleTool('ai-cli_kernel_archive_list', {})).length === 25 && (await aiCliKernelHandleTool('ai-cli_kernel_archive_show', { runId: crashed.store.runId })).archived.note === 'handoff-note');
     const target = runs[0].store;
-    const mcpMark = await aiCliKernelHandleTool('ai-cli_kernel_archive_done', { runId: target.runId, note: 'main-session' });
+    const targetPacket = await aiCliKernelHandleTool('ai-cli_kernel_archive_show', { runId: target.runId });
+    const mcpMark = await aiCliKernelHandleTool('ai-cli_kernel_archive_done', { runId: target.runId, note: 'main-session', journalSeq: targetPacket.evidence.journalSeq, releaseEvents: targetPacket.evidence.releaseEvents });
     check('L5 歸檔 MCP：done 只有本機標記且 status 立即減少', mcpMark.note === 'main-session' && (await aiCliKernelStatus()).pendingArchiveCount === 24);
     process.env.AI_CLI_WORKER = '1'; process.env.AI_CLI_ALLOW_NESTED = '1';
     const guardTarget = runs[1].store.runId;
     const apiGuard = await rejecting(archiveDone({ runId: guardTarget }));
-    const mcpGuard = await rejecting(aiCliKernelHandleTool('ai-cli_kernel_archive_done', { runId: guardTarget }));
+    const mcpGuard = await rejecting(aiCliKernelHandleTool('ai-cli_kernel_archive_done', { runId: guardTarget, journalSeq: 0, releaseEvents: 0 }));
     const cliGuard = await cli(['archive', 'done', guardTarget]);
     delete process.env.AI_CLI_WORKER; delete process.env.AI_CLI_ALLOW_NESTED;
     check('L5 歸檔邊界：worker 即使允許巢狀仍不能自行標記 API MCP CLI', apiGuard?.message.includes('worker') && mcpGuard?.message.includes('worker') && cliGuard.code === 1 && !existsSync(join(runs[1].store.dir, 'archived.json')));
@@ -2551,6 +2541,124 @@ const { aiCliKernelArchiveList: archiveList, aiCliKernelArchiveShow: archiveShow
   let history;
   const error = failing(() => { history = realWorkspace.commitHistory({ worktree: repo, baseCommit: base }); });
   check('L5 歸檔歷史：revision 不得被同名路徑或 Windows 長路徑誤判', !error && history?.join() === head, error?.message);
+}
+
+/* ---- L4、L5 的獨立稽核 ---- */
+{
+  // F1：檢查之後才撤銷或關掉。
+  const { aiCliKernelMandateSave: save, aiCliKernelMandateApprove: approve, aiCliKernelMandateRevoke: revoke, aiCliKernelTrigger: trigger, aiCliKernelTriggersSetEnabled: setEnabled } = await load('api');
+  const repo = newRepo();
+  const input = { goal: '檢查', workFolder: repo, template: 'develop', testCommand: 'node -e "0"', checkpoint: 'local' };
+  const fresh = () => { save({ name: 'recheck', input, maxRunsPerDay: 99 }); approve({ name: 'recheck', acknowledgeUnisolated: true }); setEnabled(true); };
+  let launches = 0;
+  const launch = async () => { launches += 1; };
+  fresh();
+  const revokedLate = await trigger({ name: 'recheck' }, { launch, beforeStart: () => revoke({ name: 'recheck' }) });
+  check('觸發：檢查之後才撤銷範本，一樣不開工', revokedLate.reason === 'mandate_unapproved' && launches === 0 && replayJournal(new RunStore(kernelRunDir(revokedLate.runId)).read()).state === 'cancelled', JSON.stringify(revokedLate));
+  fresh();
+  const disabledLate = await trigger({ name: 'recheck' }, { launch, beforeStart: () => setEnabled(false) });
+  check('觸發：檢查之後才關掉總開關，一樣不開工', disabledLate.reason === 'triggers_disabled' && launches === 0, JSON.stringify(disabledLate));
+  fresh();
+  const changedLate = await trigger({ name: 'recheck' }, { launch, beforeStart: () => save({ name: 'recheck', input: { ...input, goal: '偷改了目標' }, maxRunsPerDay: 99 }) });
+  check('觸發：檢查之後才改內容，一樣不開工', ['mandate_changed', 'mandate_unapproved'].includes(changedLate.reason) && launches === 0, JSON.stringify(changedLate));
+  fresh();
+  const { readActiveRun } = await load('journal');
+  let lockedRunExists = null;
+  await trigger({ name: 'recheck' }, { launch, beforeStart: () => { lockedRunExists = existsSync(join(kernelRunDir(readActiveRun()), 'contract.json')); } });
+  check('觸發：鎖指向的 run 一定存在，當掉時人才取消得了', lockedRunExists === true, lockedRunExists);
+  releaseActiveLock(readActiveRun()); // launch 是假的，沒有 runner 會釋放它。
+  setEnabled(false);
+}
+{
+  // F2：已經 commit、還沒上遠端的秘密。
+  const repo = newRepo();
+  bareOrigin(repo);
+  writeFileSync(join(repo, '.env'), 'not a real secret\n');
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', '把 .env 進版控了');
+  const { store, contract } = newDevRun({ repo });
+  const state = await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n'))));
+  check('回復點：已 commit 但還沒上遠端的秘密一樣不推', state === 'waiting_human' && view(store).reason === 'checkpoint_secret_risk' && view(store).detail.includes('.env'), `${state} ${view(store).reason} ${view(store).detail}`);
+}
+{
+  const repo = newRepo();
+  bareOrigin(repo);
+  writeFileSync(join(repo, '.env'), 'already public\n');
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', '早就推上去了');
+  git(repo, 'push', '-q', 'origin', 'HEAD:refs/heads/published');
+  const { store, contract } = newDevRun({ repo });
+  const state = await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n'))));
+  check('回復點：已經在遠端的不算新外流，不擋開工', state === 'completed', `${state} ${view(store).reason} ${view(store).detail}`);
+}
+{
+  const repo = newRepo();
+  bareOrigin(repo);
+  writeFileSync(join(repo, '.env.example'), 'KEY=\n');
+  const { store, contract } = newDevRun({ repo });
+  const state = await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n'))));
+  check('回復點：.env.example 這類範本不算秘密', state === 'completed', `${state} ${view(store).reason} ${view(store).detail}`);
+}
+{
+  const repo = newRepo();
+  const remote = bareOrigin(repo);
+  git(repo, 'config', 'push.followTags', 'true');
+  git(repo, 'tag', '-a', 'private-tag', '-m', '不該被推上去');
+  const { store, contract } = newDevRun({ repo });
+  await runKernelLoop(devDeps(store, contract, new FakeExecutor(writes('good\n'))));
+  check('回復點：push.followTags 不會多推 tag', git(remote, 'tag', '--list') === '' && git(remote, 'for-each-ref', '--format=%(refname)').includes('checkpoints'), git(remote, 'for-each-ref', '--format=%(refname)'));
+}
+{
+  // F3：檢查之後切了分支。
+  const repo = newRepo();
+  const target = git(repo, 'symbolic-ref', '--short', 'HEAD');
+  git(repo, 'checkout', '-q', '-b', 'deliver');
+  git(repo, 'commit', '-q', '--allow-empty', '-m', '交付');
+  const delivered = git(repo, 'rev-parse', 'HEAD');
+  git(repo, 'checkout', '-q', '-b', 'other', target);
+  const before = git(repo, 'rev-parse', 'HEAD');
+  const result = realWorkspace.releaseExecute({ repoRoot: repo }, { action: 'merge', target, remote: null, commit: delivered });
+  check('放行：檢查之後切了分支，不會合併到別的分支', result.status === 'failed' && git(repo, 'rev-parse', 'HEAD') === before, JSON.stringify(result));
+}
+{
+  // F4：看過之後才多了事件。
+  const { aiCliKernelHandleTool } = await load('mcp-tools');
+  const { store } = newRun();
+  store.append({ type: 'state', state: 'failed', reason: 'x', detail: 'x' });
+  const packet = await archiveShow({ runId: store.runId });
+  const seen = { journalSeq: packet.evidence.journalSeq, releaseEvents: packet.evidence.releaseEvents };
+  store.append({ type: 'quota_unknown', agent: 'codex' });
+  const refused = await rejecting(archiveDone({ runId: store.runId, seen }));
+  check('歸檔：看過之後才多的事件，不會跟著被標記', /新事件/.test(refused?.message ?? '') && !existsSync(join(store.dir, 'archived.json')), refused?.message);
+  process.env.AI_CLI_KERNEL = 'on';
+  const mcpRefused = await rejecting(aiCliKernelHandleTool('ai-cli_kernel_archive_done', { runId: store.runId }));
+  delete process.env.AI_CLI_KERNEL;
+  check('歸檔：MCP 一定要帶讀到的版本', /journalSeq/.test(mcpRefused?.message ?? ''), mcpRefused?.message);
+  const again = await archiveShow({ runId: store.runId });
+  const mark = await archiveDone({ runId: store.runId, seen: { journalSeq: again.evidence.journalSeq, releaseEvents: again.evidence.releaseEvents } });
+  check('歸檔：重新看過就能標記', mark.runId === store.runId && (await archiveShow({ runId: store.runId })).pendingArchive === false);
+}
+{
+  // F5：一筆壞掉不能拖垮整份清單。
+  const good = newRun();
+  good.store.append({ type: 'state', state: 'failed', reason: 'x', detail: 'x' });
+  const bad = newRun();
+  bad.store.append({ type: 'state', state: 'failed', reason: 'x', detail: 'x' });
+  writeFileSync(join(bad.store.dir, 'archived.json'), '{ 壞掉');
+  const list = await archiveList();
+  const badRow = list.find(packet => packet.runId === bad.store.runId);
+  check('歸檔：一筆損毀不影響其他 run，壞的那筆也留在清單上', list.some(packet => packet.runId === good.store.runId) && badRow?.effectiveState === 'unreadable', badRow?.goal);
+  rmSync(join(bad.store.dir, 'archived.json'));
+}
+{
+  // 真實 cleanup 刪到一半失敗：git 取消登記了，資料夾還在。
+  const { spec, repo } = newDevRun();
+  realWorkspace.prepare(spec);
+  git(repo, 'worktree', 'remove', spec.worktree);
+  mkdirSync(spec.worktree, { recursive: true });
+  writeFileSync(join(spec.worktree, 'locked.txt'), '刪不掉的檔案');
+  const result = cleanupWorkspace(spec);
+  check('清理：刪到一半的 worktree 會明確回報，分支照常清', result.worktreeRemoved === false && result.branchRemoved === true && result.detail.includes('自己刪除') && existsSync(join(repo, 'README.md')), JSON.stringify(result));
 }
 
 /* ---- 命名與依賴方向 ---- */

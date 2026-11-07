@@ -26,6 +26,17 @@
 
 ### 修復
 
+- **`ai-cli_kernel`：`develop` 不再因為主目錄或 ref 動過而卡在交付前。** 真實走一圈時，自動 run 做完、測試也過了，卻因為 planner 的 SessionStart hook 在主目錄寫了 `.planner-id` 而停下來等人，還佔著鎖。使用者白天在主目錄工作時也會這樣。成果只在分支上，停下來救不回已發生的事，所以改成寫進報告、裁決和狀態說明，收下前看得到。派下一個 worker 之前的 ref 檢查保留。（Claude Opus 5.5）
+
+- **`ai-cli_kernel` L4、L5 的獨立稽核**：由 kernel 派 gpt-6.1-sol（effort high）唯讀稽核程式碼，都是 gpt-6.1-sol 自己寫的。找到 5 項，對照原始碼都成立，全部修了。（Claude Opus 5.5）
+  1. 觸發檢查之後才被撤銷、關閉或過期，舊的判斷仍會開工，撤銷回報成功也沒用 → 開工前最後再查一次。
+  2. 回復點的秘密檢查只看沒 commit 的改動，已經 commit、還沒上遠端的 `.env` 會被推上去 → 檢查所有還沒上遠端的 commit。`.env.example` 這類範本不算。
+  3. merge 放行檢查之後若切了分支，會合併到人沒同意的分支，因為 merge 永遠作用在目前分支 → 動手前最後確認一次。
+  4. 標記已歸檔會連帶蓋掉看過之後才新增的事件 → MCP 要帶讀到的版本，對不上就拒絕。
+  5. 當機時機不巧，`active.lock` 會指向不存在的 run，連 cancel 都救不了 → 先建 run 再拿鎖。一筆紀錄損毀也不再拖垮整份待歸檔清單。
+  - 稽核列為尚待確認，查證後也修了：回復點的 push 沒有擋 `push.followTags`。
+- **`ai-cli_kernel`：`cleanup` 刪到一半失敗時給出明確訊息。** git 已經取消登記、資料夾還在時，git 會往上找到別的 repo（家目錄也可能是），`assertOwnWorktree` 雖然正確地拒絕了，但訊息看不懂，分支也沒清。實際發生在 L5 的開發 run。（Claude Opus 5.5）
+
 - **`ai-cli_kernel` L5 E2E 用量斷言**：修正仍把快取算入 input 的舊測試假設；正常 CLI／runner 路徑精確核對未快取 input 1200、cached 800、output 200 與未知用量 0，補上 status 計入快取的對應突變。產品實作與等待時間不變；實際驗證及尚待確認見 L5 驗收索引最後一節。（@moerasermax；Codex）
 
 - **`ai-cli_kernel`：token 預算改算未快取的部分。** 長任務每次工具呼叫都重送上下文，把快取算進去會高估幾十倍。實測第一個真實開發任務，一步 767 萬 input 裡有 742 萬是快取，週額度只動了約 1%，卻把 800 萬的預算用完，測試都還沒跑就停了。（Claude Opus 5.5）
