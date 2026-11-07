@@ -3387,7 +3387,7 @@
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/loop.ts",
     "from": "passed: result.exitCode === 0 && !result.timedOut && !moved",
-    "to": "passed: true",
+    "to": "passed: !result.timedOut && !moved",
     "expect": "模型說做完了但測試沒過，不算完成"
   },
   {
