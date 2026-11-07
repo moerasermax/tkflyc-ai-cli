@@ -2,7 +2,7 @@
 //
 // 為什麼三個入口都要跑：4.1.2 之前 `ai-cli mcp` 這條路徑一連上就自殺
 // （runMcpServer 啟動完就 resolve，bin/ai-cli.ts 隨即 process.exit），
-// 但這支腳本當時硬編 `C:\Users\Moera\...\dist\server.js`，只測得到其中一個入口，
+// 但這支腳本當時硬編 `<使用者家目錄>\...\dist\server.js`，只測得到其中一個入口，
 // 於是那個 bug 從框架初版活到 4.1.1 都沒被抓到。典型的假綠燈。
 // 路徑一律相對本檔解析，不要再寫死任何機器上的絕對路徑。
 import '../tools/stubs/catalog-test-env.mjs';

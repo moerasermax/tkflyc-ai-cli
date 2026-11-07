@@ -928,7 +928,8 @@ gpt-6-astra medium 回一個字約 **5.7 秒**，gpt-5.4-mini low 約 **6.5 秒*
 
 本專案起初是 [mkXultra/ai-cli-mcp](https://github.com/mkXultra/ai-cli-mcp)（MIT）的
 clone，而後者又衍生自 Peter Steinberger 的 `claude-code-mcp`（MIT）。
-這是架構上刻意分歧的 fork；上游目前的維護狀態請看其 repository。要原版請用
+**上游沒有停止維護**——最新版 `3.1.0` 發佈於 2026-09-30（2026-11-07 查證）。
+這不是接手一個沒人管的專案，是架構上刻意分歧的 fork。要原版請用
 [`ai-cli-mcp`](https://www.npmjs.com/package/ai-cli-mcp)。
 完整歸屬與保留的 MIT 條款見 [NOTICE](NOTICE)。
 

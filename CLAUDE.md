@@ -21,19 +21,19 @@ Peter Steinberger 的 claude-code-mcp（MIT）。分歧點在架構：上游把�
 
 ---
 
-## 現況（7.0.0 文件準備，2026-11-07）
+## 現況（2026-11-07）
 
 | 項目 | 值 |
 | --- | --- |
 | GitHub | `moerasermax/tkflyc-ai-cli` — **2026-09-09 改名**，舊名是 `ai-cli-mcp` |
-| npm | `@tkflyc/ai-cli-mcp` — 套件既有版本已公開；**7.0.0 尚未發佈到 npm** |
-| 版本 | `7.0.0` — kernel 已合併於目前程式樹（含 L1、develop、L4、L5），版本文件準備中；本次未打 tag、未 publish |
+| npm | `@tkflyc/ai-cli-mcp` — **已公開發佈**，最新仍是 `6.9.1`；**`7.0.0` 尚未發佈** |
+| 版本 | `7.0.0`（`package.json`）— 2026-11-07 定版號，**還沒打 tag、還沒發佈**，tag 等真的發 npm 時才打（紅線第 4 條）；內容是 `ai-cli_kernel` 加 6.9.1 之後的修正，相容性見 CHANGELOG。npm 上最新的是 `6.9.1` — 2026-10-20 發佈（codex 唯讀 job 可續接；Windows runner 改由 launcher 啟動、agy 可接回；Codex 額度改走 app-server RPC；gpt-5.5 退役）。前一版 `6.9.0`（2026-10-12，同專案自動接管）。GitHub Release 中英並存。**npm 上沒有 `6.2.0`**：那版只 bump 了 `package.json` 與 CHANGELOG，沒打 tag、沒發佈，內容僅透過 git 自動更新進各機器 |
 | 授權 | **Apache-2.0** — 2026-09-09 從 MIT 改的，附 `NOTICE` |
 | 主分支 | `master`（push 到 master 等同部署，所有機器會自動拉） |
-| CI | 設定為 Windows / Linux / macOS × Node 20.19、22，三平台皆為閘門；不是本次已執行或已通過的結果，kernel 的 Linux、macOS 尚未實測 |
-| 本機路徑 | `<repo>`（以目前 checkout 為準） |
+| CI | Windows / Linux / macOS × Node 20.19、22 — **三個平台都是閘門**。kernel 的真實 CLI 只在一台 Windows 實測過 |
+| 本機路徑 | 目錄名還是舊的 `ai-cli-mcp-source`，不影響任何東西 |
 
-規模（2026-11-07 靜態統計）：`src/` 遞迴共 65 個 `.ts` 檔案；`tests/` 直層共 35 個 `verify-*.mjs` 腳本檔。這是檔案數，不是測試案例數或通過數；本次未執行 npm test。`npm test` 跑哪幾支以 `tools/run-tests.mjs` 的
+規模：`src/` 65 個 `.ts`、17,431 行（2026-11-07）；驗證腳本都在 `tests/`。`npm test` 跑哪幾支以 `tools/run-tests.mjs` 的
 `TESTS` 清單為準，刻意不進的列在同檔 `EXCLUDED`（`verify-e2e.mjs` 會真的燒額度、`verify-strict-behaviour.mjs`
 屬手動輔助）；兩邊都沒列的 `verify-*.mjs`，runner 開跑前就報錯。
 
@@ -43,15 +43,16 @@ Peter Steinberger 的 claude-code-mcp（MIT）。分歧點在架構：上游把�
 
 ### 1. `NOTICE` 不可刪，也不可移出 `package.json` 的 `files`
 
-它帶著兩位上游作者的著作權聲明、保留的 MIT 條款，以及歷史歸屬量測：
-**以當時 1,980 行實質原始碼對上游 v2.23.0（2026-09-06），299 行（約 15%）相同**，集中在 MCP 工具面與
-CLI/MCP 入口。這是 NOTICE 保留的歷史統計，不是目前原始碼規模或本次重新量測的結果。放在 repo 裡不算數——`files` 沒列它，它就不會隨 npm 套件散布，
+它帶著兩位上游作者的著作權聲明、保留的 MIT 條款，以及實測數字：
+**1,980 行實質原始碼裡有 299 行（約 15%）與上游相同**，集中在 MCP 工具面與
+CLI/MCP 入口。放在 repo 裡不算數——`files` 沒列它，它就不會隨 npm 套件散布，
 歸屬聲明等於沒做。
 
-### 2. 不要未查證就斷言上游停更
+### 2. 不要寫「上游已停止更新」
 
-**不要從未追蹤推論上游維護狀態。** 2026-09-09 曾在 README（中英）、CHANGELOG
-與兩篇 Release notes 錯述上游狀態，已更正；當前狀態應依上游原文重新查證。
+**上游活著。** 實測：npm `2.23.0` 發於 2026-09-06、GitHub 最後推送 2026-09-07、
+25 stars、週下載約 680 次；2026-10-12 再查 npm 已到 `3.1.0`（2026-09-30 發佈）；2026-11-07 再查仍是 `3.1.0`，GitHub 最後推送 2026-09-30，未封存。這句話 2026-09-09 曾被寫進 README（中英）、CHANGELOG
+與兩篇 Release notes，全部是錯的，已更正。
 
 它糟在**驗證成本極低**——任何人點進上游 repo 三十秒就會看到——所以同時毀掉
 可信度和歸屬聲明的誠意。要寫上游狀態就去查，不要從「我沒在追蹤它」推論。

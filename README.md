@@ -680,8 +680,9 @@ a completion record. The output remains available and the outcome is unknown.
 
 This project began as a clone of [mkXultra/ai-cli-mcp](https://github.com/mkXultra/ai-cli-mcp)
 (MIT), which is itself derived from Peter Steinberger's `claude-code-mcp` (MIT).
-This fork deliberately diverges on architecture; see the upstream repository for
-its current maintenance status. If you want the original, use
+**Upstream is not abandoned** — its latest release is `3.1.0`, published on 2026-09-30
+(checked 2026-11-07). This is not a rescue of an abandoned project; it is a fork that
+diverged on architecture. If you want the original, use
 [`ai-cli-mcp`](https://www.npmjs.com/package/ai-cli-mcp). See [NOTICE](NOTICE)
 for the full attribution and the retained MIT terms.
 

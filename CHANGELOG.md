@@ -26,6 +26,7 @@
 - updater 待辦由新版啟動重算，只有 run／models 回應送到呼叫端 AI 才記為送達；stderr／背景通知不算。未送達範圍跨更新與回滾保留，累積去重，check 不覆蓋，git 暫時失敗保留；已送達且起點 commit 明確不存在才清除（238a6f6、710a557、8290e1d、5459434）。更新後請重開 server，再依 updateNotice 處理。新舊 server 並存時仍有下列歷史記錄的過渡限制，應將全機 server 都重開到新版。已被舊版清掉的面板提問無法補回，需手動檢查。
 - 本次更新範圍含 plugins/ai-cli-jobs/ 變動時，updater 依本機安裝紀錄問是否安裝／更新面板；未知紀錄不冒稱未安裝，列出過舊副本，無法解析的版本不比較（38937c6、5ac89bd）。它只提出操作，須使用者同意才執行。面板 0.1.5 的表格和全機 job 要每台電腦各自更新 marketplace、更新 ai-cli-jobs，再重開 Claude Code；git pull 與 npm 更新不會替換 Claude Code cache 中的外掛。
 - 非 src 的配套也有變動：選用 statusLine 腳本直接讀全機 job store，需自行設定啟用；SessionStart 派工政策 hook 更新候選模型、context 停止線，並更正 percentUsed 是已用比例（85cd707、2709ac6、65e1e9c）。這些不是 kernel 工具開關造成的行為。面板與狀態列不隨 npm 套件散布。
+- 裝了 SessionStart 派工政策 hook 的機器要重新複製一次：`cp tools/hooks/aicli-model-policy.py ~/.claude/scripts/aicli_model_policy.py`。第 12 條改成通用說法（拿掉私人專案名稱與路徑，放行改由各專案自己的 `CLAUDE.md` 明文記載），不同步的話 session 開頭會警告內容與版控不一致。
 
 **確實不需操作的部分：** 保持有效 providers.json 且不需提高上限者，max_tool_loops 可省略，維持 30；BOM 修正不需手動轉碼。未使用 kernel 者不需啟用其工具，既有 MCP 參數不需遷移；未使用面板／狀態列者也不需安裝它們。不能因此概括為所有使用者都不用操作。
 
@@ -33,6 +34,7 @@
 
 ### 文件與版本準備
 
+- 拿掉派工政策第 12 條的私人專案名稱與路徑、`tests/verify-mcp.mjs` 註解的使用者名稱。舊內容仍留在 git 歷史，沒有改寫。README 的上游狀態重新查證：最新版 `3.1.0`（2026-09-30）。`SECURITY.md` 補上 6.9.x：7.0.0 上 npm 之前，npm 最新的仍是它。（Claude Opus 5.5）
 - 中英文 README 同步啟用方式、權限邊界與整合影響，手冊使用 GitHub 完整連結以適用 npm 閱讀；教學補安裝前提、候選記憶與通用歸檔流程。技術手冊修正未快取 input 預算、工具表、階段狀態與驗收連結；歷史驗收檔加快照註記。清除個人絕對路徑與私人討論連結，SECURITY 僅列目前 7.x 開發線支援、無舊版安全回補；package 與 lockfile 根版本同步為 7.0.0。僅作靜態文件核對，不宣稱重跑歷史測試。（Codex）
 
 ### 新增
@@ -1519,9 +1521,10 @@ repository 正規化範圍的 7 項；突變 79→81。
 
 ### 修正（事實錯誤：上游並未停更）
 
-- **README（中英）先前未經查證斷言上游停更，這是錯的。**
+- **README（中英）先前寫「上游已停止更新 / no longer being updated」，這是錯的。**
   實測 mkXultra/ai-cli-mcp：npm `2.23.0` 發佈於 **2026-09-06**、GitHub 最後推送
-  **2026-09-07**。這些是當時的查證背景，不是目前維護狀態的驗證。
+  **2026-09-07**、25 stars / 9 forks / 12 open issues、**npm 週下載約 680 次、
+  月下載 1,597 次**。它活得好好的。
 
   錯誤來源是把「我沒在追蹤它」當成「它沒在動」，然後直接寫進文件而沒有查證。
   這種話最糟的地方在於**驗證成本極低**——任何人點進上游 repo 三十秒就會看到，
@@ -2229,7 +2232,7 @@ Antigravity 可用；**Kiro 沒額度**（CLI 回 `Not logged in`）、**Forge �
   另外兩個入口（`dist/server.js`、`dist/bin/ai-cli-mcp.js`）之所以一直沒事，
   只是因為它們沒有呼叫 `process.exit`，不是設計使然。（Claude）
 - **`verify-mcp.mjs` 從來只測得到三個入口中的一個**，所以上面那個 bug 活了四個版本
-  都沒被抓到 —— 它硬編 `<repo>\dist\server.js`（另一台機器的絕對路徑）。
+  都沒被抓到 —— 它硬編 `<使用者家目錄>\...\dist\server.js`（另一台機器的絕對路徑）。
   改為相對 `import.meta.url` 解析，並且**三個入口各跑一次完整 smoke test**
   （handshake → 11 個工具 → models → doctor → list_processes）。（Claude）
 - **突變 harness 自己的假綠燈**：`tools/mutation-test.mjs` 寫死只跑
@@ -2532,8 +2535,8 @@ Antigravity 可用；**Kiro 沒額度**（CLI 回 `Not logged in`）、**Forge �
 - Windows 上優先解析 `.cmd`/`.exe` 而非 extensionless shim。
 - 移除已壞掉的 gemini 殘留；usage 外掛路徑改由 `AI_CLI_USAGE_PLUGIN_BIN` 環境變數設定。
 
-[Unreleased]: https://github.com/moerasermax/tkflyc-ai-cli/compare/28e56c4d47...HEAD
-[7.0.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.9.1...28e56c4d47
+[Unreleased]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.9.1...HEAD
+[7.0.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.9.1...master
 [6.5.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.4.1...v6.5.0
 [6.4.1]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.4.0...v6.4.1
 [6.4.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.3.0...v6.4.0
