@@ -55,6 +55,8 @@
 
 ### 修復
 
+- **`ai-cli_kernel`：路徑比對沒有先轉成真實路徑，develop 在 Windows 可能開不了工，macOS 上 run 會中斷。** 三平台 CI 第一次跑才抓到。Windows 路徑含 8.3 短檔名（`RUNNER~1`）時，`realpathSync` 不會展開，和 git 回的長檔名比不上，develop 一開工就 `workspace_failed`；改用 `realpathSync.native`。工作目錄經過符號連結時（macOS 的 `/tmp`、`/var`，或連結出去的專案資料夾），記憶範圍會算出 `..`，整個 run 中斷；改由 git 的 `--show-prefix` 給。（Claude Opus 5.5）
+
 - **`ai-cli_kernel`：run id 撞號時會蓋掉別人的委任書。** id 只有秒加 2 bytes 亂數，`RunStore.create` 又不檢查 run 是否已存在，撞到就覆寫委任書、接著寫同一份日誌。是最後一次 `npm test` 偶發失敗才查出來的：日誌裡有兩筆 `created`。真實使用機率低，但委任書決定 worker 的權限範圍，不能賭機率。改成建立時原子地建目錄，已存在就拒絕；產生 id 時也避開已存在的。（Claude Opus 5.5）
 
 - **`ai-cli_kernel`：`develop` 不再因為主目錄或 ref 動過而卡在交付前。** 真實走一圈時，自動 run 做完、測試也過了，卻因為 planner 的 SessionStart hook 在主目錄寫了 `.planner-id` 而停下來等人，還佔著鎖。使用者白天在主目錄工作時也會這樣。成果只在分支上，停下來救不回已發生的事，所以改成寫進報告、裁決和狀態說明，收下前看得到。派下一個 worker 之前的 ref 檢查保留。（Claude Opus 5.5）

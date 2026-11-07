@@ -4989,5 +4989,13 @@
     "from": "if (!existsSync(kernelRunDir(runId))) return runId;",
     "to": "return runId;",
     "expect": "產生 run id 時會避開已存在的"
+  },
+  {
+    "name": "kernel：路徑 記憶範圍不用 git 的 prefix",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/memory.ts",
+    "from": "'--show-prefix'",
+    "to": "'--show-toplevel'",
+    "expect": "工作目錄經過符號連結時"
   }
 ]
