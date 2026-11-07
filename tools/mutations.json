@@ -3335,11 +3335,11 @@
     "expect": "沒結論的結果不能蓋掉 PASS"
   },
   {
-    "name": "kernel develop：唯讀範本也能派寫入 worker",
+    "name": "kernel develop：複驗 唯讀範本也能派寫入 worker",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/executor.ts",
-    "from": "if (!contract.develop) throw new Error(`範本 ${contract.template} 不能派會寫檔的 worker`);",
-    "to": "",
+    "from": "if (!contract.develop) throw new Error(`範本 ${contract.template} 不能派會寫檔的 worker`);\n      const within = relative(contract.develop.worktree, cwd);",
+    "to": "const within = relative(contract.develop?.worktree ?? cwd, cwd);",
     "expect": "唯讀範本的委任書不可能派出會寫檔的 worker"
   },
   {
@@ -3495,11 +3495,11 @@
     "expect": "明示未隔離的 run 不靠探針放行"
   },
   {
-    "name": "kernel develop：可以動到使用者的主目錄",
+    "name": "kernel develop：複驗 可以動到使用者的主目錄",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/workspace.ts",
     "from": "function assertOwnWorktree(spec: DevelopSpec): void {",
-    "to": "function assertOwnWorktree(spec: DevelopSpec): void {\n  if (spec) return;",
+    "to": "function assertOwnWorktree(spec: DevelopSpec): void {\n  if (spec.worktree) return;",
     "expect": "還原工作目錄的操作拒絕碰主目錄"
   },
   {
@@ -4919,11 +4919,11 @@
     "expect": "L5 歸檔歷史：revision 不得被同名路徑"
   },
   {
-    "name": "kernel 稽核：開工前不再確認授權",
+    "name": "kernel 稽核：複驗 開工前不再確認授權",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/triggers.ts",
     "from": "if (revoked) {",
-    "to": "if (false as boolean) {",
+    "to": "if (revoked && (false as boolean)) {",
     "expect": "檢查之後才撤銷範本"
   },
   {
@@ -4951,11 +4951,11 @@
     "expect": "檢查之後切了分支"
   },
   {
-    "name": "kernel 稽核：標記歸檔不比對版本",
+    "name": "kernel 稽核：複驗 標記歸檔不比對版本",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/api.ts",
     "from": "if (input.seen && (input.seen.journalSeq !== packet.evidence.journalSeq || input.seen.releaseEvents !== packet.evidence.releaseEvents)) {",
-    "to": "if (false as boolean) {",
+    "to": "if (input.seen && (false as boolean)) {",
     "expect": "看過之後才多的事件"
   },
   {
