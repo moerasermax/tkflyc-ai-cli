@@ -12,6 +12,7 @@ const { DashboardController, perform } = await load('dashboard');
 const view = await load('dashboard-view');
 const terminal = await load('dashboard-terminal');
 const { runKernelCli } = await load('cli');
+const { createDashboardEffects, dashboardActions } = await load('dashboard-api');
 let failures = 0, checks = 0;
 async function test(name, fn) {
   checks++;
@@ -44,6 +45,56 @@ function fixture(d = detail()) {
   return { effects, calls, set detail(value) { current = value; }, get detail() { return current; }, set snap(value) { snap = value; }, get snap() { return snap; } };
 }
 const writes = calls => calls.filter(c => c === 'create' || Array.isArray(c) && ['execute', 'release'].includes(c[0]));
+
+await test('正式 adapter 直接組裝 API 參數、查 git、時間及失敗結果', async () => {
+  const calls = [], gitCalls = [];
+  let cleanup = { worktreeRemoved: true }, releaseStatus = 'succeeded';
+  const raw = { runId: id, effectiveState: 'completed', template: 'develop', goal: 'adapter', develop: { repoRoot: '/repo', branch: 'feature', verifiedCommit: commit } };
+  const kernel = {
+    async aiCliKernelStatus(args) { calls.push(['status', args]); return args ? raw : { active: { runId: id }, pendingArchiveCount: 3, runs: [raw] }; },
+    aiCliKernelTriggersEnabled() { return false; },
+    async aiCliKernelResult(args) { calls.push(['result', args]); return { report: '報告全文' }; },
+    async aiCliKernelApprove(args) { calls.push(['approve', args]); },
+    async aiCliKernelCancel(args) { calls.push(['cancel', args]); },
+    async aiCliKernelRollback(args) { calls.push(['rollback', args]); },
+    async aiCliKernelCleanup(args) { calls.push(['cleanup', args]); return cleanup; },
+    async aiCliKernelArchiveDone(args) { calls.push(['archive', args]); },
+    aiCliKernelTriggersSetEnabled(on) { calls.push(['triggers', on]); },
+    async aiCliKernelReleaseCreate(args) { calls.push(['create', args]); return { id: releaseId }; },
+    aiCliKernelReleaseRun(args) { calls.push(['run', args]); return { status: releaseStatus, detail: '人工對帳' }; },
+  };
+  const effects = createDashboardEffects(kernel, async (cwd, args) => { gitCalls.push([cwd, args]); return args[0] === 'branch' ? 'master' : 'origin/master'; }, () => 12345);
+  const snap = await effects.snapshot(); assert.equal(snap.at, 12345); assert.equal(snap.active, id); assert.equal(snap.pendingArchive, 3);
+  const d = await effects.detail(id); assert.equal(d.develop.currentBranch, 'master'); assert.equal(d.develop.defaultBranch, 'master');
+  assert.deepEqual(gitCalls, [['/repo', ['branch', '--show-current']], ['/repo', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']]]);
+  assert.equal(await effects.report(id), '報告全文');
+  for (const d of [detail('awaiting_approval'), detail('awaiting_approval', false), detail('running'), detail()]) {
+    for (const action of rules.actionsFor(d).filter(a => !a.isRelease)) await effects.execute(action);
+  }
+  await effects.execute(rules.triggerAction(false)); await effects.execute(rules.triggerAction(true));
+  for (const expected of [
+    ['approve', { runId: id, acknowledgeUnisolated: true }], ['approve', { runId: id, acknowledgeUnisolated: false }],
+    ['cancel', { runId: id }], ['rollback', { runId: id, apply: true }], ['cleanup', { runId: id }],
+    ['archive', { runId: id, note: '由控制面板標記' }], ['triggers', true], ['triggers', false],
+  ]) assert.ok(calls.some(call => JSON.stringify(call) === JSON.stringify(expected)), JSON.stringify(expected));
+  for (const action of rules.actionsFor(detail()).filter(a => a.isRelease)) await effects.createRelease(action);
+  assert.deepEqual(calls.filter(c => c[0] === 'create').map(c => c[1]), [
+    { runId: id, action: 'merge', target: 'master', confirm: commit.slice(0, 10), allowDefaultBranch: false },
+    { runId: id, action: 'push', target: 'feature', confirm: commit.slice(0, 10), allowDefaultBranch: false },
+    { runId: id, action: 'push', target: 'master', confirm: commit.slice(0, 10), allowDefaultBranch: true },
+  ]);
+  await effects.runRelease(releaseId);
+  for (const status of ['failed', 'needs_reconcile', 'running']) {
+    releaseStatus = status; await assert.rejects(effects.runRelease(releaseId), /人工對帳/);
+  }
+  assert.equal(calls.filter(c => c[0] === 'run').length, 4);
+  cleanup = { worktreeRemoved: false, detail: '尚未合併' };
+  await assert.rejects(effects.execute({ id: 'cleanup', runId: id }), /尚未合併/);
+  await assert.rejects(effects.execute({ id: 'unknown', runId: id }), /不認識/);
+  const unknown = await createDashboardEffects(kernel, async () => null).detail(id);
+  assert.equal(unknown.develop.currentBranch, null); assert.equal(unknown.develop.defaultBranch, null);
+  assert.deepEqual(rules.actionsFor(unknown).filter(a => a.isRelease).map(a => a.id), ['push-branch']);
+});
 
 await test('操作規則：重要狀態、文字與 develop 承認參數', () => {
   for (const state of ['awaiting_approval', 'waiting_human', 'interrupted']) {
@@ -164,6 +215,23 @@ await test('chooseRun 手動固定、新開工自動追蹤、確認期間固定�
   f.snap.active = null; await c.refresh(); assert.equal(c.interval, 30000);
   assert.equal(rules.chooseRun(id, true, id, { ...f.snap, active: other }).runId, other);
   assert.equal(rules.chooseRun(id, true, id, { ...f.snap, error: 'fail' }).runId, id);
+});
+await test('j k f 導覽與 PgUp PgDn 能讀完整報告尾端，失敗保留舊詳情', async () => {
+  const f = fixture(detail('running')); f.snap.active = id;
+  f.snap.runs.push({ runId: other, state: 'running', label: '', goal: 'second' });
+  const c = new DashboardController(f.effects); await c.refresh();
+  await c.key('j'); assert.equal(c.selected, other);
+  await c.key('k'); assert.equal(c.selected, id);
+  await c.key('j'); await c.key('f'); assert.equal(c.selected, id);
+  const old = c.detail; f.effects.detail = async () => { throw new Error('detail offline'); };
+  await c.key('g'); assert.equal(c.detail, old); assert.ok(c.snapshot.error.includes('detail offline'));
+  assert.ok(view.renderDashboard(c, 120, 30).text.includes('detail offline'));
+  await c.key('r');
+  for (let n = 0; n < 100; n++) { const frame = view.renderDashboard(c, 80, 24); c.scroll = frame.scroll; await c.key('pagedown', frame.pageSize); }
+  const end = view.renderDashboard(c, 80, 24); c.scroll = end.scroll;
+  assert.ok(end.text.includes('報告 199')); const bottom = c.scroll;
+  await c.key('pageup', end.pageSize); assert.ok(c.scroll < bottom);
+  await c.key('escape'); assert.equal(c.report, null);
 });
 await test('刷新失敗保留資料與成功時間，單飛且舊結果不覆蓋新選擇', async () => {
   const f = fixture(), c = new DashboardController(f.effects);
@@ -356,6 +424,21 @@ await test('new-tab 使用完整參數陣列、含空白入口與工作目錄、
   const relative = { ...config, entry: 'entry with spaces.js' };
   assert.equal(terminal.newTabArgs(relative).at(-3), join(config.cwd, relative.entry));
 });
+await test('原生 launcher 無 shell、stdio ignore、收到 wt 結束即返回而不等待面板', async () => {
+  for (const mode of ['success', 'error', 'signal', 'nonzero']) {
+    const calls = [], child = new EventEmitter();
+    const launcher = terminal.nativeLaunch((...args) => { calls.push(args); return child; });
+    let settled = false;
+    const flight = launcher.launch('path with spaces/wt.exe', ['new-tab', '--', 'node path'], ROOT);
+    flight.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise(setImmediate); assert.equal(settled, false);
+    assert.deepEqual(calls, [['path with spaces/wt.exe', ['new-tab', '--', 'node path'], { cwd: ROOT, shell: false, windowsHide: true, stdio: 'ignore', timeout: 5000 }]]);
+    if (mode === 'error') { child.emit('error', new Error('spawn')); await assert.rejects(flight, /spawn/); }
+    else if (mode === 'signal') { child.emit('close', null, 'SIGTERM'); await assert.rejects(flight, /SIGTERM/); }
+    else { child.emit('close', mode === 'nonzero' ? 7 : 0, null); assert.equal(await flight, mode === 'nonzero' ? 7 : 0); }
+    assert.equal(settled, true);
+  }
+});
 await test('new-tab worker 不繞過，非 Windows Terminal、wt 缺失、入口缺失與啟動失敗', async () => {
   for (const mode of ['worker','linux','outside-wt','missing-wt','missing-entry','error','nonzero']) {
     let launched = 0, searched = 0; const out = [], errors = [];
@@ -375,6 +458,7 @@ await test('真實 CLI actions JSON 與 dashboard launcher 檢查次序', async 
   let stdout = '', stderr = ''; const io = { stdout:s=>{stdout+=s;}, stderr:s=>{stderr+=s;} };
   assert.equal(await runKernelCli(['actions',created.runId,'--json'],io),0);
   const actions = JSON.parse(stdout); assert.equal(actions[0].id,'approve');
+  assert.deepEqual(actions, await dashboardActions(created.runId));
   for (const field of ['id','label','summary','warning','args','commit','isRelease']) assert.ok(field in actions[0]);
   stdout = ''; assert.equal(await runKernelCli(['actions',created.runId,'--json','value'],io),1);
   for (const args of [['dashboard'],['dashboard','--new-tab']]) {
@@ -384,6 +468,11 @@ await test('真實 CLI actions JSON 與 dashboard launcher 檢查次序', async 
   }
   const piped = spawnSync(process.execPath,[join(ROOT,'dist/bin/ai-cli.js'),'kernel','dashboard'], { cwd:ROOT, env:{...process.env,AI_CLI_WORKER:''},encoding:'utf8',timeout:15000 });
   assert.equal(piped.status,1); assert.ok(piped.stderr.includes('TTY'));
+  // 父行程為 pipe 時應到達 launcher 的環境檢查，不可先被互動 TTY 閘門攔下。
+  // 清空 WT_SESSION 保證這個測試在任何平台都不會真的開新分頁。
+  const tab = spawnSync(process.execPath,[join(ROOT,'dist/bin/ai-cli.js'),'kernel','dashboard','--new-tab'], { cwd:ROOT, env:{...process.env,AI_CLI_WORKER:'',WT_SESSION:''},encoding:'utf8',timeout:15000 });
+  assert.equal(tab.status,2); assert.ok(tab.stderr.includes('Windows Terminal'));
+  assert.ok(tab.stdout.includes('ai-cli kernel dashboard')); assert.ok(!tab.stderr.includes('需要 stdin'));
 });
 console.log(`dashboard: ${checks - failures}/${checks} PASS`);
 process.exitCode = failures ? 1 : 0;

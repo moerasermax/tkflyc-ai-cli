@@ -38,7 +38,7 @@ export async function launchDashboardTab(config: DashboardLaunch, io: { stdout(t
     io.stdout('Windows Terminal 已接受新分頁啟動要求；新分頁會檢查 TTY 並顯示 dashboard。\n'); return 0;
   } catch (error) { io.stderr(`無法啟動 dashboard 新分頁：${message(error)}\n`); return 1; }
 }
-export function nativeLaunch(): DashboardLaunch {
+export function nativeLaunch(startProcess: typeof spawn = spawn): DashboardLaunch {
   return {
     platform: process.platform, env: process.env, executable: process.execPath, execArgs: [...process.execArgv], entry: process.argv[1], cwd: process.cwd(),
     findWt() {
@@ -51,7 +51,7 @@ export function nativeLaunch(): DashboardLaunch {
     },
     launch(file, args, cwd) {
       return new Promise((done, reject) => {
-        const child = spawn(file, args, { cwd, shell: false, windowsHide: true, stdio: 'ignore', timeout: 5_000 });
+        const child = startProcess(file, args, { cwd, shell: false, windowsHide: true, stdio: 'ignore', timeout: 5_000 });
         child.once('error', reject);
         child.once('close', (code, signal) => signal ? reject(new Error(`wt.exe 被 ${signal} 終止`)) : done(code ?? 1));
       });

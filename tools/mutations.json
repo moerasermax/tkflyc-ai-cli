@@ -5101,5 +5101,45 @@
     "from": "const worker = dashboardRefusal(config.env.AI_CLI_WORKER, true, true);",
     "to": "const worker = dashboardRefusal(undefined, true, true);",
     "expect": "new-tab worker 不繞過"
+  },
+  {
+    "name": "dashboard create 結果不明重試",
+    "file": "src/ai-cli_kernel/dashboard.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "const created = await effects.createRelease(action);",
+    "to": "const created = await effects.createRelease(action).catch(() => effects.createRelease(action));",
+    "expect": "release create 先於 run"
+  },
+  {
+    "name": "dashboard run 結果不明重試",
+    "file": "src/ai-cli_kernel/dashboard.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "return effects.runRelease(id);",
+    "to": "return effects.runRelease(id).catch(() => effects.runRelease(id));",
+    "expect": "release create 先於 run"
+  },
+  {
+    "name": "dashboard 放行未成功也報成功",
+    "file": "src/ai-cli_kernel/dashboard-api.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "if (result.status !== 'succeeded') throw",
+    "to": "if (false) throw",
+    "expect": "正式 adapter 直接組裝 API 參數"
+  },
+  {
+    "name": "dashboard 確認未全顯示也放行",
+    "file": "src/ai-cli_kernel/dashboard.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "if (key !== 'y' || !confirmationVisible) return;",
+    "to": "if (key !== 'y') return;",
+    "expect": "確認不可見時 y 不放行"
+  },
+  {
+    "name": "dashboard launcher 開啟 shell",
+    "file": "src/ai-cli_kernel/dashboard-terminal.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "shell: false, windowsHide: true, stdio:",
+    "to": "shell: true, windowsHide: true, stdio:",
+    "expect": "原生 launcher 無 shell"
   }
 ]

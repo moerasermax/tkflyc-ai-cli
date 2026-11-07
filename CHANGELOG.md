@@ -13,6 +13,8 @@
 
 ### 新增
 
+- dashboard 驗收補上正式 API adapter、原生程序啟動器與完整報告導覽的注入測試；新增 create／run 結果不明重試、放行未成功、確認不可見與 launcher shell 的安全突變。提供 `node tests/dashboard-mutations.mjs`，以未提交快照執行原樣突變 harness，檢查指定斷言、編譯及位元組還原，不建立分支或提交；實測範圍另記於 dashboard 驗收紀錄。（@moerasermax）
+
 - `ai-cli kernel dashboard` 全螢幕終端機控制面板與 `actions <run> --json` 共用純操作規則：完整目標、中文顯示寬度、5／30 秒單飛刷新、完整報告捲動、所有變更先確認並重查 run／測試 commit，放行取得可靠 id 才執行且不重試不明結果。退出清理 alternate screen、游標、raw mode、timer／listener 並排空 stdout；worker 與非 TTY 拒絕。`--new-tab` 僅支援 Windows Terminal，以無 shell 參數陣列定位目前 Node／CLI 入口；新增注入測試及安全突變。既有 kernel 真實 CLI 只在 Windows 用過，此次 dashboard 未做真人 TTY／Windows Terminal 驗證，其他平台尚未實跑。（@moerasermax）
 
 ## [7.0.0] - 2026-11-07
