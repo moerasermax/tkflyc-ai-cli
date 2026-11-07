@@ -3338,8 +3338,8 @@
     "name": "kernel develop：複驗 唯讀範本也能派寫入 worker",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/executor.ts",
-    "from": "if (!contract.develop) throw new Error(`範本 ${contract.template} 不能派會寫檔的 worker`);\n      const within = relative(contract.develop.worktree, cwd);",
-    "to": "const within = relative(contract.develop?.worktree ?? cwd, cwd);",
+    "from": "if (!contract.develop) throw new Error(`範本 ${contract.template} 不能派會寫檔的 worker`);\n      const within = relative(contract.develop.worktree, cwd);\n      if (within.startsWith('..') || isAbsolute(within)) throw new Error(`會寫檔的 worker 只能在 ${contract.develop.worktree} 裡執行，收到 ${cwd}`);",
+    "to": "void relative; void isAbsolute;",
     "expect": "唯讀範本的委任書不可能派出會寫檔的 worker"
   },
   {
