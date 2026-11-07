@@ -1753,6 +1753,18 @@ for (const crashAt of ['intent-before', 'intent-after', 'execute', 'result']) {
 
 /* ---- L5 記憶與外部唯讀資料 ---- */
 const { AiCliKernelMemoryStore, aiCliKernelMemoryRepo, aiCliKernelMemoryForContract, aiCliKernelMemoryCandidates, aiCliKernelMemoryText } = await load('memory');
+
+/* ---- 工作目錄經過符號連結：macOS 的 /tmp、/var 都是。三平台 CI 第一次跑才抓到，整個 run 會中斷 ---- */
+{
+  const repo = newRepo();
+  mkdirSync(join(repo, 'src'), { recursive: true });
+  const link = join(mkdtempSync(join(tmpdir(), 'kernel-link-')), 'linked');
+  symlinkSync(repo, link, process.platform === 'win32' ? 'junction' : 'dir');
+  const atRoot = aiCliKernelMemoryForContract(buildContract({ goal: 'g', workFolder: link }));
+  const atSub = aiCliKernelMemoryForContract(buildContract({ goal: 'g', workFolder: join(link, 'src') }));
+  check('工作目錄經過符號連結時，repo 根目錄的記憶範圍不會算出上層路徑', JSON.stringify(atRoot?.paths) === '[]', JSON.stringify(atRoot?.paths));
+  check('工作目錄經過符號連結時，子目錄的記憶範圍就是那個子目錄', JSON.stringify(atSub?.paths) === '["src"]', JSON.stringify(atSub?.paths));
+}
 const { aiCliKernelMemory, aiCliKernelResult } = await load('api');
 const { aiCliKernelHandleTool: memoryHandleTool } = await load('mcp-tools');
 const { digestText: memoryDigest } = await load('journal');

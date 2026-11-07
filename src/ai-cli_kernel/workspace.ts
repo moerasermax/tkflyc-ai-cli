@@ -105,7 +105,8 @@ export function parseStatusZ(text: string): string[] {
 }
 
 function sameDir(a: string, b: string): boolean {
-  const normalize = (path: string) => { const real = realpathSync(path); return process.platform === 'win32' ? real.toLowerCase() : real; };
+  // 要用 native：JS 版的 realpathSync 不會展開 Windows 的 8.3 短檔名（C:\Users\RUNNER~1），會和 git 回的長檔名比不上。
+  const normalize = (path: string) => { const real = realpathSync.native(path); return process.platform === 'win32' ? real.toLowerCase() : real; };
   return normalize(a) === normalize(b);
 }
 

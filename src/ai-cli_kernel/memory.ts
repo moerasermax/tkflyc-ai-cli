@@ -5,7 +5,7 @@
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join } from 'node:path';
 import { z } from 'zod';
 import { digestText, kernelStateDir } from './journal.js';
 import type { KernelContract } from './types.js';
@@ -117,7 +117,8 @@ export function aiCliKernelMemoryForContract(contract: KernelContract): KernelMe
   const repo = aiCliKernelMemoryRepo(contract.workFolder);
   if (!repo) return undefined;
   const store = new AiCliKernelMemoryStore(repo.repoKey);
-  const prefix = relative(repo.root, contract.workFolder).replace(/\\/g, '/');
+  // 由 git 給，不自己算：工作目錄經過符號連結時（macOS 的 /tmp、/var），git 回的根目錄是真實路徑，兩邊相減會算出 ..。
+  const prefix = (git(contract.workFolder, 'rev-parse', '--show-prefix') ?? '').replace(/\/+$/, '');
   return { read: () => store.read(), candidates: items => store.candidates(items), paths: contract.develop?.allowedPaths.length ? contract.develop.allowedPaths : prefix ? [prefix] : [] };
 }
 export function aiCliKernelMemoryCandidates(lessons: string[], runId: string, actionId: string, scope: KernelMemory['scope'], createdAt: string): KernelMemory[] {
