@@ -3655,11 +3655,11 @@
     "expect": "develop：改完而且測試通過才走到 completed"
   },
   {
-    "name": "kernel L4 交付不驗回復點",
+    "name": "kernel L4 複驗 交付不驗回復點",
     "file": "src/ai-cli_kernel/loop.ts",
     "script": "verify-ai-cli_kernel.mjs",
     "from": "if (develop!.checkpoint && develop!.checkpoint.mode !== 'off') {",
-    "to": "if (false) {",
+    "to": "if (false as boolean) {",
     "expect": "回復點：交付前 ref 被動過即驗收失敗"
   },
   {
@@ -3759,11 +3759,11 @@
     "expect": "放行：執行前重驗 branch"
   },
   {
-    "name": "kernel release 10：throw new Error('回復點 ref 已變動，拒絕放行",
+    "name": "kernel release 複驗 10：回復點 ref 已變動仍放行",
     "file": "src/ai-cli_kernel/loop.ts",
     "script": "verify-ai-cli_kernel.mjs",
     "from": "  if (spec.checkpoint && spec.checkpoint.mode !== 'off' && (!view.checkpoint || !workspace.checkpointValid(spec, view.checkpoint))) throw new Error('回復點 ref 已變動，拒絕放行');",
-    "to": "  if (false && (!view.checkpoint || !workspace.checkpointValid(spec, view.checkpoint))) throw new Error('回復點 ref 已變動，拒絕放行');",
+    "to": "  if ((false as boolean) && (!view.checkpoint || !workspace.checkpointValid(spec, view.checkpoint))) throw new Error('回復點 ref 已變動，拒絕放行');",
     "expect": "放行：執行前重驗 checkpoint"
   },
   {
@@ -3775,11 +3775,11 @@
     "expect": "放行：預設分支需額外同意且說明可能部署"
   },
   {
-    "name": "kernel release 12：放行已使用或結果不明",
+    "name": "kernel release 複驗 12：放行可以重複使用",
     "file": "src/ai-cli_kernel/loop.ts",
     "script": "verify-ai-cli_kernel.mjs",
     "from": "    if (view.attempted || view.status !== 'available') throw new Error(`放行已使用或結果不明（${view.status}），絕不自動重試`);",
-    "to": "    if (false) throw new Error(`放行已使用或結果不明（${view.status}），絕不自動重試`);",
+    "to": "    if (false as boolean) throw new Error(`放行已使用或結果不明（${view.status}），絕不自動重試`);",
     "expect": "放行：成功後重複使用拒絕"
   },
   {
