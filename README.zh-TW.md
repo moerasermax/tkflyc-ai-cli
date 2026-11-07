@@ -416,11 +416,15 @@ ai-cli kernel wait <run>
 ai-cli kernel result <run>
 ```
 
-有兩個範本。`readonly-audit`（預設）只讀不改。`develop` 會改程式：每個 run 有自己的 git worktree 和分支，kernel 自己跑你給的測試指令，通過才算完成，不會自動合併或推送交付分支。開工前的預設回復點使用專用位置，有 `origin` 就會推送，推送失敗便停下來。`develop` 的 worker 權限等於你本人，也會載入你完整的 CLI 設定，包含 MCP server。**它沒有隔離**，核准時要明確承認，只用在你信任的專案。
+有兩個範本。`readonly-audit`（預設）使用工具受限的唯讀模式。`develop` 會改程式：每個 run 有自己的 git worktree 和分支，kernel 自己跑你給的測試指令，通過才算完成，不會自動合併或推送交付分支。開工前的預設回復點使用專用位置，有 `origin` 就會推送，推送失敗便停下來。`develop` 的 worker 權限等於你本人，也會載入你完整的 CLI 設定，包含 MCP server。**它沒有隔離**，核准時要明確承認，只用在你信任的專案。
+
+7.0.0 尚未發佈到 npm。現階段請從 GitHub 取得原始碼，再執行 `npm install`、`npm run build`（見[快速開始](#快速開始)）；前提是 Node `^20.19.0 || >=22.12.0`、已安裝並登入 Codex CLI、已註冊 ai-cli MCP。kernel 只在一台 Windows 上實測；Linux、macOS 尚未實測，stub 測試不代表這兩個平台的行為已經驗證。
 
 常用委任書可用 `kernel mandate save/approve/list/show/revoke` 保存與管理。同意預設 30 天到期，重新保存或撤銷就失效。`kernel trigger <name>` 每次只觸發一次，另有預設關閉的 `kernel triggers on|off` 與持久每日次數／用量帳本。`kernel schedule <name> --daily HH:MM` 先預覽，Windows 加 `--apply` 才登記，POSIX 只印 crontab。觸發任務不能關閉回復點，也不能使用 release 單次放行；完整操作與限制見教學手冊。
 
-MCP 工具 `ai-cli_kernel_*` 預設關閉，`ai-cli kernel enable` 後才出現，原生工具不受影響。手把手教學看[教學手冊](docs/ai-cli_kernel/教學手冊.md)，內部設計看[技術手冊](docs/ai-cli_kernel/技術手冊.md)。
+記憶一律先產生候選，包括人說「記住」；使用者確認收下後才啟用。歸檔包整理已記錄的事實，可自行閱讀或交給 AI 整理到自己的筆記；標記歸檔只寫本機狀態，不寫外部服務。worktree 和分支隔開的是交付歷史，沒有隔離權限：全權限 worker 和 hook 仍可能影響其他地方，收下前應看報告與 diff。
+
+MCP 工具 `ai-cli_kernel_*` 預設不列出且拒絕呼叫；`ai-cli kernel enable` 後重新連線 MCP 才可使用。`AI_CLI_KERNEL=on|off` 優先覆寫儲存設定。CLI 不受這個開關限制。既有 MCP 工具名稱與參數介面保持相容。kernel 的整合是新增 CLI 子命令、預設關閉的 MCP 工具，以及 `JobStore.start` 的檢查：目前 ai-cli 行程帶 `AI_CLI_WORKER=1` 且未設 `AI_CLI_ALLOW_NESTED=1`，即使直接呼叫 JobStore（含 FileProcessService、ProcessService 經此啟動）也拒絕派工。未帶 worker 標記的一般主 session 不受這條檢查阻擋。CLI run／exec、MCP run 原本已有入口防護；`spawnPty` 刻意不改，因為已授權的 runner 也帶 worker 標記。檢查的是目前 ai-cli 環境，不涵蓋所有 vendor 程序，也不是 OS 沙箱。本版其他 direct-api 路由／設定與 updater 提示變動，另見 [CHANGELOG](CHANGELOG.md#700---2026-11-07)。手把手教學看[教學手冊](https://github.com/moerasermax/tkflyc-ai-cli/blob/master/docs/ai-cli_kernel/教學手冊.md)，內部設計看[技術手冊](https://github.com/moerasermax/tkflyc-ai-cli/blob/master/docs/ai-cli_kernel/技術手冊.md)。
 
 ## 新增一個 AI agent
 
@@ -924,8 +928,7 @@ gpt-6-astra medium 回一個字約 **5.7 秒**，gpt-5.4-mini low 約 **6.5 秒*
 
 本專案起初是 [mkXultra/ai-cli-mcp](https://github.com/mkXultra/ai-cli-mcp)（MIT）的
 clone，而後者又衍生自 Peter Steinberger 的 `claude-code-mcp`（MIT）。
-**上游仍在活躍維護**——2.23.0 發佈於 2026-09-06，npm 週下載約 680 次。
-這不是接手一個沒人管的專案，是架構上刻意分歧的 fork。要原版請用
+這是架構上刻意分歧的 fork；上游目前的維護狀態請看其 repository。要原版請用
 [`ai-cli-mcp`](https://www.npmjs.com/package/ai-cli-mcp)。
 完整歸屬與保留的 MIT 條款見 [NOTICE](NOTICE)。
 

@@ -8,6 +8,33 @@
 
 ## [Unreleased]
 
+## [7.0.0] - 2026-11-07
+
+> 文件與版本號已準備；**尚未發佈到 npm**，本次未打 tag 或 publish。現階段使用 GitHub 原始碼安裝。
+
+### 相容性
+
+本版新增完整 agent 層：受監督唯讀、明示未隔離的開發、回復點／單次放行、可重用委任、觸發／排程、記憶與歸檔包。既有 MCP 工具名稱與參數介面沒有破壞性改動。CONTRIBUTING §4 的 MAJOR 規則是「對外 MCP 行為或介面不相容」；單憑新增相容功能並不符合該規則，因此 7.0.0 是作者選擇的里程碑版號，不硬稱為 breaking change。
+
+**kernel 整合與派工影響：** 新增 CLI kernel 子命令、預設關閉的 ai-cli_kernel_* MCP 工具，以及 JobStore.start 的 assertCanStartJob。工具開關不控制 CLI；未啟用時延伸工具不列出且拒絕呼叫。`AI_CLI_KERNEL=on|off` 優先覆寫儲存設定。原有 CLI run／exec 和 MCP run 已有入口檢查；現在直接呼叫 JobStore（含 FileProcessService、ProcessService 到此啟動）的行程，若環境 AI_CLI_WORKER 等於字串 1 且 AI_CLI_ALLOW_NESTED 不等於字串 1，也會回 AI_CLI_NESTED_DISPATCH_BLOCKED。一般未帶 worker 標記的主 session 不受此檢查阻擋。spawnPty 刻意不加檢查，避免帶 worker 標記的 runner 無法啟動已授權的 vendor；這不是對任意程序的權限沙箱。遇到拒絕時應回主 session 派工；只有確知需要巢狀派工才明示允許，這不會把它納入 kernel 預算。develop worker 與 hook 仍有使用者完整權限；分支只隔開交付，不阻止外部副作用。
+
+**非 kernel 行為與必要操作（以 git log v6.9.1..HEAD、git diff v6.9.1 HEAD -- src 核對）：**
+
+- direct-api 的 providers.json 可設每個 provider 的 max_tool_loops，整數 1–200、預設 30，同時限制工具迴圈與 API completion 呼叫，HTTP 重試不計（6cb599b）。有需要才調高；撞限仍可能以 completed／exit 0 結束，請檢查 agentOutput.finish_reason 是否為 tool_loop_limit，不要直接當作答案完成。
+- **壞設定不再靜默改派（c003b3b）**：原本一筆 provider 不合法，整檔驗證失敗，tryConfiguredProviderPrefix 捕捉錯誤後回 null；自訂前綴 nv-foo/bar 可能落進 claude catch-all。現在只要 JSON 可解析，且 model 匹配 providers 物件中的某個 key，就拋出設定錯誤，即使壞的是另一筆 provider 也一樣。一般非匹配 model 仍放行；or-／ds- 內建簡寫本來就會報錯。JSON 本身損毀、無法讀出 key 時仍保留舊回退行為，不能宣稱所有格式錯誤都封閉拒絕。修復方式：依錯誤中的檔案位置與 provider 名稱，修正整檔 JSON、各筆 base_url／api_key 與欄位型別（例如 max_tool_loops=0 改為 1–200 整數，或移除以用預設），再重試原 model；不要用改派其他模型掩蓋設定錯誤。provider key 避免與 gpt 等內建前綴撞名。
+- providers.json 開頭 UTF-8 BOM 現在先剝除再解析（e534f04），記事本／PowerShell 5.1 產出的 BOM 不再使整個 direct-api 失效；其他 JSON 錯誤仍需自行修復。
+- updater 待辦由新版啟動重算，只有 run／models 回應送到呼叫端 AI 才記為送達；stderr／背景通知不算。未送達範圍跨更新與回滾保留，累積去重，check 不覆蓋，git 暫時失敗保留；已送達且起點 commit 明確不存在才清除（238a6f6、710a557、8290e1d、5459434）。更新後請重開 server，再依 updateNotice 處理。新舊 server 並存時仍有下列歷史記錄的過渡限制，應將全機 server 都重開到新版。已被舊版清掉的面板提問無法補回，需手動檢查。
+- 本次更新範圍含 plugins/ai-cli-jobs/ 變動時，updater 依本機安裝紀錄問是否安裝／更新面板；未知紀錄不冒稱未安裝，列出過舊副本，無法解析的版本不比較（38937c6、5ac89bd）。它只提出操作，須使用者同意才執行。面板 0.1.5 的表格和全機 job 要每台電腦各自更新 marketplace、更新 ai-cli-jobs，再重開 Claude Code；git pull 與 npm 更新不會替換 Claude Code cache 中的外掛。
+- 非 src 的配套也有變動：選用 statusLine 腳本直接讀全機 job store，需自行設定啟用；SessionStart 派工政策 hook 更新候選模型、context 停止線，並更正 percentUsed 是已用比例（85cd707、2709ac6、65e1e9c）。這些不是 kernel 工具開關造成的行為。面板與狀態列不隨 npm 套件散布。
+
+**確實不需操作的部分：** 保持有效 providers.json 且不需提高上限者，max_tool_loops 可省略，維持 30；BOM 修正不需手動轉碼。未使用 kernel 者不需啟用其工具，既有 MCP 參數不需遷移；未使用面板／狀態列者也不需安裝它們。不能因此概括為所有使用者都不用操作。
+
+以下保留逐次開發與修補歷史；「第一版」「尚未實作」「待下一步」描述各該階段，不是 7.0.0 最終狀態。L4 放行、L5 記憶與歸檔包現已完成；硬性 OS 隔離與間接外部寫入防護仍未提供。Linux、macOS 尚未實測，不從 Windows 或 stub 結果推定支援已驗收。
+
+### 文件與版本準備
+
+- 中英文 README 同步啟用方式、權限邊界與整合影響，手冊使用 GitHub 完整連結以適用 npm 閱讀；教學補安裝前提、候選記憶與通用歸檔流程。技術手冊修正未快取 input 預算、工具表、階段狀態與驗收連結；歷史驗收檔加快照註記。清除個人絕對路徑與私人討論連結，SECURITY 僅列目前 7.x 開發線支援、無舊版安全回補；package 與 lockfile 根版本同步為 7.0.0。僅作靜態文件核對，不宣稱重跑歷史測試。（Codex）
+
 ### 新增
 
 - **`ai-cli_kernel` L5 第二部分收尾**：補齊記憶、context 與歸檔包三步累積規格對照；增加 finish 拒絕服務寫入／任意命令與 lessons 物件偽裝的斷言，以及獨立的 CLI／MCP 歸檔參數、純函式資料隔離、精確失敗與未快取用量突變。修正歸檔 commit 清單的 rev-list 缺少 revision／路徑分隔符，在 Windows 深路徑或同名檔案時中斷的問題，附跨平台可重現斷言及突變。沿用正式 mutation harness，在未提交快照先驗基準、再驗指定斷言殺死；教學補上待歸檔清單、人工交接與本機標記範例，技術手冊說明重現和證據範圍。通用命令及同權限 worker 未隔離，絕對禁止間接寫入 Planner／Knowledge 仍是未解驗收阻礙，完整 npm test 留由外層 kernel 執行。（@moerasermax；Codex）
@@ -57,7 +84,7 @@
 
 ### 新增
 
-- **`ai-cli_kernel` L4 第一階段回復點與 rollback**：develop 開工前用暫存 index 保存未提交／未追蹤內容，有 origin 預設備份到專用 checkpoints 分支。疑似秘密不傳送、備份失敗暫停；人核准可只留本地，觸發 run 不得降級。事件重播支援中斷接回，交付前驗證回復點；`kernel rollback` 預覽還原指令，`--apply` 只建分支。單次放行與 L5 尚未實作。（Codex）
+- **`ai-cli_kernel` L4 第一階段回復點與 rollback**：develop 開工前用暫存 index 保存未提交／未追蹤內容，有 origin 預設備份到專用 checkpoints 分支。疑似秘密不傳送、備份失敗暫停；人核准可只留本地，觸發 run 不得降級。事件重播支援中斷接回，交付前驗證回復點；`kernel rollback` 預覽還原指令，`--apply` 只建分支。（此回復點階段）單次放行與 L5 當時尚未實作，現已由本節其他項目接續完成。（Codex）
 - **`ai-cli_kernel` 能動手開發了：新範本 `develop`。** 每個 run 開自己的 git worktree 和分支，worker 在裡面改檔，kernel 自己跑呼叫端給的測試指令，最新 commit 通過才算完成。不合併、不 push。（Claude Opus 5.5）
   - 為什麼沒有隔離：L2 只能換文字、不能跑測試，滿足不了開發；Docker 要處理訂閱 CLI 的登入憑證，也沒實測過。這是藍圖討論過的「明示未隔離」模式，所以委任書要寫明範圍、預算、期限，核准時要明確承認（`--acknowledge-unisolated`）。worker 權限等於使用者本人，風險和直接用 `run` 派寫入工作一樣。
   - 為什麼查完才 commit：範圍外的改動不會進分支。測試結果綁定 commit，HEAD 一動就失效，所以模型沒辦法拿舊結果結案。
@@ -65,7 +92,7 @@
   - 每一步可以挑不同模型（`workerModels`），例如一個寫、另一個唯讀審查，全部算進預算和日誌。worker 自己再呼叫 ai-cli 是刻意不開的。
   - 第一次真實 run 抓到兩個 stub 測不出來的問題，已修：審查跑在測試之前，報告因此自相矛盾；唯讀審查者沒有 shell，只能去翻 `.git`，現在由 kernel 直接附 diff。
   - 已知限制：worker 會載入使用者完整的 CLI 設定，包含 MCP server。實測在沒登記過的 repo 上，planner 的 SessionStart hook 自動註冊了專案，並在主目錄寫了 `.planner-id`。專案層 Codex hook 在 worktree 裡很可能不生效；kernel 自己跑的指令也不經過使用者的 hook，所以 `reset --hard` 和 `clean -fd` 寫進委任書，核准時一併同意。只驗過一台 Windows。
-- **`ai-cli_kernel`：第一版受監督唯讀 agent（L1）。** 給目標和委任書，它自己規劃、派唯讀 worker、驗收，做到有證據的結果；當掉可以接回，已完成的步驟不會重做。既有 `run`／`exec` 行為不變，`core/`、`agents/`、`models/`、`plugins/` 沒有改動，也不能反過來依賴它（有測試釘住）。入口是 `ai-cli kernel` 子命令，MCP 工具 `ai-cli_kernel_*` 預設關閉，`ai-cli kernel enable` 後才出現。（@moerasermax）
+- **`ai-cli_kernel`：L1 初版階段（歷史紀錄，後續已擴充 develop、L4、L5）。** 給目標和委任書，它自己規劃、派唯讀 worker、驗收，做到有證據的結果；當掉可以接回，已完成的步驟不會重做。此處原先稱原生完全未改，現更正：kernel 另在 JobStore.start 補派工檢查，既有介面維持相容，確切拒絕條件見上方「相容性」；core 不反向依賴 kernel。本版另有 direct-api 與 updater 等變動。入口是 `ai-cli kernel` 子命令，MCP 工具 `ai-cli_kernel_*` 預設關閉，`ai-cli kernel enable` 後才出現。（@moerasermax）
   - 為什麼模型只提案：迴圈由確定性程式控制，模型只回 JSON 計畫，每一步能不能做由閘決定，所以 worker 輸出裡夾帶的指令沒有授權效力。
   - 為什麼先記意圖：有意圖、沒結果的動作分不出做了沒，不能直接重跑。用 marker 到 JobStore 查，查到就接回，確認沒啟動才重派，查不了就停下來等人對帳。
   - 為什麼要跑探針：旗標名稱不等於行為。Windows 上 Codex 的唯讀靠的是指令清單，不是 OS 沙箱，CLI 更新也可能改掉語義。所以對每組 CLI 版本、binary、參數真的叫模型寫檔，結果才算數。**通過只代表「工具受限」，不代表隔離。**
@@ -1492,10 +1519,9 @@ repository 正規化範圍的 7 項；突變 79→81。
 
 ### 修正（事實錯誤：上游並未停更）
 
-- **README（中英）先前寫「上游已停止更新 / no longer being updated」，這是錯的。**
+- **README（中英）先前未經查證斷言上游停更，這是錯的。**
   實測 mkXultra/ai-cli-mcp：npm `2.23.0` 發佈於 **2026-09-06**、GitHub 最後推送
-  **2026-09-07**、25 stars / 9 forks / 12 open issues、**npm 週下載約 680 次、
-  月下載 1,597 次**。它活得好好的。
+  **2026-09-07**。這些是當時的查證背景，不是目前維護狀態的驗證。
 
   錯誤來源是把「我沒在追蹤它」當成「它沒在動」，然後直接寫進文件而沒有查證。
   這種話最糟的地方在於**驗證成本極低**——任何人點進上游 repo 三十秒就會看到，
@@ -2203,7 +2229,7 @@ Antigravity 可用；**Kiro 沒額度**（CLI 回 `Not logged in`）、**Forge �
   另外兩個入口（`dist/server.js`、`dist/bin/ai-cli-mcp.js`）之所以一直沒事，
   只是因為它們沒有呼叫 `process.exit`，不是設計使然。（Claude）
 - **`verify-mcp.mjs` 從來只測得到三個入口中的一個**，所以上面那個 bug 活了四個版本
-  都沒被抓到 —— 它硬編 `C:\Users\Moera\...\dist\server.js`（另一台機器的絕對路徑）。
+  都沒被抓到 —— 它硬編 `<repo>\dist\server.js`（另一台機器的絕對路徑）。
   改為相對 `import.meta.url` 解析，並且**三個入口各跑一次完整 smoke test**
   （handshake → 11 個工具 → models → doctor → list_processes）。（Claude）
 - **突變 harness 自己的假綠燈**：`tools/mutation-test.mjs` 寫死只跑
@@ -2218,7 +2244,7 @@ Antigravity 可用；**Kiro 沒額度**（CLI 回 `Not logged in`）、**Forge �
 - `package.json` 新增 `prepare: npm run build`。`dist/` 不進版控，clone 後必須編譯，
   現在 `git clone && npm install` 一步到位。（Claude）
 - `verify-e2e.mjs` 去掉兩處硬編：server 路徑改為相對 `import.meta.url`，
-  工作目錄由 `C:\Users\Moera` 改為 `homedir()`。仍刻意不納入 `npm test`。（Claude）
+  工作目錄由 `<使用者家目錄>` 改為 `homedir()`。仍刻意不納入 `npm test`。（Claude）
 - README 移除硬編絕對路徑，新增「快速開始」與可直接複製的 `claude mcp add` 指令
   （bash / PowerShell 兩版），並說明三個入口等價、以 `dist/server.js` 為官方推薦。（Claude）
 
@@ -2506,7 +2532,8 @@ Antigravity 可用；**Kiro 沒額度**（CLI 回 `Not logged in`）、**Forge �
 - Windows 上優先解析 `.cmd`/`.exe` 而非 extensionless shim。
 - 移除已壞掉的 gemini 殘留；usage 外掛路徑改由 `AI_CLI_USAGE_PLUGIN_BIN` 環境變數設定。
 
-[Unreleased]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.5.0...HEAD
+[Unreleased]: https://github.com/moerasermax/tkflyc-ai-cli/compare/28e56c4d47...HEAD
+[7.0.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.9.1...28e56c4d47
 [6.5.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.4.1...v6.5.0
 [6.4.1]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.4.0...v6.4.1
 [6.4.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.3.0...v6.4.0

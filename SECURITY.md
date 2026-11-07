@@ -27,10 +27,10 @@ answer is that it was not built for that.
 
 | Version | Supported |
 |---|---|
-| 6.x | ✅ |
-| ≤ 5.x | ❌ |
+| 7.x (current development line; 7.0.0 not yet on npm) | ✅ |
+| ≤ 6.x | ❌ |
 
-Fixes land on `master` and ship in the next release. There are no backports.
+Fixes land on `master` and ship in the next release. Only this current line receives fixes; older releases receive no security backports. Until 7.0.0 ships on npm, fixes on this line are available from source.
 
 ## Reporting a vulnerability
 

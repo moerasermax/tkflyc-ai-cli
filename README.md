@@ -609,11 +609,15 @@ ai-cli kernel wait <run>
 ai-cli kernel result <run>
 ```
 
-Two templates exist. `readonly-audit` (default) only reads. `develop` changes code: each run gets its own git worktree and branch, and the kernel itself runs your test command and only accepts a commit that passes it. It does not automatically merge or push the delivery branch. Before work starts, the default checkpoint uses a dedicated ref and pushes it when an `origin` exists; a failed checkpoint push stops work. Workers in `develop` run with your full user permissions and your full CLI configuration, including MCP servers. **It is not isolated**, and approving it requires an explicit acknowledgement. Only use it on projects you trust.
+Two templates exist. `readonly-audit` (default) uses tool-limited read-only mode. `develop` changes code: each run gets its own git worktree and branch, and the kernel itself runs your test command and only accepts a commit that passes it. It does not automatically merge or push the delivery branch. Before work starts, the default checkpoint uses a dedicated ref and pushes it when an `origin` exists; a failed checkpoint push stops work. Workers in `develop` run with your full user permissions and your full CLI configuration, including MCP servers. **It is not isolated**, and approving it requires an explicit acknowledgement. Only use it on projects you trust.
+
+Version 7.0.0 is not yet published to npm. Obtain the source from GitHub and run `npm install` and `npm run build` (see [Quick start](#quick-start)); Node `^20.19.0 || >=22.12.0`, an installed and authenticated Codex CLI, and ai-cli MCP registration are prerequisites. Kernel has only been exercised on one Windows machine; Linux and macOS have not been practically tested. Stub coverage does not establish those platforms' behavior.
 
 Reusable mandates support `kernel mandate save/approve/list/show/revoke`. Approval expires after 30 days by default; saving again or revoking clears it. One-shot `kernel trigger <name>` uses an independent, default-off `kernel triggers on|off` switch and a persistent daily run/token ledger. `kernel schedule <name> --daily HH:MM` previews the command; Windows registers it only with `--apply`, while POSIX only prints a crontab line. Triggered runs cannot disable checkpoints or use single-use release. See the tutorial for commands and operational limits.
 
-The MCP tools (`ai-cli_kernel_*`) are off by default; `ai-cli kernel enable` turns them on. Existing tools are unaffected. Docs (Traditional Chinese): [tutorial](docs/ai-cli_kernel/教學手冊.md), [technical manual](docs/ai-cli_kernel/技術手冊.md).
+Memory always starts as a candidate, including a human request to remember something; it becomes active only after the user promotes it. Archive packets collect recorded facts for you to read or have an AI organize into your own notes; marking a run archived writes only local state, not external services. A worktree and branch isolate delivery history, not permissions: full-permission workers and hooks can affect other locations, so review the report and diff before accepting.
+
+The MCP tools (`ai-cli_kernel_*`) are off by default and reject calls while disabled; `ai-cli kernel enable` turns them on, then reconnect the MCP client. `AI_CLI_KERNEL=on|off` overrides the saved setting. The CLI is available independently of this switch. Existing MCP tool names and parameter interfaces remain compatible. Kernel integration adds the CLI subcommand, default-off MCP tools, and a guard in `JobStore.start`: an ai-cli process with `AI_CLI_WORKER=1` and without `AI_CLI_ALLOW_NESTED=1` rejects dispatch even through direct JobStore calls (also reached by FileProcessService and ProcessService). Ordinary main sessions without that worker marker are not blocked by this guard. CLI run/exec and MCP run already had entry guards; `spawnPty` is intentionally unchanged because the authorized runner also carries the worker marker. This checks the current ai-cli environment, not every vendor process, and is not an OS sandbox. Other 7.0.0 changes to direct-api routing/settings and updater notices are documented separately in [CHANGELOG](CHANGELOG.md#700---2026-11-07). Docs (Traditional Chinese): [tutorial](https://github.com/moerasermax/tkflyc-ai-cli/blob/master/docs/ai-cli_kernel/教學手冊.md), [technical manual](https://github.com/moerasermax/tkflyc-ai-cli/blob/master/docs/ai-cli_kernel/技術手冊.md).
 
 ## Adding an AI agent
 
@@ -676,9 +680,8 @@ a completion record. The output remains available and the outcome is unknown.
 
 This project began as a clone of [mkXultra/ai-cli-mcp](https://github.com/mkXultra/ai-cli-mcp)
 (MIT), which is itself derived from Peter Steinberger's `claude-code-mcp` (MIT).
-**Upstream is actively maintained** — 2.23.0 shipped on 2026-09-06, and it has
-roughly 680 weekly npm downloads. This is not a rescue of an abandoned project;
-it is a fork that diverged on architecture. If you want the original, use
+This fork deliberately diverges on architecture; see the upstream repository for
+its current maintenance status. If you want the original, use
 [`ai-cli-mcp`](https://www.npmjs.com/package/ai-cli-mcp). See [NOTICE](NOTICE)
 for the full attribution and the retained MIT terms.
 
