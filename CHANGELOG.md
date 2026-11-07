@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+### 修正
+- kernel dashboard 的手動更新與輪詢同時完成時，只保留一個更新計時器，確保離開後完整清理。確認指令依 POSIX／PowerShell 引用參數，保護分支名中的 shell 展開字元；新分頁入口的相對路徑以啟動工作目錄解析。（@moerasermax）
+
+### 新增
+
+- `ai-cli kernel dashboard` 全螢幕終端機控制面板與 `actions <run> --json` 共用純操作規則：完整目標、中文顯示寬度、5／30 秒單飛刷新、完整報告捲動、所有變更先確認並重查 run／測試 commit，放行取得可靠 id 才執行且不重試不明結果。退出清理 alternate screen、游標、raw mode、timer／listener 並排空 stdout；worker 與非 TTY 拒絕。`--new-tab` 僅支援 Windows Terminal，以無 shell 參數陣列定位目前 Node／CLI 入口；新增注入測試及安全突變。既有 kernel 真實 CLI 只在 Windows 用過，此次 dashboard 未做真人 TTY／Windows Terminal 驗證，其他平台尚未實跑。（@moerasermax）
+
 ## [7.0.0] - 2026-11-07
 
 > 文件與版本號已準備；**尚未發佈到 npm**，本次未打 tag 或 publish。現階段使用 GitHub 原始碼安裝。

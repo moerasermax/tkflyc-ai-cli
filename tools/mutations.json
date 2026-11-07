@@ -4997,5 +4997,109 @@
     "from": "'--show-prefix'",
     "to": "'--show-toplevel'",
     "expect": "工作目錄經過符號連結時"
+  },
+  {
+    "name": "dashboard 缺少測試 commit 仍放行",
+    "file": "src/ai-cli_kernel/dashboard-rules.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "  if (d.state === 'completed' && dev?.verifiedCommit) {\n    const commit = dev.verifiedCommit",
+    "to": "  if (d.state === 'completed' && dev) {\n    const commit = dev.verifiedCommit ?? 'unverified'",
+    "expect": "沒有通過測試的 commit 就沒有合併推送"
+  },
+  {
+    "name": "dashboard 推預設分支漏掉旗標",
+    "file": "src/ai-cli_kernel/dashboard-rules.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "isDefault ? ['--allow-default-branch'] : []",
+    "to": "[]",
+    "expect": "只有推到預設分支才帶 allow-default-branch"
+  },
+  {
+    "name": "dashboard 非 y 也執行確認",
+    "file": "src/ai-cli_kernel/dashboard.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "      if (key !== 'y' || !confirmationVisible) return;",
+    "to": "      if (false) return;",
+    "expect": "第一次按鍵與其他鍵不執行"
+  },
+  {
+    "name": "dashboard 跳過操作重新驗證",
+    "file": "src/ai-cli_kernel/dashboard.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "  if (!available.some(fresh => identity(fresh) === identity(action))) {",
+    "to": "  if (false && !available.some(fresh => identity(fresh) === identity(action))) {",
+    "expect": "commit 變更、操作失效及重新查詢失敗阻止執行"
+  },
+  {
+    "name": "dashboard 不綁定非放行 commit",
+    "file": "src/ai-cli_kernel/dashboard.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "(fresh.develop?.verifiedCommit ?? null) !== action.confirmedCommit",
+    "to": "false",
+    "expect": "非放行操作亦綁定確認時的 commit"
+  },
+  {
+    "name": "dashboard 接受不可靠 release id",
+    "file": "src/ai-cli_kernel/dashboard.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "!new RegExp(`^${action.runId}-rel-[0-9a-f]{16}$`).test(id)",
+    "to": "false",
+    "expect": "release create 先於 run"
+  },
+  {
+    "name": "dashboard 有 create 沒有執行 run",
+    "file": "src/ai-cli_kernel/dashboard.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "    return effects.runRelease(id);",
+    "to": "    return { id };",
+    "expect": "release create 先於 run"
+  },
+  {
+    "name": "dashboard 不追蹤新開工 run",
+    "file": "src/ai-cli_kernel/dashboard-rules.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "  if (snap.active && snap.active !== previousActive) return { runId: snap.active, pinned: false }",
+    "to": "  if (false && snap.active && snap.active !== previousActive) return { runId: snap.active, pinned: false }",
+    "expect": "chooseRun 手動固定"
+  },
+  {
+    "name": "dashboard worker 拒絕失效",
+    "file": "src/ai-cli_kernel/dashboard-terminal.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "  if (worker === '1') return",
+    "to": "  if (worker === 'disabled') return",
+    "expect": "worker 與 stdin/stdout 非 TTY 拒絕"
+  },
+  {
+    "name": "dashboard 非 TTY 拒絕失效",
+    "file": "src/ai-cli_kernel/dashboard-terminal.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "  if (!inputTTY || !outputTTY) return",
+    "to": "  if (false && (!inputTTY || !outputTTY)) return",
+    "expect": "worker 與 stdin/stdout 非 TTY 拒絕"
+  },
+  {
+    "name": "dashboard cleanup 不恢復 raw",
+    "file": "src/ai-cli_kernel/dashboard-terminal.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "input.setRawMode(originalRaw);",
+    "to": "input.setRawMode(true);",
+    "expect": "正常 Ctrl+C SIGTERM 例外及初始化失敗皆恢復終端機"
+  },
+  {
+    "name": "dashboard 不排空 stdout",
+    "file": "src/ai-cli_kernel/dashboard-terminal.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "cleanup(); await drainDashboardOutput(output);",
+    "to": "cleanup();",
+    "expect": "正常 Ctrl+C SIGTERM 例外及初始化失敗皆恢復終端機"
+  },
+  {
+    "name": "dashboard new-tab 繞過 worker",
+    "file": "src/ai-cli_kernel/dashboard-terminal.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "const worker = dashboardRefusal(config.env.AI_CLI_WORKER, true, true);",
+    "to": "const worker = dashboardRefusal(undefined, true, true);",
+    "expect": "new-tab worker 不繞過"
   }
 ]

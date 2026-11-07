@@ -45,6 +45,8 @@ readonly-audit（預設）只讀不改。develop 會在獨立的 worktree 和分
                                          worker 權限等於你本人，不是隔離環境
   wait <run> [--timeout <秒>]            等它停下來（預設 600 秒，逾時不算錯誤）
   status [run]                           看狀態；不給 run 就列出最近的
+  actions <run> --json                    列出此刻可用操作與確認參數
+  dashboard [--new-tab]                   全螢幕控制面板；新分頁僅支援 Windows Terminal
   archive list                          列出所有待歸檔 run（包含停住或當掉的）
   archive show <run>                     從日誌計算歸檔包，不執行命令、不寫外部服務
   archive done <run> [--note <文字>]     主 session 完成交接後，只在本機標記
@@ -197,6 +199,21 @@ export async function runKernelCli(argv: string[], io: Io, deps: { schedule?: Ke
   };
   try {
     switch (action) {
+      case 'actions': {
+        if (positionals.length !== 1 || [...flags.keys()].some(key => key !== 'json') || (flags.has('json') && flags.get('json') !== true)) throw new Error('用法：actions <run> [--json]');
+        const { dashboardActions } = await import('./dashboard-api.js');
+        const actions = await dashboardActions(needRun());
+        emit(actions, actions.map(item => `${item.id}  ${item.label}：${item.summary}`).join('\n') + '\n');
+        return 0;
+      }
+      case 'dashboard': {
+        if (positionals.length || [...flags.keys()].some(key => key !== 'new-tab') || (flags.has('new-tab') && flags.get('new-tab') !== true)) throw new Error('用法：dashboard [--new-tab]');
+        const terminal = await import('./dashboard-terminal.js');
+        // worker 先拒絕；new-tab 的父行程可從 pipe 啟動，新分頁再檢查 TTY。
+        if (flags.has('new-tab')) return terminal.launchDashboardTab(terminal.nativeLaunch(), io);
+        const { dashboardEffects } = await import('./dashboard-api.js');
+        return terminal.runDashboard(dashboardEffects);
+      }
       case 'archive': {
         const [operation, runId] = positionals;
         if (!['list', 'show', 'done'].includes(operation) || positionals.length !== (operation === 'list' ? 1 : 2)) throw new Error('用法：archive list，或 archive show|done <run> [--note <文字>]');

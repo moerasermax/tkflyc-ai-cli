@@ -406,6 +406,8 @@ npm run typecheck  # 只型別檢查
 
 ## ai-cli_kernel：受監督的 agent run
 
+`ai-cli kernel dashboard` 開啟全螢幕終端機控制面板，變更前一律確認；`--new-tab` 僅支援 Windows Terminal。既有真實 CLI 只在 Windows 用過；此次 dashboard 尚未做真人 TTY／Windows Terminal 或其他平台實測。
+
 給目標和委任書，它自己規劃、派 worker、用確定性檢查驗收，當掉可以接回，做過的步驟不會重做。預設唯讀範本會實際打開核對每個 `路徑:行號`；工作者**沒有隔離**。
 
 ```

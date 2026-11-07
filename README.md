@@ -599,6 +599,8 @@ not in the npm package either; get it from git.
 
 ## ai-cli_kernel: supervised agent runs
 
+`ai-cli kernel dashboard` opens a full-screen terminal dashboard with confirmation before changes; `--new-tab` supports Windows Terminal only. Existing real CLI use has been on Windows only; this dashboard has not had live TTY/Windows Terminal or other-platform validation.
+
 Give it a goal and a mandate. It plans with a tool-less model call, dispatches workers, verifies the deliverable with deterministic checks, and recovers across restarts without re-dispatching finished steps. The default read-only template checks every cited `path:line`. Workers are **not isolated**.
 
 ```
