@@ -1,9 +1,11 @@
 /** 控制面板共用純規則。由既有側邊面板核對移植；不讀檔、不操作終端機。 */
+import type { ActiveRun } from './admission.js';
 export interface KernelAction {
   id: string; runId: string | null; label: string; summary: string; warning: string | null;
   args: string[]; commit: string | null; isRelease: boolean;
   /** 僅確認畫面保存；操作 JSON 維持原始 commit 欄位語義。 */
   confirmedCommit?: string | null;
+  activeRuns?: ActiveRun[];
 }
 export interface KernelProgress {
   decides?: { used: number; max: number }; workerSteps?: { used: number; max: number };
@@ -12,6 +14,7 @@ export interface KernelProgress {
 export interface KernelSnapshot {
   at: number; active: string | null; pendingArchive: number; triggersOn: boolean | null; error: string | null;
   runs: Array<{runId: string; state: string; label: string; goal: string}>;
+  activeRuns?: ActiveRun[];
 }
 export interface KernelDetail {
   runId: string; state: string; label: string; reason: string | null; detail: string | null; goal: string;
@@ -51,7 +54,7 @@ export function progressLine(progress: KernelProgress | null): string {
 export function summaryLine(snap: KernelSnapshot): string | undefined {
   if (snap.error) return undefined
   const parts: string[] = []
-  if (snap.active) parts.push('1 執行中')
+  if (snap.active) parts.push(`${snap.activeRuns?.length || 1} 執行中`)
   const waiting = snap.runs.filter(run => RESUMABLE.includes(run.state)).length
   if (waiting) parts.push(`${waiting} 等你`)
   if (snap.pendingArchive) parts.push(`${snap.pendingArchive} 待歸檔`)
@@ -111,7 +114,7 @@ export function triggerAction(isOn: boolean): KernelAction {
     : { id: 'triggers-on', runId: null, label: '開啟自動觸發', summary: '打開總開關，已核准的委任範本可以無人看管地開工。', warning: '開工後 worker 權限等於你本人，沒有隔離。', args: ['triggers', 'on'], commit: null, isRelease: false }
 }
 
-type RawSnapshot = { active?: unknown; pendingArchiveCount?: unknown; runs?: unknown }
+type RawSnapshot = { active?: unknown; activeRuns?: unknown; pendingArchiveCount?: unknown; runs?: unknown }
 
 export function parseSnapshot(raw: RawSnapshot, triggersOn: boolean | null, at: number): KernelSnapshot {
   const active = raw.active
@@ -120,6 +123,7 @@ export function parseSnapshot(raw: RawSnapshot, triggersOn: boolean | null, at: 
   const runs = Array.isArray(raw.runs) ? raw.runs as Array<Record<string, unknown>> : []
   return {
     at, active: activeId, triggersOn, error: null,
+    activeRuns: Array.isArray(raw.activeRuns) ? raw.activeRuns as ActiveRun[] : [],
     pendingArchive: typeof raw.pendingArchiveCount === 'number' ? raw.pendingArchiveCount : 0,
     runs: runs.map(run => ({
       runId: String(run.runId ?? ''),

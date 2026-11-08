@@ -307,7 +307,8 @@ export async function runKernelCli(argv: string[], io: Io, deps: { schedule?: Ke
         const status = await aiCliKernelStatus({ runId: positionals[0] });
         if ('runs' in status) {
           const rows = status.runs.map(run => `${run.runId}  ${run.stateLabel}（${run.effectiveState}）${run.origin ? `  [觸發：${run.origin.mandate}]` : ''}  ${run.goal.replace(/\s+/g, ' ')}`);
-          emit(status, `待歸檔 ${status.pendingArchiveCount} 筆\n` + (rows.length ? `${rows.join('\n')}\n` : '還沒有任何 run。用 ai-cli kernel start 建立。\n'));
+          const active = status.activeRuns.map(run => `佔名額 ${run.runId}  ${run.repo}  ${run.models.decide}/${run.models.worker}  ${run.acquiredAt}`).join('\n');
+          emit(status, `${active ? active + '\n' : ''}待歸檔 ${status.pendingArchiveCount} 筆\n` + (rows.length ? `${rows.join('\n')}\n` : '還沒有任何 run。用 ai-cli kernel start 建立。\n'));
         } else emit(status, formatStatus(status));
         return 0;
       }

@@ -5,6 +5,7 @@
  *
  * 所有依賴都從參數傳入，測試用假執行器就能走遍每一種當機位置，不必啟動 vendor。
  */
+import { waitForTestLock, releaseStoppedTestLock } from './test-lock.js';
 import { randomBytes } from 'node:crypto';
 export { aiCliKernelRunTrigger, type KernelTriggerDeps } from './triggers.js';
 import { aiCliKernelReplayReleases } from './replay.js';
@@ -368,30 +369,41 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
 
   /** kernel 自己跑指令。回傳 null 表示 run 被取消或被接手，呼叫端要停。 */
   const runCheck = async (kind: 'setup' | 'test' | 'context', command: string, seq: number): Promise<{ exitCode: number | null; timedOut: boolean; tail: string; output?: string } | null> => {
-    let handle;
-    try { handle = ws!.startCheck(command, kind === 'context' ? contract.workFolder : workDir, join(store.dir, 'checks', `${kind}-${seq}.log`), kind === 'context' ? 8000 : undefined); }
+    const lease = kind === 'context' ? null : await waitForTestLock(store, () => store.cancelRequested() || superseded(read()), heldBy => commit(heldBy ? { type: 'test_lock_wait', heldBy } : { type: 'test_lock_acquired' }));
+    if (kind !== 'context' && !lease) {
+      if (store.cancelRequested() && !superseded(read())) setState('cancelled', 'user_cancelled');
+      return null;
+    }
+    let safeToRelease = true;
+    let handle: ReturnType<WorkspaceOps['startCheck']> | undefined;
+    try {
+    try { handle = ws!.startCheck(command, kind === 'context' ? contract.workFolder : workDir, join(store.dir, 'checks', `${kind}-${seq}.log`), kind === 'context' ? 8000 : undefined, kind !== 'context'); }
     catch (error) {
       if (kind !== 'context') throw error;
       return { exitCode: null, timedOut: false, tail: (error as Error).message };
     }
+    safeToRelease = false;
+    await lease?.command({ pid: handle.pid, started: '', name: '' });
     /** 確認真的停了才算數。送出訊號不等於停了，舊程序可能還在動工作目錄。 */
     const stopConfirmed = async (): Promise<boolean> => {
-      if (await handle.kill()) { commit({ type: 'check_finished', pid: handle.pid }); return true; }
-      setState('stop_pending', 'check_still_alive', `kernel 跑的檢查指令（pid ${handle.pid}）還沒確認停止`);
+      if (await handle!.kill()) { safeToRelease = true; commit({ type: 'check_finished', pid: handle!.pid }); return true; }
+      setState('stop_pending', 'check_still_alive', `kernel 跑的檢查指令（pid ${handle!.pid}）還沒確認停止`);
       return false;
     };
     try {
       // spawn 完馬上記 pid，查身分要好幾秒，不能等。這樣當機時最多只漏掉幾毫秒的窗口。
       commit({ type: 'check_started', kind, pid: handle.pid, started: '', name: '' });
+      handle.begin?.();
       const identity = await handle.identify();
+      await lease?.command({ pid: handle.pid, ...identity });
       commit({ type: 'check_started', kind, pid: handle.pid, started: identity.started, name: identity.name });
-    } catch (error) { await handle.kill(); throw error; }
+    } catch (error) { safeToRelease = await handle.kill(); throw error; }
     // 總時間也要算進來：測試跑得比剩下的預算久時，不能等它自己跑完。
     const startedAt = deps.now();
     const wallLeftMs = (contract.budget.maxWallMinutes - activeMinutes(read(), startedAt)) * 60000;
     const deadline = startedAt + Math.min(contract.budget.maxActionMinutes * 60000, wallLeftMs);
     for (;;) {
-      if (superseded(read())) { await handle.kill(); return null; }
+      if (superseded(read())) { safeToRelease = await handle.kill(); return null; }
       if (store.cancelRequested()) {
         if (await stopConfirmed()) setState('cancelled', 'user_cancelled');
         return null;
@@ -403,10 +415,15 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
       // 用真的計時器等：只靠 deps.sleep 的話，測試的假 sleep 不會讓出 I/O，結束事件永遠進不來。
       const done = await handle.wait(Math.max(20, Math.min(deps.pollMs, 500)));
       if (done) {
+        safeToRelease = true;
         commit({ type: 'check_finished', pid: handle.pid });
         return { exitCode: done.exitCode, timedOut: false, tail: done.tail, ...(done.output !== undefined ? { output: done.output } : {}) };
       }
     }
+    } catch (error) {
+      if (handle && !safeToRelease) safeToRelease = await handle.kill().catch(() => false);
+      throw error;
+    } finally { if (safeToRelease) await lease?.release(); }
   };
 
   /** 上一個 runner 留下的檢查指令。舊程序還在跑就不能接著動工作目錄。 */
@@ -429,6 +446,7 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
       }
     }
     commit({ type: 'check_finished', pid: check.pid });
+    await releaseStoppedTestLock(store.runId);
     return true;
   };
 

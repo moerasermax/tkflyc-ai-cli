@@ -15,13 +15,14 @@ import { gitSnapshot } from './verdict.js';
 import { realWorkspace } from './workspace.js';
 import { aiCliKernelMemoryForContract } from './memory.js';
 import { isTerminalState } from './types.js';
+import { claimRunnerSlot } from './admission.js';
 
 async function main(): Promise<void> {
   const directory = process.argv[2];
   if (!directory || !existsSync(directory)) throw new Error('runner 需要 run 目錄');
   const store = new RunStore(directory);
   const self = (await lookupIdentities([process.pid])).get(process.pid) ?? { pid: process.pid, started: '', name: 'node' };
-  if (!await acquireRunnerLock(store, self, lookupIdentities)) return;
+  if (!await claimRunnerSlot(store, () => acquireRunnerLock(store, self, lookupIdentities))) return;
   const executor = new FileJobExecutor();
   try {
     const contract = store.readContract();

@@ -112,7 +112,8 @@ export function renderDashboard(view: DashboardView, columns: number, rows: numb
   const snap = view.snapshot;
   const top = [
     `更新於：${snap.at ? clockTime(snap.at) : '尚未成功更新'}${snap.error ? '（更新失敗，保留舊資料）' : ''}`,
-    `執行中：${snap.at ? snap.active ?? '沒有' : '未知'}（${snap.active ? 5 : 30} 秒更新）`,
+    `執行中：${snap.at ? snap.activeRuns?.map(run => run.runId).join('、') || snap.active || '沒有' : '未知'}（${snap.active ? 5 : 30} 秒更新）`,
+    ...(snap.activeRuns ?? []).map(run => `佔名額：${run.runId} | ${run.repo} | ${run.models.decide} / ${run.models.worker} | ${run.acquiredAt}`),
     `自動觸發：${snap.triggersOn === null ? '未知' : snap.triggersOn ? '開' : '關'}`,
     `待歸檔：${snap.at ? `${snap.pendingArchive} 筆` : '未知'}`,
   ].map(line => field(clean(line), color));

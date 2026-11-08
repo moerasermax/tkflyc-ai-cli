@@ -10,7 +10,7 @@ import { digestText } from './journal.js';
 
 const WATCHED = [
   '../core/job-store.js', '../core/job-runner.js', '../core/file-process-service.js', '../core/command-builder.js',
-  './loop.js', './runner.js', './executor.js', './journal.js', './replay.js', './verdict.js', './plan.js', './probe.js', './workspace.js',
+  './loop.js', './runner.js', './executor.js', './journal.js', './replay.js', './verdict.js', './plan.js', './probe.js', './workspace.js', './admission.js', './process-mutex.js', './test-lock.js', './check-supervisor.js', './runtime.js',
 ];
 
 /** dist 被原地重建時這個值會變。查不到的檔案也算進指紋，不會誤判成沒變。 */
@@ -32,16 +32,27 @@ export function agentForModel(model: string): string { return resolveAgentIdForM
  * 取不到一律回 null，不猜。
  */
 export function remainingPercentFromUsage(agent: string, provider: { status?: unknown; usage?: unknown } | null | undefined): number | null {
-  if (!provider || provider.status !== 'ok') return null;
-  const usage = provider.usage as { raw?: unknown; percentBasis?: unknown; weekAllModelsPercent?: unknown } | null;
-  if (!usage) return null;
+  if (!provider || provider.status !== 'ok' || !provider.usage || typeof provider.usage !== 'object') return null;
+  const usage = provider.usage as Record<string, unknown>;
+  const valid = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 100;
   if (agent === 'codex') {
-    const match = typeof usage.raw === 'string' ? usage.raw.match(/Weekly limit:\s*[\d.]+%\s*used\s*\(([\d.]+)%\s*left\)/i) : null;
-    return match ? Number(match[1]) : null;
+    // Old text sometimes carried both used and left; require consistency and explicit basis.
+    const line = typeof usage.raw === 'string' ? usage.raw.match(/^\s*Weekly limit:\s*([^\n]+)/im)?.[1] : undefined;
+    if (line) {
+      const used = line.match(/(-?[\d.]+)%\s*used/i), left = line.match(/(-?[\d.]+)%\s*(?:left|remaining)/i);
+      const u = used ? Number(used[1]) : null, l = left ? Number(left[1]) : null;
+      if (u !== null && !valid(u) || l !== null && !valid(l) || u !== null && l !== null && Math.abs(u + l - 100) > 0.11) return null;
+      if (l !== null) return l;
+      if (u !== null) return 100 - u;
+    }
+    // UsageService's parsed TUI/session-file/RPC windows declare their basis.
+    const weekly = usage.weekly as { basis?: unknown; percentUsed?: unknown; percentRemaining?: unknown } | undefined;
+    if (!weekly) return null;
+    if (weekly.basis === 'used' && valid(weekly.percentUsed)) return 100 - weekly.percentUsed;
+    if ((weekly.basis === 'left' || weekly.basis === 'remaining') && valid(weekly.percentRemaining)) return weekly.percentRemaining;
+    return null;
   }
-  if (agent === 'claude') {
-    return usage.percentBasis === 'used' && typeof usage.weekAllModelsPercent === 'number' ? 100 - usage.weekAllModelsPercent : null;
-  }
+  if (agent === 'claude') return usage.percentBasis === 'used' && valid(usage.weekAllModelsPercent) ? 100 - usage.weekAllModelsPercent : null;
   return null;
 }
 

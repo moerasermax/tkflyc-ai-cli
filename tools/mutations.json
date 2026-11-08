@@ -3970,8 +3970,8 @@
     "name": "kernel develop：kill 失敗也當停了",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/loop.ts",
-    "from": "if (await handle.kill()) { commit({ type: 'check_finished', pid: handle.pid }); return true; }",
-    "to": "await handle.kill(); commit({ type: 'check_finished', pid: handle.pid }); return true;",
+    "from": "if (await handle!.kill()) { safeToRelease = true; commit({ type: 'check_finished', pid: handle!.pid }); return true; }",
+    "to": "await handle!.kill(); safeToRelease = true; commit({ type: 'check_finished', pid: handle!.pid }); return true;",
     "expect": "檢查指令停不掉就是 stop_pending"
   },
   {
@@ -4297,9 +4297,9 @@
   {
     "name": "kernel triggers：忽略活躍 run 鎖",
     "script": "verify-ai-cli_kernel.mjs",
-    "file": "src/ai-cli_kernel/triggers.ts",
-    "from": "if (!lock.ok)",
-    "to": "if (!lock.ok && lock.heldBy === 'never-held')",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "if (same.length)",
+    "to": "if (same.length && false)",
     "expect": "主動觸發：別的 run 佔鎖跳過且不扣次數"
   },
   {
@@ -4361,9 +4361,9 @@
   {
     "name": "kernel triggers：失敗釋放可能還在用的鎖",
     "script": "verify-ai-cli_kernel.mjs",
-    "file": "src/ai-cli_kernel/triggers.ts",
-    "from": "if (active && !starting && runId)",
-    "to": "if (active && runId)",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "await (deps.launch ?? spawnRunner)(store);",
+    "to": "try { await (deps.launch ?? spawnRunner)(store); } catch (error) { releaseActiveLock(store.runId); throw error; }",
     "expect": "主動觸發：啟動失敗不重試且保留鎖與名額"
   },
   {
@@ -4474,8 +4474,8 @@
     "name": "kernel L5 收尾：名額延至啟動後落盤",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/triggers.ts",
-    "from": "    record(result('started', 'reserved'), 'reserved', mandate.digest); // 先扣名額；崩潰不退款。\n    const root = contract.develop?.repoRoot ?? describeRepo(contract.workFolder)?.root ?? contract.workFolder;\n    const hooks = existsSync(join(root, '.codex', 'hooks.json')) && contract.allowedWorkerModels.some(model => agentForModel(model) === 'codex');\n    const note = `委任範本 ${name}（${mandate.digest}）主動觸發。${hooks ? '專案層 .codex/hooks.json 在新 worktree 可能不生效。' : ''}`;\n    record(result('started', 'starting'), 'attempt');\n    deps.beforeStart?.();\n    // 上面檢查到這裡可能過了好幾秒，這段時間人可能撤銷範本或關掉開關。撤銷回報成功之後還開工，就等於沒有撤銷。\n    const current = aiCliKernelMandateShow({ name });\n    const revoked = !aiCliKernelTriggersEnabled() ? 'triggers_disabled'\n      : !current.approval ? 'mandate_unapproved'\n      : current.digest !== mandate.digest || current.approval.digest !== mandate.digest ? 'mandate_changed'\n      : Math.max(now, Date.now()) >= Date.parse(current.approval.expiresAt) ? 'mandate_expired' : null;\n    if (revoked) {\n      store.append({ type: 'state', state: 'cancelled', reason: revoked, detail: '開工前最後一次檢查，授權已經失效' });\n      return record(result('skipped', revoked));\n    }\n    starting = true;\n    await deps.approveAndStart(store, note);",
-    "to": "    const root = contract.develop?.repoRoot ?? describeRepo(contract.workFolder)?.root ?? contract.workFolder;\n    const hooks = existsSync(join(root, '.codex', 'hooks.json')) && contract.allowedWorkerModels.some(model => agentForModel(model) === 'codex');\n    const note = `委任範本 ${name}（${mandate.digest}）主動觸發。${hooks ? '專案層 .codex/hooks.json 在新 worktree 可能不生效。' : ''}`;\n    record(result('started', 'starting'), 'attempt');\n    deps.beforeStart?.();\n    // 上面檢查到這裡可能過了好幾秒，這段時間人可能撤銷範本或關掉開關。撤銷回報成功之後還開工，就等於沒有撤銷。\n    const current = aiCliKernelMandateShow({ name });\n    const revoked = !aiCliKernelTriggersEnabled() ? 'triggers_disabled'\n      : !current.approval ? 'mandate_unapproved'\n      : current.digest !== mandate.digest || current.approval.digest !== mandate.digest ? 'mandate_changed'\n      : Math.max(now, Date.now()) >= Date.parse(current.approval.expiresAt) ? 'mandate_expired' : null;\n    if (revoked) {\n      store.append({ type: 'state', state: 'cancelled', reason: revoked, detail: '開工前最後一次檢查，授權已經失效' });\n      return record(result('skipped', revoked));\n    }\n    starting = true;\n    await deps.approveAndStart(store, note);\n    record(result('started', 'reserved'), 'reserved', mandate.digest);",
+    "from": "    await deps.approveAndStart(store, note, () => {\n      record(result('started', 'reserved'), 'reserved', mandate.digest);",
+    "to": "    await deps.approveAndStart(store, note, () => {",
     "expect": "主動觸發：啟動當下名額與意圖已落盤"
   },
   {
@@ -4922,8 +4922,8 @@
     "name": "kernel 稽核：複驗 開工前不再確認授權",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/triggers.ts",
-    "from": "if (revoked) {",
-    "to": "if (revoked && (false as boolean)) {",
+    "from": "if (revoked) throw",
+    "to": "if (revoked && (false as boolean)) throw",
     "expect": "檢查之後才撤銷範本"
   },
   {

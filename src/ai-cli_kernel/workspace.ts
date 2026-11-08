@@ -9,6 +9,7 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readSync, real
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { mayBeAlive, sameIdentity } from '../core/job-store.js';
 import { lookupIdentities } from '../core/live-jobs.js';
 import type { CheckHandle, CheckpointRecord, CheckpointSpec, DevelopSpec, WorkspaceOps, WorkspaceState, ReleaseWorkspaceOps } from './types.js';
@@ -368,13 +369,16 @@ export const realWorkspace: WorkspaceOps & ReleaseWorkspaceOps = {
 
   reviewEvidence,
 
-  startCheck(command, cwd, logPath, outputChars) {
+  startCheck(command, cwd, logPath, outputChars, deferStart) {
     mkdirSync(dirname(logPath), { recursive: true });
     const fd = openSync(logPath, 'a', 0o600);
     const stderrPath = outputChars !== undefined ? `${logPath}.stderr` : logPath;
     const errFd = outputChars !== undefined ? openSync(stderrPath, 'a', 0o600) : fd;
     // 輸出直接寫檔不走 pipe：runner 當掉時指令不會因為 pipe 斷掉而異常。
-    const child = spawn(command, { cwd, shell: true, stdio: ['ignore', fd, errFd], detached: process.platform !== 'win32', windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+    const supervisor = fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? './check-supervisor.ts' : './check-supervisor.js', import.meta.url));
+    const sourceLoader = import.meta.url.endsWith('.ts') ? ['--import', import.meta.resolve('tsx')] : [];
+    const child = spawn(process.execPath, [...sourceLoader, supervisor, deferStart ? 'wait' : 'run', command], { cwd, stdio: [deferStart ? 'pipe' : 'ignore', fd, errFd], detached: true, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+    child.stdin?.on('error', () => { /* supervisor 已退出，wait 會回報結束碼 */ });
     closeSync(fd);
     if (errFd !== fd) closeSync(errFd);
     const pid = child.pid;
@@ -386,6 +390,7 @@ export const realWorkspace: WorkspaceOps & ReleaseWorkspaceOps = {
     });
     const handle: CheckHandle = {
       pid,
+      begin() { if (deferStart) child.stdin?.end('go\n'); },
       // 身分查詢有逾時，機器忙的時候會失敗。多試幾次，真的查不到就老實回空的，由呼叫端當成「認不出來」。
       async identify() {
         for (let attempt = 0; attempt < 3; attempt++) {

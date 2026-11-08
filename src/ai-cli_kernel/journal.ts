@@ -7,6 +7,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, truncateSync, writeFileSync, writeSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { readActiveRuns, readReservedRun, releaseRunSlot } from './admission.js';
 import { jobStateDir } from '../core/live-jobs.js';
 import type { KernelContract, KernelEvent, KernelEventBody, KernelReleaseEvent } from './types.js';
 
@@ -156,6 +157,10 @@ export function listRunIds(): string[] {
 function activeLockPath(): string { return join(kernelStateDir(), 'active.lock'); }
 
 export function readActiveRun(): string | null {
+  const slots = readActiveRuns();
+  if (slots.length) return slots[0].runId;
+  const reserved = readReservedRun();
+  if (reserved) return reserved;
   try { return (JSON.parse(readFileSync(activeLockPath(), 'utf8')) as { runId?: string }).runId ?? null; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
 }
@@ -176,5 +181,7 @@ export function acquireActiveLock(runId: string): { ok: true } | { ok: false; he
 }
 
 export function releaseActiveLock(runId: string): void {
-  if (readActiveRun() === runId) rmSync(activeLockPath(), { force: true });
+  releaseRunSlot(runId);
+  try { if (JSON.parse(readFileSync(activeLockPath(), 'utf8')).runId === runId) rmSync(activeLockPath(), { force: true }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
 }

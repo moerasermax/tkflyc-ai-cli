@@ -64,4 +64,8 @@ export function createDashboardEffects(kernel: typeof api = api, readGit: typeof
 }
 export const dashboardEffects = createDashboardEffects();
 export const dashboardDetail = dashboardEffects.detail;
-export async function dashboardActions(runId: string): Promise<KernelAction[]> { return actionsFor(await dashboardDetail(runId)); }
+export async function dashboardActions(runId: string): Promise<KernelAction[]> {
+  const [detail, status] = await Promise.all([dashboardDetail(runId), api.aiCliKernelStatus()]);
+  const activeRuns = 'activeRuns' in status ? status.activeRuns : [];
+  return actionsFor(detail).map(action => ({ ...action, activeRuns }));
+}

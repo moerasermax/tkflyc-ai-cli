@@ -66,6 +66,7 @@ export interface RunView {
   verification: { commit: string; passed: boolean; exitCode: number | null; timedOut: boolean; tail: string } | null;
   testFailures: number;
   /** kernel 自己跑的指令還沒回報結束。當掉後要先確認它停了才能動工作目錄。 */
+  testLockWaiting: string | null;
   openCheck: { kind: 'setup' | 'test' | 'context'; pid: number; started: string; name: string } | null;
   /** decide 要結案，但驗收可能還沒寫（當在兩次寫入之間）。 */
   pendingFinish: string | null;
@@ -91,7 +92,7 @@ export function replayJournal(events: KernelEvent[]): RunView {
     state: 'awaiting_approval', contractDigest: null, approvedDigest: null, versionId: null, runnerToken: null,
     baselineRecorded: false, baseline: null, actions: new Map(), plan: null, planCount: 0,
     stepResults: new Map(), stepOrder: [], acceptance: null, acceptanceFailures: 0,
-    workspaceReady: false, headCommit: null, verification: null, testFailures: 0, openCheck: null, pendingFinish: null,
+    workspaceReady: false, headCommit: null, verification: null, testFailures: 0, testLockWaiting: null, openCheck: null, pendingFinish: null,
     counters: { decides: 0, workerSteps: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, unknownUsage: 0, quotaUnknownDispatches: 0 },
     failureStreak: { failureClass: null, count: 0, detail: '' }, rejectedDecides: 0, lastRejection: '', pendingStop: null, humanStop: null,
     overrides: new Set(), notes: [], activeMs: 0, activeSince: null, lastSeq: 0,
@@ -117,6 +118,7 @@ export function replayJournal(events: KernelEvent[]): RunView {
         break;
       case 'runner_started':
         closeActive(event.at); // 上一個 runner 當掉時沒有 state 事件，算到這裡為止。
+        view.testLockWaiting = null;
         view.versionId = event.versionId; view.runnerToken = event.token; view.activeSince = Date.parse(event.at);
         break;
       case 'baseline': view.baselineRecorded = true; view.baseline = event.git; break;
@@ -187,6 +189,11 @@ export function replayJournal(events: KernelEvent[]): RunView {
       // 同一個檢查會記兩次：spawn 完先記 pid，查到身分再補。
       case 'check_started': view.openCheck = { kind: event.kind, pid: event.pid, started: event.started, name: event.name }; break;
       case 'check_finished': view.openCheck = null; break;
+      case 'test_lock_wait': closeActive(event.at); view.testLockWaiting = event.heldBy; break;
+      case 'test_lock_acquired':
+        view.testLockWaiting = null;
+        if (view.state === 'running' && view.activeSince === null) view.activeSince = Date.parse(event.at);
+        break;
       case 'verification':
         view.verification = { commit: event.commit, passed: event.passed, exitCode: event.exitCode, timedOut: event.timedOut, tail: event.tail };
         // 測試沒過，這段計畫就算走完了也不算數，回去問 decide。
@@ -196,7 +203,7 @@ export function replayJournal(events: KernelEvent[]): RunView {
       case 'state':
         view.state = event.state; view.reason = event.reason; view.detail = event.detail;
         view.pendingStop = null; view.humanStop = null; // 停下的決定已經落盤。
-        if (event.state !== 'running') closeActive(event.at);
+        if (event.state !== 'running') { closeActive(event.at); view.testLockWaiting = null; }
         break;
     }
   }

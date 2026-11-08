@@ -2171,7 +2171,7 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
     check('主動觸發：啟動當下名額與意圖已落盤', ledger().some(row => row.event === 'reserved' && row.runId === store.runId) && ledger().at(-1).event === 'attempt');
     calls++; await completed()(store);
   };
-  const invoke = (name = 'trigger-audit', extra = {}) => trigger({ name }, { launch, ...extra });
+  const invoke = (name = 'trigger-audit', extra = {}) => trigger({ name }, { launch, quota: async () => 80, ...extra });
   clear(); rmSync(switchPath, { force: true });
   const before = listRunIds().join();
   check('主動觸發：預設總開關關閉', !enabled());
@@ -2213,9 +2213,9 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   saveApproved('trigger-audit', { maxInputTokensPerDay: 0 });
   check('主動觸發：零 token 上限不跑', (await invoke()).reason === 'daily_tokens_limit');
   saveApproved();
-  const held = newRunId(); acquireActiveLock(held);
-  check('主動觸發：別的 run 佔鎖跳過且不扣次數', (await invoke()).reason === 'active_run_locked' && !ledger().some(row => row.event === 'reserved') && calls === 0);
-  check('主動觸發：鎖佔用記錄持有者', ledger().at(-1).detail === held);
+  const held = newRun().store.runId; acquireActiveLock(held);
+  check('主動觸發：別的 run 佔鎖跳過且不扣次數', (await invoke()).reason === 'same_repo' && !ledger().some(row => row.event === 'reserved') && calls === 0);
+  check('主動觸發：鎖佔用記錄持有者', ledger().at(-1).detail.includes(held));
   releaseActiveLock(held);
   writeFileSync(join(kernelStateDir(), 'triggers.lock'), 'held');
   check('主動觸發：觸發殘鎖不重試', (await invoke()).reason === 'trigger_busy' && calls === 0);
@@ -2567,18 +2567,18 @@ const { aiCliKernelArchiveList: archiveList, aiCliKernelArchiveShow: archiveShow
   let launches = 0;
   const launch = async () => { launches += 1; };
   fresh();
-  const revokedLate = await trigger({ name: 'recheck' }, { launch, beforeStart: () => revoke({ name: 'recheck' }) });
+  const revokedLate = await trigger({ name: 'recheck' }, { launch, quota: async () => 80, beforeStart: () => revoke({ name: 'recheck' }) });
   check('觸發：檢查之後才撤銷範本，一樣不開工', revokedLate.reason === 'mandate_unapproved' && launches === 0 && replayJournal(new RunStore(kernelRunDir(revokedLate.runId)).read()).state === 'cancelled', JSON.stringify(revokedLate));
   fresh();
-  const disabledLate = await trigger({ name: 'recheck' }, { launch, beforeStart: () => setEnabled(false) });
+  const disabledLate = await trigger({ name: 'recheck' }, { launch, quota: async () => 80, beforeStart: () => setEnabled(false) });
   check('觸發：檢查之後才關掉總開關，一樣不開工', disabledLate.reason === 'triggers_disabled' && launches === 0, JSON.stringify(disabledLate));
   fresh();
-  const changedLate = await trigger({ name: 'recheck' }, { launch, beforeStart: () => save({ name: 'recheck', input: { ...input, goal: '偷改了目標' }, maxRunsPerDay: 99 }) });
+  const changedLate = await trigger({ name: 'recheck' }, { launch, quota: async () => 80, beforeStart: () => save({ name: 'recheck', input: { ...input, goal: '偷改了目標' }, maxRunsPerDay: 99 }) });
   check('觸發：檢查之後才改內容，一樣不開工', ['mandate_changed', 'mandate_unapproved'].includes(changedLate.reason) && launches === 0, JSON.stringify(changedLate));
   fresh();
   const { readActiveRun } = await load('journal');
   let lockedRunExists = null;
-  await trigger({ name: 'recheck' }, { launch, beforeStart: () => { lockedRunExists = existsSync(join(kernelRunDir(readActiveRun()), 'contract.json')); } });
+  await trigger({ name: 'recheck' }, { launch, quota: async () => 80, beforeStart: () => { lockedRunExists = existsSync(join(kernelRunDir(readActiveRun()), 'contract.json')); } });
   check('觸發：鎖指向的 run 一定存在，當掉時人才取消得了', lockedRunExists === true, lockedRunExists);
   releaseActiveLock(readActiveRun()); // launch 是假的，沒有 runner 會釋放它。
   setEnabled(false);

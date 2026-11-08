@@ -229,6 +229,8 @@ export type KernelEventBody =
   /** kernel 自己跑的指令。記下身分，當掉後才有辦法確認它停了。 */
   | { type: 'check_started'; kind: 'setup' | 'test' | 'context'; pid: number; started: string; name: string }
   | { type: 'check_finished'; pid: number }
+  | { type: 'test_lock_wait'; heldBy: string }
+  | { type: 'test_lock_acquired' }
   | { type: 'verification'; commit: string; passed: boolean; exitCode: number | null; timedOut: boolean; tail: string }
   | { type: 'quota_unknown'; agent: string }
   | { type: 'state'; state: RunState; reason?: string; detail?: string };
@@ -274,6 +276,8 @@ export interface WorkspaceState {
 export interface CheckHandle {
   /** spawn 完立刻就有，先落盤。身分要查作業系統，比較慢，所以分開拿。 */
   pid: number;
+  /** Deferred real commands wait until their PID is durable in the global lease/journal. */
+  begin?(): void;
   identify(): Promise<{ started: string; name: string }>;
   /** 等最多 ms 毫秒。還沒結束回 null。 */
   wait(ms: number): Promise<{ exitCode: number | null; tail: string; output?: string } | null>;
@@ -301,7 +305,7 @@ export interface WorkspaceOps {
   diffText(spec: DevelopSpec, maxChars: number): string;
   /** 每類證據各自限額；baselineTests 保留全量，最終由 kernel 附加。 */
   reviewEvidence(spec: DevelopSpec, maxChars: number): import('./evidence.js').ReviewEvidence;
-  startCheck(command: string, cwd: string, logPath: string, outputChars?: number): CheckHandle;
+  startCheck(command: string, cwd: string, logPath: string, outputChars?: number, deferStart?: boolean): CheckHandle;
   /** 回 true 表示確定不在了。 */
   stopOrphanCheck(check: { pid: number; started: string; name: string }): Promise<boolean>;
 }

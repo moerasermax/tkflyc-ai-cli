@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+- kernel 以跨行程名額取代全機單一 active.lock：預設／硬上限三個、同 repo 一個，加入 Claude／Codex 額度並行閘門及人用本機設定檔；相容舊鎖、回收失效名額。setup／test 共用可取消、可依行程身分回收的全機測試鎖，等待不計入命令逾時；status 保留 active 並新增 activeRuns，dashboard／actions JSON 顯示全部佔用者。設定、遷移與實測範圍見 `docs/ai-cli_kernel/concurrency.md`。（Codex）
+
 - kernel archive list（CLI／MCP）改回固定欄位摘要：goal 前 80 字、evidence 序號與候選記憶數量；完整包改由既有 archive show 讀取。新增 repo／workFolder 精確篩選，格式移轉見 `docs/ai-cli_kernel/base-archive.md`。develop start 新增 baseRef，委任書固定解析 commit、保留分支漂移閘門，並持久記錄交付分支依賴；尚有未結束的依賴 run 時拒絕 cleanup。省略 baseRef 維持原行為。
 
 ### 修正

@@ -13,7 +13,9 @@ import { lookupIdentities } from '../core/live-jobs.js';
 import { mayBeAlive, sameIdentity } from '../core/job-store.js';
 import { assertCanStartJob } from '../core/worker-env.js';
 import { FileJobExecutor } from './executor.js';
-import { acquireActiveLock, atomicWrite, kernelRunDir, listRunIds, newRunId, readActiveRun, releaseActiveLock, RunStore } from './journal.js';
+import { admitRun, readActiveRuns, type ActiveRun, type AdmissionDeps } from './admission.js';
+import { releaseStoppedTestLock } from './test-lock.js';
+import { atomicWrite, kernelRunDir, listRunIds, newRunId, releaseActiveLock, RunStore } from './journal.js';
 import { boundaryKey, boundaryStatus, hasProbeEvidenceFormat, probeResultLabel, runBoundaryProbe, type ProbeRecord } from './probe.js';
 import { activeMinutes, nextStep, openActions, replayJournal, unprocessedActions, type RunView } from './replay.js';
 import { agentForModel } from './runtime.js';
@@ -190,7 +192,7 @@ async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRun
   return {
     origin: contract.origin ?? null,
     contextCommand: contract.contextCommand ?? null, context: view.context,
-    runId: store.runId, state: view.state, effectiveState, stateLabel: STATE_LABELS[effectiveState],
+    runId: store.runId, state: view.state, effectiveState, stateLabel: view.testLockWaiting ? `等測試鎖（被 ${view.testLockWaiting} 佔用）` : STATE_LABELS[effectiveState],
     reason: view.reason ?? null, detail: view.detail ?? null, goal: contract.goal, workFolder: contract.develop ? workDirOf(contract.develop) : contract.workFolder, template: contract.template,
     models: { decide: contract.decide, worker: contract.worker, allowedWorkers: contract.allowedWorkerModels }, contractDigest: view.contractDigest, boundary,
     develop: contract.develop ? {
@@ -294,7 +296,7 @@ export function aiCliKernelRollback(input: { runId: string; apply?: boolean }): 
 
 export interface KernelApproveInput { runId: string; note?: string; reconcile?: string; acknowledgeUnisolated?: boolean }
 
-export async function aiCliKernelApprove(input: KernelApproveInput, deps: { launch?: (store: RunStore) => Promise<void> } = {}): Promise<KernelRunStatus> {
+export async function aiCliKernelApprove(input: KernelApproveInput, deps: AdmissionDeps & { launch?: (store: RunStore) => Promise<void>; beforeStart?: () => void } = {}): Promise<KernelRunStatus> {
   assertCanStartJob();
   const store = storeFor(input.runId);
   const contract = store.readContract();
@@ -305,21 +307,11 @@ export async function aiCliKernelApprove(input: KernelApproveInput, deps: { laun
   if (view.state === 'stop_pending') throw new Error(`舊程序還沒確認停止，不能接回。請執行 ai-cli kernel cancel ${input.runId} 重新檢查`);
   if (view.state === 'running' && await aiCliKernelRunnerAlive(store) !== false) throw new Error('這個 run 已經在執行中');
 
-  if (view.state === 'needs_reconcile') {
-    if (input.reconcile !== 'abandon') throw new Error(`這個 run 有分不出結果的動作。確認實際情況後，加上 --reconcile abandon 放棄那個動作的結果`);
-    for (const action of openActions(view)) {
-      // 使用者放棄的是結果，不代表它沒有執行過，所以名額不退。
-      store.append({ type: 'action_abandoned', actionId: action.spec.actionId, reason: '使用者確認後放棄', refund: false });
-    }
-    if (view.openCheck) store.append({ type: 'check_finished', pid: view.openCheck.pid });
-  } else if (input.reconcile !== undefined) {
-    throw new Error('這個狀態不需要 --reconcile');
-  }
-
+  if (view.state === 'needs_reconcile' && input.reconcile !== 'abandon') throw new Error('結果不明，確認後使用 --reconcile abandon');
+  if (view.state !== 'needs_reconcile' && input.reconcile !== undefined) throw new Error('這個狀態不需要 --reconcile');
   if (view.state === 'awaiting_approval') {
     if (contract.develop) {
-      // 只有字面值 true 才算。全權限不能因為呼叫端少傳一個參數就默默給出去。
-      if (input.acknowledgeUnisolated !== true) throw new Error(`這個 run 的 worker 會拿到等於你本人的權限，不是隔離環境。讀完委任書後，要明確承認才能核准（CLI 加 --acknowledge-unisolated，MCP 傳 acknowledgeUnisolated: true）`);
+      if (input.acknowledgeUnisolated !== true) throw new Error('worker 未隔離；讀完委任書後加 --acknowledge-unisolated 明確承認');
       if (Date.now() > Date.parse(contract.develop.expiresAt)) throw new Error(`委任書在 ${contract.develop.expiresAt} 失效了，請重新 ai-cli kernel start`);
     }
     if (!contract.allowUnverifiedBoundary) {
@@ -327,28 +319,33 @@ export async function aiCliKernelApprove(input: KernelApproveInput, deps: { laun
         if (status !== 'PASS') throw new Error(`${agent} 的權限邊界探針結果是 ${status}。請先執行 ai-cli kernel probe --agent ${agent}`);
       }
     }
-    const lock = acquireActiveLock(input.runId);
-    if (!lock.ok) throw new Error(`受治理任務一次只能跑一個，目前被 ${lock.heldBy} 佔用。等它結束，或執行 ai-cli kernel cancel ${lock.heldBy}`);
-    store.append({ type: 'approved', contractDigest: digest, kind: 'contract', ...(input.note ? { note: input.note } : {}) });
-  } else {
-    const lock = acquireActiveLock(input.runId);
-    if (!lock.ok) throw new Error(`受治理任務一次只能跑一個，目前被 ${lock.heldBy} 佔用`);
-    const overrides = view.reason && OVERRIDABLE_REASONS.has(view.reason) && view.state === 'waiting_human' && !(view.reason === 'checkpoint_push_failed' && contract.origin?.kind === 'trigger') ? [view.reason] : [];
-    store.append({ type: 'approved', contractDigest: digest, kind: 'continue', ...(input.note ? { note: input.note } : {}), ...(overrides.length ? { overrides } : {}) });
   }
-  store.append({ type: 'state', state: 'running' });
+  await admitRun(store, () => {
+    // The preflight above can overlap another approval or cancellation while querying usage.
+    if (replayJournal(store.read()).lastSeq !== view.lastSeq || store.contractDigest() !== digest || store.cancelRequested()) throw new Error('run 在取得名額前已變動，請重新檢查狀態');
+    if (contract.develop && view.state === 'awaiting_approval' && Date.now() > Date.parse(contract.develop.expiresAt)) throw new Error('委任書已失效');
+    deps.beforeStart?.();
+    if (view.state === 'needs_reconcile') {
+      for (const action of openActions(view)) store.append({ type: 'action_abandoned', actionId: action.spec.actionId, reason: '使用者確認後放棄', refund: false });
+      if (view.openCheck) store.append({ type: 'check_finished', pid: view.openCheck.pid });
+    }
+    const overrides = view.reason && OVERRIDABLE_REASONS.has(view.reason) && view.state === 'waiting_human' && !(view.reason === 'checkpoint_push_failed' && contract.origin?.kind === 'trigger') ? [view.reason] : [];
+    store.append({ type: 'approved', contractDigest: digest, kind: view.state === 'awaiting_approval' ? 'contract' : 'continue', ...(input.note ? { note: input.note } : {}), ...(overrides.length ? { overrides } : {}) });
+    store.append({ type: 'state', state: 'running' });
+  }, deps);
   await (deps.launch ?? spawnRunner)(store);
   return statusOf(store);
 }
 
-export async function aiCliKernelStatus(input: { runId?: string } = {}): Promise<KernelRunStatus | { active: string | null; pendingArchiveCount: number; runs: Array<Pick<KernelRunStatus, 'runId' | 'effectiveState' | 'stateLabel' | 'goal' | 'nextAction' | 'origin'>> }> {
+export async function aiCliKernelStatus(input: { runId?: string } = {}): Promise<KernelRunStatus | { active: string | null; activeRuns: ActiveRun[]; pendingArchiveCount: number; runs: Array<Pick<KernelRunStatus, 'runId' | 'effectiveState' | 'stateLabel' | 'goal' | 'nextAction' | 'origin'>> }> {
   if (input.runId) return statusOf(storeFor(input.runId));
+  const activeRuns = readActiveRuns();
   const runs = [];
-  for (const runId of listRunIds().slice(0, 20)) {
+  for (const runId of new Set([...activeRuns.map(run => run.runId), ...listRunIds().slice(0, 20)])) {
     const status = await statusOf(new RunStore(kernelRunDir(runId)), false);
     runs.push({ runId, effectiveState: status.effectiveState, stateLabel: status.stateLabel, goal: status.goal.slice(0, 80), nextAction: status.nextAction, origin: status.origin });
   }
-  return { active: readActiveRun(), pendingArchiveCount: (await aiCliKernelArchiveList()).length, runs };
+  return { active: activeRuns[0]?.runId ?? null, activeRuns, pendingArchiveCount: (await aiCliKernelArchiveList()).length, runs };
 }
 
 /* ---- 本機歸檔標記。沒有 callback、目的地、工具名稱或外部服務參數。 ---- */
@@ -451,6 +448,7 @@ export async function cancelWithoutRunner(store: RunStore, executor: KernelExecu
       return;
     }
     store.append({ type: 'check_finished', pid: before.openCheck.pid });
+    await releaseStoppedTestLock(store.runId);
   }
   // 回報結束但還沒判定的寫入 job：它可能就是 stop_pending 的原因，不能略過。
   for (const action of unprocessedActions(before)) {
@@ -562,11 +560,11 @@ export { nextStep };
 export { aiCliKernelMandateSave, aiCliKernelMandateApprove, aiCliKernelMandateList, aiCliKernelMandateShow, aiCliKernelMandateRevoke } from './mandates.js';
 
 /** 一次性觸發；測試可注入前景 runner，絕不啟動真正模型。 */
-export function aiCliKernelTrigger(input: { name: string }, deps: { now?: KernelTriggerDeps['now']; launch?: (store: RunStore) => Promise<void>; beforeStart?: () => void } = {}) {
+export function aiCliKernelTrigger(input: { name: string }, deps: AdmissionDeps & { now?: KernelTriggerDeps['now']; launch?: (store: RunStore) => Promise<void>; beforeStart?: () => void } = {}) {
   return aiCliKernelRunTrigger(input.name, {
     now: deps.now ?? Date.now,
     ...(deps.beforeStart ? { beforeStart: deps.beforeStart } : {}),
-    approveAndStart: (store, note) => aiCliKernelApprove({ runId: store.runId, acknowledgeUnisolated: true, note }, { launch: deps.launch }),
+    approveAndStart: (store, note, beforeStart) => aiCliKernelApprove({ runId: store.runId, acknowledgeUnisolated: true, note }, { launch: deps.launch, quota: deps.quota, agentFor: deps.agentFor, beforeStart }),
   });
 }
 export { aiCliKernelTriggersEnabled, aiCliKernelTriggersSetEnabled, aiCliKernelTriggerDay } from './triggers.js';
