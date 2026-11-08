@@ -14,7 +14,7 @@ import { mayBeAlive, sameIdentity } from '../core/job-store.js';
 import { assertCanStartJob } from '../core/worker-env.js';
 import { FileJobExecutor } from './executor.js';
 import { acquireActiveLock, atomicWrite, kernelRunDir, listRunIds, newRunId, readActiveRun, releaseActiveLock, RunStore } from './journal.js';
-import { boundaryKey, boundaryStatus, runBoundaryProbe, type ProbeRecord } from './probe.js';
+import { boundaryKey, boundaryStatus, hasProbeEvidenceFormat, probeResultLabel, runBoundaryProbe, type ProbeRecord } from './probe.js';
 import { activeMinutes, nextStep, openActions, replayJournal, unprocessedActions, type RunView } from './replay.js';
 import { agentForModel } from './runtime.js';
 import { buildContract, TEMPLATES, type KernelStartInput } from './templates.js';
@@ -184,7 +184,9 @@ async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRun
   const effectiveState: EffectiveState = view.state === 'running' && alive === false ? 'interrupted' : view.state;
   const open = openActions(view)[0];
   const boundary = withBoundary ? boundaries(contract) : {};
-  const passed = Object.values(boundary).every(status => status === 'PASS');
+  const probeLabels = [...new Set([contract.decide.model, ...contract.allowedWorkerModels].map(agentForModel))]
+    .filter(agent => !contract.develop || !hasProbeEvidenceFormat(agent))
+    .map(agent => probeResultLabel(agent, boundary[agent] ?? 'UNKNOWN')).join('；');
   return {
     origin: contract.origin ?? null,
     contextCommand: contract.contextCommand ?? null, context: view.context,
@@ -199,7 +201,7 @@ async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRun
       checkpoint: contract.develop.checkpoint, checkpointResult: view.checkpoint, checkpointPrepared: view.checkpointPrepared,
       checkpointMode: contract.develop.checkpoint?.mode === 'push' && view.overrides.has('checkpoint_push_failed') && contract.origin?.kind !== 'trigger' ? 'local' : contract.develop.checkpoint?.mode ?? null,
     } : null,
-    boundaryLabel: contract.develop ? '未隔離：worker 權限等於你本人，worktree 只隔開正常路徑的寫入' : contract.allowUnverifiedBoundary ? '未驗證（呼叫端明確允許）' : passed ? '工具受限，非隔離' : '尚未通過探針',
+    boundaryLabel: contract.develop ? `未隔離：worker 權限等於你本人，worktree 只隔開正常路徑的寫入${probeLabels ? `；${probeLabels}` : ''}` : `${contract.allowUnverifiedBoundary ? '未驗證（呼叫端明確允許）；' : ''}${probeLabels}`,
     progress: {
       decides: { used: view.counters.decides, max: contract.budget.maxDecides },
       workerSteps: { used: view.counters.workerSteps, max: contract.budget.maxWorkerSteps },

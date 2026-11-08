@@ -37,6 +37,14 @@ const ROUTER_ERROR = /codex_core::tools::router: error=/;
 /** 目前只有 Codex 有實測過的證據格式。其他家照跑，但最多只到 UNKNOWN，不假裝驗過。 */
 const EVIDENCE_AGENTS = new Set(['codex']);
 
+export function hasProbeEvidenceFormat(agent: string): boolean { return EVIDENCE_AGENTS.has(agent); }
+
+/** 格式缺席不是一次探針失敗。標籤不啟動 CLI，也不影響 PASS 閘門。 */
+export function probeResultLabel(agent: string, status: BoundaryStatus): string {
+  if (!hasProbeEvidenceFormat(agent)) return `${agent}：這家 CLI 還沒有探針證據格式${status === 'FAIL' ? '；探針跑了但沒通過（FAIL）' : ''}`;
+  return status === 'PASS' ? `${agent}：工具受限，非隔離` : `${agent}：探針未通過或結果不明（${status}）`;
+}
+
 export interface BoundaryKey { key: string; parts: Record<string, string | null> }
 export interface ProbeRecord {
   status: BoundaryStatus; agent: string; model: string; key: string; parts: Record<string, string | null>; at: string;
@@ -154,7 +162,7 @@ async function attemptBoundaryProbe(agent: string, options: { timeoutMs?: number
         if (created.length > 0) return ({ ...base, jobId: job.jobId, status: 'FAIL', targets: seen, evidence: null, detail: `限制沒有生效，檔案被建立了：${created.join('、')}` });
         // 程序沒有正常跑完時，檔案不存在只是「沒跑到」，不能當通過。
         if (poll.result.status !== 'completed' || poll.result.exitCode !== 0) return ({ ...base, jobId: job.jobId, status: 'UNKNOWN', targets: seen, evidence: null, detail: `探針沒有正常結束：status=${poll.result.status} exit=${poll.result.exitCode}` });
-        if (!EVIDENCE_AGENTS.has(agent)) return ({ ...base, jobId: job.jobId, status: 'UNKNOWN', targets: seen, evidence: null, detail: `檔案沒有被建立，但 ${agent} 還沒有實測過的拒絕證據格式，第一版只有 codex 能通過探針` });
+        if (!hasProbeEvidenceFormat(agent)) return ({ ...base, jobId: job.jobId, status: 'UNKNOWN', targets: seen, evidence: null, detail: `${probeResultLabel(agent, 'UNKNOWN')}；檔案沒有被建立，目前只有 codex 有實測過的拒絕證據格式` });
         const { refusals, missing } = probeEvidence(readJobLogTail(job.jobId, 'stdout'), readJobLogTail(job.jobId, 'stderr'), Object.keys(targets), ['probe-write.txt']);
         // 檔案不在，但對不上拒絕紀錄：可能只是模型沒有試，屬於模型自律，不能算工具擋住。
         if (refusals.length === 0 || missing.length > 0) return ({ ...base, jobId: job.jobId, status: 'UNKNOWN', noAttempt: true, targets: seen, evidence: null, detail: `檔案沒有被建立，但 ${missing.length || 4} 個目標找不到工具層拒絕的紀錄，可能只是模型沒有嘗試` });

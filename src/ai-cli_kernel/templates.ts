@@ -7,6 +7,7 @@ import { KNOWN_BAD_MODELS, isKnownModelTarget, isRemovedModel, removedModelMessa
 import { ALLOWED_REASONING_EFFORTS } from '../core/reasoning.js';
 import { KERNEL_SCHEMA_VERSION, type DevelopSpec, type KernelBudget, type KernelContract } from './types.js';
 import { aiCliKernelCheckpointSpec, describeRepo, normalizeAllowedPaths } from './workspace.js';
+import { hasProbeEvidenceFormat, probeResultLabel } from './probe.js';
 
 export const DEFAULT_MODEL = 'gpt-6.1-sol';
 export const DEFAULT_EFFORT = 'medium';
@@ -73,7 +74,7 @@ export const TEMPLATES = {
     reportInstructions: `用繁體中文，依序包含這三個段落，標題照寫：
 ## 結論
 ## 發現
-每一項都要附至少一個引用，格式是相對於工作目錄的 路徑:行號，例如 src/app/cli.ts:42。kernel 會實際打開檔案核對，對不上就不算通過。
+每一項都要附至少一個引用，格式是「從 repo 根目錄算起的完整相對路徑:行號」，例如 src/app/cli.ts:42（不是只寫 cli.ts:42）。非 git 工作目錄則從工作目錄算起。kernel 會實際打開檔案核對，對不上就不算通過。
 ## 尚待確認
 沒讀到、沒驗證的部分寫在這裡。沒有就寫「無」。`,
     build: () => ({
@@ -87,11 +88,13 @@ export const TEMPLATES = {
   },
   develop: {
     description: '開發：在獨立的 worktree 和分支裡改程式、跑測試，做到測試通過。不合併、不推交付分支；可推專用回復點。worker 權限等於你本人，未隔離。',
-    reportInstructions: `用繁體中文，依序包含這三個段落，標題照寫：
+    reportInstructions: `用繁體中文，依序包含以下段落，標題照寫：
 ## 結論
 做完了什麼，一兩句。
 ## 改動
-改了哪些東西、為什麼這樣改。提到程式位置時用相對於工作目錄的 路徑:行號，kernel 會實際打開檔案核對，對不上就不算通過。
+改了哪些東西、為什麼這樣改。提到程式位置時用「從 repo 根目錄算起的完整相對路徑:行號」（例如 src/app/cli.ts:42，不是 cli.ts:42），kernel 會實際打開檔案核對，對不上就不算通過。
+## 為了讓既有測試通過而改動的斷言
+參照 kernel 提供的基準測試變更清單，逐檔說明為何改動或刪除既有斷言；未改動斷言的檔案也逐檔說明。無則寫「無」。清單只代表檔案變更，不代表已查明動機；未確認的部分要明講。
 ## 尚待確認
 沒做完、沒驗證、需要人判斷的部分寫在這裡。沒有就寫「無」。`,
     build: () => ({
@@ -115,6 +118,10 @@ function developNotices(repoRoot: string, models: readonly string[]): string[] {
   const notices = ['測試跑完後，kernel 會在這個 run 的 worktree 執行 git reset --hard 和 git clean -fd 清掉副產物。此時改動都已 commit，也不碰主目錄。這是 kernel 自己跑的，你的 hook 不會擋。'];
   if (existsSync(join(repoRoot, '.codex', 'hooks.json')) && models.some(model => resolveAgentIdForModel(model) === 'codex')) {
     notices.push('這個 repo 有專案層的 .codex/hooks.json，但 Codex 的 hook 信任綁絕對路徑，在 worktree 裡很可能不會觸發。依賴這些 hook 把關的話，請改用其他模型，或自己盯著。');
+  }
+  if (models.length === 1) notices.push('驗收只代表 worker 寫的測試和既有測試通過，沒有第二個模型檢查');
+  for (const agent of new Set(models.map(resolveAgentIdForModel))) {
+    if (!hasProbeEvidenceFormat(agent)) notices.push(probeResultLabel(agent, 'UNKNOWN'));
   }
   return notices;
 }

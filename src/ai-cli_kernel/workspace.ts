@@ -12,6 +12,7 @@ import { promisify } from 'node:util';
 import { mayBeAlive, sameIdentity } from '../core/job-store.js';
 import { lookupIdentities } from '../core/live-jobs.js';
 import type { CheckHandle, CheckpointRecord, CheckpointSpec, DevelopSpec, WorkspaceOps, WorkspaceState, ReleaseWorkspaceOps } from './types.js';
+import { boundedStat, changedBaselineTests, parseNameStatusZ, segmentedDiff, type ReviewEvidence } from './evidence.js';
 
 const exec = promisify(execFile);
 const TAIL_BYTES = 8192;
@@ -36,6 +37,15 @@ function mustGit(cwd: string, ...args: string[]): string {
   const result = git(cwd, ...args);
   if (result.status !== 0) throw new Error(`git ${args[0]} 失敗：${(result.stderr || result.stdout || String(result.error ?? '')).trim().slice(0, 600)}`);
   return result.stdout;
+}
+
+/** literal pathspec 加上 NUL 清單，避免空白、換行、引號或 :(glob) 路徑改變選檔語義。 */
+function reviewEvidence(spec: DevelopSpec, maxChars: number): ReviewEvidence {
+  const diffArgs = ['--no-ext-diff', '--no-textconv', '--no-color', '--find-renames', spec.baseCommit, 'HEAD', '--'];
+  const changes = parseNameStatusZ(mustGit(spec.worktree, 'diff', '--name-status', '-z', '--find-renames', spec.baseCommit, 'HEAD', '--'));
+  const full = mustGit(spec.worktree, 'diff', ...diffArgs);
+  const segmented = segmentedDiff(changes, full, maxChars, change => mustGit(spec.worktree, '--literal-pathspecs', 'diff', ...diffArgs, ...new Set([change.oldPath, change.path].filter((path): path is string => path !== undefined))));
+  return { ...segmented, stat: boundedStat(mustGit(spec.worktree, 'diff', '--stat', ...diffArgs)), baselineTests: changedBaselineTests(changes) };
 }
 
 /** 建委任書時用。不是 git repo 回 null。 */
@@ -325,9 +335,10 @@ export const realWorkspace: WorkspaceOps & ReleaseWorkspaceOps = {
   },
 
   diffText(spec, maxChars) {
-    const text = mustGit(spec.worktree, 'diff', spec.baseCommit, 'HEAD');
-    return text.length > maxChars ? `${text.slice(0, maxChars)}\n…（diff 太長，只附前 ${maxChars} 字元）` : text;
+    return reviewEvidence(spec, maxChars).diff;
   },
+
+  reviewEvidence,
 
   startCheck(command, cwd, logPath, outputChars) {
     mkdirSync(dirname(logPath), { recursive: true });

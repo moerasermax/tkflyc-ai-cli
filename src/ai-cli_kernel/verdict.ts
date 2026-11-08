@@ -5,8 +5,8 @@
  * 不代表有交付；模型自己說完成了也不算。這裡的檢查都是確定性的，不呼叫模型。
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, posix, relative, resolve } from 'node:path';
 import { digestText } from './journal.js';
 import type { AcceptanceCheck, FailureClass, GitSnapshot, RawJobResult } from './types.js';
 
@@ -36,7 +36,28 @@ export function classifyJobResult(result: RawJobResult): { ok: boolean; failureC
   return { ok: true, failureClass: null, detail: '' };
 }
 
-const CITATION = /(?<![\w.\-\\/])((?:[\w.\-一-鿿]+[\\/])*[\w.\-一-鿿]+\.[A-Za-z0-9]+):(\d+)(?:[-–](\d+))?/g;
+const CITATION = /(?<![\w.\-\\/:])((?:[A-Za-z]:)?[\\/]?(?:[\w.\-一-鿿]+[\\/])*[\w.\-一-鿿]+\.[A-Za-z0-9]+):(\d+)(?:[-–](\d+))?/g;
+
+function outside(folder: string, target: string): boolean {
+  const rel = relative(folder, target);
+  return rel.startsWith('..') || isAbsolute(rel);
+}
+
+/** 只問 git 的 index，不遞迴掃目錄，也不把 repo 以外的父目錄當候選。 */
+interface TrackedCitationFile { repoPath: string; target: string }
+function trackedFiles(folder: string): TrackedCitationFile[] {
+  const git = (...args: string[]) => spawnSync('git', ['-C', folder, ...args], { encoding: 'utf8', windowsHide: true, timeout: 60000, maxBuffer: 64 * 1024 * 1024 });
+  if (git('rev-parse', '--is-inside-work-tree').stdout?.trim() !== 'true') return [];
+  const prefixResult = git('rev-parse', '--show-prefix');
+  if (prefixResult.status !== 0) return [];
+  const prefix = prefixResult.stdout.replace(/\r?\n$/, '');
+  const result = git('ls-files', '--cached', '--full-name', '-z', '--');
+  if (result.status !== 0) return [];
+  return [...new Set(result.stdout.split('\0').filter(Boolean))]
+    .filter(path => path.startsWith(prefix))
+    .map(repoPath => ({ repoPath, target: resolve(folder, repoPath.slice(prefix.length)) }))
+    .filter(file => !outside(folder, file.target));
+}
 
 /** 確定性地檢查報告引用的 `路徑:行號` 真的存在。模型編出來的引用過不了這關。 */
 export function checkCitations(message: string, workFolder: string, minCount: number): { passed: boolean; findings: string[]; resolved: number } {
@@ -44,6 +65,7 @@ export function checkCitations(message: string, workFolder: string, minCount: nu
   const seen = new Set<string>();
   let resolved = 0;
   const unresolved: string[] = [];
+  let tracked: TrackedCitationFile[] | undefined;
   for (const match of message.matchAll(CITATION)) {
     const [, rawPath, startLine, endLine] = match;
     if (/^\d+(\.\d+)+$/.test(rawPath)) continue; // 127.0.0.1:8080 這類不是檔案。
@@ -53,10 +75,25 @@ export function checkCitations(message: string, workFolder: string, minCount: nu
     // 中文句子可能直接黏著路徑（見README.md:1）：原樣找不到就去掉開頭的中文再試一次。
     const normalized = rawPath.replace(/\\/g, '/');
     const stripped = normalized.replace(/^[一-鿿]+/, '');
-    const target = resolve(workFolder, !existsSync(resolve(workFolder, normalized)) && stripped ? stripped : normalized);
-    const rel = relative(workFolder, target);
-    if (rel.startsWith('..') || isAbsolute(rel)) { unresolved.push(`${citation}（超出工作目錄）`); continue; }
+    let target = resolve(workFolder, !existsSync(resolve(workFolder, normalized)) && stripped ? stripped : normalized);
+    // 先拒絕原始逃逸路徑，才可能做 basename 修正。
+    if (isAbsolute(normalized) || /^[A-Za-z]:/.test(normalized) || outside(workFolder, target)) { unresolved.push(`${citation}（超出工作目錄）`); continue; }
+    if (!existsSync(target)) {
+      tracked ??= trackedFiles(workFolder);
+      const candidatesFor = (name: string) => tracked!.filter(file => posix.basename(file.repoPath) === name);
+      // 中文可能是檔名的一部分；先試完整 basename，再試既有的句首中文剝除規則。
+      const rootRelative = tracked.find(file => file.repoPath === normalized || file.repoPath === stripped);
+      const exact = candidatesFor(posix.basename(normalized));
+      const candidates = rootRelative ? [rootRelative] : exact.length ? exact : candidatesFor(posix.basename(stripped || normalized));
+      if (candidates.length > 1) {
+        findings.push(`${citation}（同 basename 有 ${candidates.length} 個候選，列出 ${Math.min(8, candidates.length)} 個${candidates.length > 8 ? `，截斷 ${candidates.length - 8} 個` : ''}）：${candidates.slice(0, 8).map(file => JSON.stringify(file.repoPath)).join('、')}。請改用從 repo 根目錄算起的完整相對路徑:行號。`);
+        unresolved.push(`${citation}（多候選，不能自動選擇）`); continue;
+      }
+      if (candidates.length === 1) target = candidates[0].target;
+    }
     if (!existsSync(target) || !statSync(target).isFile()) { unresolved.push(`${citation}（檔案不存在）`); continue; }
+    // 在範圍內的相對路徑仍可能經 symlink/junction 跳出去；fallback 也過同一關。
+    if (outside(realpathSync.native(workFolder), realpathSync.native(target))) { unresolved.push(`${citation}（超出工作目錄）`); continue; }
     // 太大的檔案不讀，但也不能當作核對過。
     if (statSync(target).size > 20 * 1024 * 1024) { unresolved.push(`${citation}（檔案太大，無法核對）`); continue; }
     const lineCount = readFileSync(target, 'utf8').split('\n').length;

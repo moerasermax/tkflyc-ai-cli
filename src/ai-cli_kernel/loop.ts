@@ -17,6 +17,7 @@ import { aiCliKernelMemoryCandidates, type KernelMemoryOps } from './memory.js';
 import { classifyJobResult, evaluateChecks, snapshotsEqual } from './verdict.js';
 import type { RunStore } from './journal.js';
 import { outOfScope } from './workspace.js';
+import { kernelTestInventory } from './evidence.js';
 import { workDirOf, type ActionOutcome, type ActionSpec, type BoundaryStatus, type FailureClass, type GitSnapshot, type JobRef, type KernelContract, type KernelEventBody, type KernelExecutor, type PlanStep, type RawJobResult, type RunState, type WorkspaceOps, type WorkspaceState } from './types.js';
 
 export interface KernelLoopDeps {
@@ -580,7 +581,8 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
     const worker = view.actions.get(step.actionId)?.outcome;
     const delivered = develop ? ws!.inspect(develop) : null;
     if (develop) observeWorkspace();
-    const stat = develop ? ws!.diffStat(develop) : '';
+    const evidence = develop ? ws!.reviewEvidence(develop, REVIEW_DIFF_CHARS) : null;
+    const stat = evidence?.stat ?? '';
     const report = store.readOutput(step.messageFile!);
     store.writeReport(develop && delivered ? `${report.trimEnd()}
 
@@ -599,6 +601,7 @@ ${stat}
 \`\`\`
 ` : report);
     if (view.context && !view.context.ok) store.writeReport(`${store.readOutput(store.reportPath).trimEnd()}\n\n## 外部資料讀取\ncontextCommand 失敗（不阻擋開工）：${view.context.detail}\n`);
+    if (evidence) store.writeReport(`${store.readOutput(store.reportPath).trimEnd()}${kernelTestInventory(evidence.baselineTests)}`);
     store.writeVerdict({
       authorization: { ok: true, contractDigest: view.approvedDigest },
       execution: { ok: true, jobStatus: worker?.jobStatus ?? null, exitCode: worker?.exitCode ?? null },
@@ -685,7 +688,7 @@ ${stat}
     }
     const isReport = view.plan?.reportStep === step!.id;
     const mode = step!.mode ?? 'read';
-    const review = develop && mode !== 'write' ? { verification: view.verification, diff: ws!.diffText(develop, REVIEW_DIFF_CHARS) } : undefined;
+    const review = develop && (mode !== 'write' || isReport) ? { verification: view.verification, ...ws!.reviewEvidence(develop, REVIEW_DIFF_CHARS) } : undefined;
     return {
       actionId, kind, stepId: step!.id, model: step!.model ?? contract.worker.model,
       ...(contract.worker.effort ? { effort: contract.worker.effort } : {}), marker, prompt: buildWorkerPrompt(contract, step!, marker, isReport, review),

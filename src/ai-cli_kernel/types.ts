@@ -293,8 +293,10 @@ export interface WorkspaceOps {
   restore(spec: DevelopSpec): void;
   refs(spec: DevelopSpec): string[];
   diffStat(spec: DevelopSpec): string;
-  /** 相對基準 commit 的 diff，超過 maxChars 會截斷並註明。給唯讀審查者看。 */
+  /** 相對基準 commit 的 diff；超額時逐檔截斷，省略明細在 reviewEvidence.files。 */
   diffText(spec: DevelopSpec, maxChars: number): string;
+  /** 每類證據各自限額；baselineTests 保留全量，最終由 kernel 附加。 */
+  reviewEvidence(spec: DevelopSpec, maxChars: number): import('./evidence.js').ReviewEvidence;
   startCheck(command: string, cwd: string, logPath: string, outputChars?: number): CheckHandle;
   /** 回 true 表示確定不在了。 */
   stopOrphanCheck(check: { pid: number; started: string; name: string }): Promise<boolean>;

@@ -3178,8 +3178,8 @@
     "name": "kernel：引用可以跑出工作目錄",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/verdict.ts",
-    "from": "if (rel.startsWith('..') || isAbsolute(rel)) {",
-    "to": "if (false) {",
+    "from": "return rel.startsWith('..') || isAbsolute(rel);",
+    "to": "return false;",
     "expect": "引用跑出工作目錄要擋"
   },
   {
@@ -3538,7 +3538,7 @@
     "name": "kernel develop：審查者拿不到 diff",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/loop.ts",
-    "from": "const review = develop && mode !== 'write' ? { verification: view.verification, diff: ws!.diffText(develop, REVIEW_DIFF_CHARS) } : undefined;",
+    "from": "const review = develop && (mode !== 'write' || isReport) ? { verification: view.verification, ...ws!.reviewEvidence(develop, REVIEW_DIFF_CHARS) } : undefined;",
     "to": "const review = undefined;",
     "expect": "審查者拿到 kernel 產生的 diff"
   },
