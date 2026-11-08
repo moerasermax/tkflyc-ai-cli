@@ -10,7 +10,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const load = name => import(pathToFileURL(join(ROOT, 'dist', 'ai-cli_kernel', `${name}.js`)).href);
+const source = process.argv.includes('--source');
+const load = name => import(pathToFileURL(join(ROOT, source ? 'src' : 'dist', 'ai-cli_kernel', `${name}.${source ? 'ts' : 'js'}`)).href);
+const cliEntry = source ? ['--import', 'tsx', join(ROOT, 'src', 'bin', 'ai-cli.ts')] : [join(ROOT, 'dist', 'bin', 'ai-cli.js')];
 const { RunStore, kernelRunDir, newRunId, acquireActiveLock, releaseActiveLock } = await load('journal');
 const { replayJournal, nextStep } = await load('replay');
 const { runKernelLoop: rawLoop } = await load('loop');
@@ -2179,7 +2181,7 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   check('主動觸發：關閉原因持久寫入帳本', ledger().at(-1).reason === 'triggers_disabled');
   setEnabled(true);
   check('主動觸發：總開關持久保存', enabled() && JSON.parse(readFileSync(switchPath)).enabled === true);
-  const externalOff = spawnSync(process.execPath, [join(ROOT, 'dist', 'bin', 'ai-cli.js'), 'kernel', 'triggers', 'off', '--json'], { env: process.env, encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  const externalOff = spawnSync(process.execPath, [...cliEntry, 'kernel', 'triggers', 'off', '--json'], { env: process.env, encoding: 'utf8', windowsHide: true, timeout: 30000 });
   check('主動觸發：跨 CLI 程序停用立即重新讀取', externalOff.status === 0 && JSON.parse(externalOff.stdout).enabled === false && !enabled());
   setEnabled(true);
   check('主動觸發：非法開關不能當成同意', !!failing(setEnabled, 'true'));
@@ -2500,13 +2502,13 @@ const { aiCliKernelArchiveList: archiveList, aiCliKernelArchiveShow: archiveShow
     const text = await cli(['status']);
     check('L5 歸檔 status：第一行待歸檔筆數並標出觸發', text.code === 0 && text.out.startsWith('待歸檔 26 筆\n') && text.out.includes('[觸發：nightly]'));
     const list = await cli(['archive', 'list', '--json']);
-    check('L5 歸檔 CLI：list 只列待歸檔並保留觸發來源', list.code === 0 && JSON.parse(list.out).length === 26 && JSON.parse(list.out).some(p => p.origin?.mandate === 'nightly'));
+    check('L5 歸檔 CLI：list 只列待歸檔摘要，觸發來源留在 show', list.code === 0 && JSON.parse(list.out).length === 26 && JSON.parse(list.out).every(p => !Object.hasOwn(p, 'origin') && typeof p.candidateMemories === 'number'));
     const show = await cli(['archive', 'show', crashed.store.runId, '--json']);
     check('L5 歸檔 CLI：show JSON 與 API 一致', show.code === 0 && show.out.trim() === JSON.stringify(await archiveShow({ runId: crashed.store.runId }), null, 2));
     const done = await cli(['archive', 'done', crashed.store.runId, '--note', 'handoff-note', '--json']);
     check('L5 歸檔 CLI：done 持久標記並從列表消失', done.code === 0 && JSON.parse(done.out).note === 'handoff-note' && (await archiveList()).length === 25);
     check('L5 歸檔 CLI：show 仍可讀已標記的 run', (await cli(['archive', 'show', crashed.store.runId])).out.includes('handoff-note'));
-    const external = spawnSync(process.execPath, [join(ROOT, 'dist', 'bin', 'ai-cli.js'), 'kernel', 'archive', 'list', '--json'], { encoding: 'utf8', env: { ...process.env, AI_CLI_AUTO_UPDATE: 'off' }, windowsHide: true });
+    const external = spawnSync(process.execPath, [...cliEntry, 'kernel', 'archive', 'list', '--json'], { encoding: 'utf8', env: { ...process.env, AI_CLI_AUTO_UPDATE: 'off' }, windowsHide: true });
     check('L5 歸檔 CLI：另一程序看得到 archived.json', external.status === 0 && !JSON.parse(external.stdout).some(p => p.runId === crashed.store.runId));
     for (const args of [[], ['send'], ['list', 'extra'], ['show'], ['done'], ['list', '--note', 'x'], ['show', crashed.store.runId, '--command', 'write'], ['done', crashed.store.runId, '--note'], ['done', crashed.store.runId, '--json', 'false'], ['done', crashed.store.runId, '--planner'], ['show', '../escape']]) check(`L5 歸檔 CLI：拒絕不合法輸入 ${args.join(' ')}`, (await cli(['archive', ...args])).code === 1);
     process.env.AI_CLI_KERNEL = 'on';
@@ -2659,7 +2661,7 @@ const { aiCliKernelArchiveList: archiveList, aiCliKernelArchiveShow: archiveShow
   writeFileSync(join(bad.store.dir, 'archived.json'), '{ 壞掉');
   const list = await archiveList();
   const badRow = list.find(packet => packet.runId === bad.store.runId);
-  check('歸檔：一筆損毀不影響其他 run，壞的那筆也留在清單上', list.some(packet => packet.runId === good.store.runId) && badRow?.effectiveState === 'unreadable', badRow?.goal);
+  check('歸檔：一筆損毀不影響其他 run，壞的那筆也留在清單上', list.some(packet => packet.runId === good.store.runId) && badRow?.state === 'unreadable', badRow?.goal);
   rmSync(join(bad.store.dir, 'archived.json'));
 }
 {

@@ -68,6 +68,7 @@ const TESTS = [
   'verify-launcher-jobs.mjs',
   'verify-ai-cli_kernel.mjs',
   'verify-ai-cli_kernel-evidence.mjs',
+  'verify-ai-cli_kernel-base-archive.mjs',
   'verify-ai-cli_kernel-e2e.mjs',
   'verify-ai-cli_kernel-dashboard.mjs',
   'verify-run-tests.mjs',

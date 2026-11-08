@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+- kernel archive list（CLI／MCP）改回固定欄位摘要：goal 前 80 字、evidence 序號與候選記憶數量；完整包改由既有 archive show 讀取。新增 repo／workFolder 精確篩選，格式移轉見 `docs/ai-cli_kernel/base-archive.md`。develop start 新增 baseRef，委任書固定解析 commit、保留分支漂移閘門，並持久記錄交付分支依賴；尚有未結束的依賴 run 時拒絕 cleanup。省略 baseRef 維持原行為。
+
 ### 修正
 - kernel dashboard 新分頁支援 Windows Terminal Store execution alias：以 PATH、lstat 與執行存取檢查定位，保持無 shell spawn 及既有退出碼；失敗時提供引用目前 Node／CLI 入口的 PowerShell 指令，正確處理空白及單引號。（@moerasermax）
 - kernel dashboard 的手動更新與輪詢同時完成時，只保留一個更新計時器，確保離開後完整清理。確認指令依 POSIX／PowerShell 引用參數，保護分支名中的 shell 展開字元；新分頁入口的相對路徑以啟動工作目錄解析。（@moerasermax）

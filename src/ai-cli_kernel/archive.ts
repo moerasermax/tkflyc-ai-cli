@@ -101,3 +101,26 @@ export function aiCliKernelBuildArchivePacket(store: KernelArchiveSnapshot) {
 }
 
 export type KernelArchivePacket = ReturnType<typeof aiCliKernelBuildArchivePacket>;
+
+/** list 的線上格式；只挑摘要欄位，不能把 packet 展開回傳。 */
+export interface KernelArchiveSummary {
+  runId: string;
+  state: KernelArchivePacket['effectiveState'] | 'unreadable';
+  reason: string | null;
+  goal: string;
+  repo: string | null;
+  branch: string | null;
+  latestCommit: string | null;
+  evidence: { journalSeq: number | null; releaseEvents: number | null };
+  candidateMemories: number;
+}
+
+export function aiCliKernelArchiveSummary(packet: KernelArchivePacket): KernelArchiveSummary {
+  return {
+    runId: packet.runId, state: packet.effectiveState, reason: packet.reason,
+    goal: Array.from(packet.goal).slice(0, 80).join(''), repo: packet.repo, branch: packet.branch,
+    latestCommit: packet.latestCommit,
+    evidence: { journalSeq: packet.evidence.journalSeq, releaseEvents: packet.evidence.releaseEvents },
+    candidateMemories: packet.candidateMemories.length,
+  };
+}

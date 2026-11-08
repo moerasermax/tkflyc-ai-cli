@@ -257,12 +257,17 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
 
   /** 主 repo 的 ref 和開工時比，哪些動了。push、動 master、開分支都會落在這裡。 */
   const refsChanged = (): string[] => {
-    if (!develop || !existsSync(refsBaselinePath)) return [];
-    const before = new Set(readFileSync(refsBaselinePath, 'utf8').split('\n').filter(Boolean));
+    if (!develop) return [];
+    if (!develop.baseRefRef && !existsSync(refsBaselinePath)) return [];
     const now = ws!.refs(develop);
+    // 建立委任書到第一次 runner 啟動之間也可能移動；不能用啟動時的新值取代已核准的 commit。
+    const pinned = develop.baseRefRef && !now.includes(`${develop.baseCommit} ${develop.baseRefRef}`) ? [develop.baseRefRef] : [];
+    if (!existsSync(refsBaselinePath)) return pinned;
+    const before = new Set(readFileSync(refsBaselinePath, 'utf8').split('\n').filter(Boolean));
     const after = new Set(now);
     const name = (line: string) => line.slice(line.indexOf(' ') + 1);
-    return [...new Set([...[...before].filter(line => !after.has(line)), ...now.filter(line => !before.has(line))].map(name))];
+    const changed = [...[...before].filter(line => !after.has(line)), ...now.filter(line => !before.has(line))].map(name);
+    return [...new Set([...pinned, ...changed])];
   };
 
   /** develop 的交付條件。模型的自述不算數，全部從 git 和測試結果判斷。 */

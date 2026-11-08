@@ -92,6 +92,10 @@ export interface ReleaseWorkspaceOps {
  * worktree 只隔開正常路徑的寫入，擋不住蓄意的操作。
  */
 export interface DevelopSpec {
+  /** 僅明確指定基準的新委任書有；baseCommit 永遠是建立時解析的固定 commit。 */
+  baseRef?: string;
+  baseRefRef?: string;
+  dependsOnRunId?: string;
   /** 舊委任書沒有此欄位，接回時維持原來的行為。 */
   checkpoint?: CheckpointSpec;
   repoRoot: string;

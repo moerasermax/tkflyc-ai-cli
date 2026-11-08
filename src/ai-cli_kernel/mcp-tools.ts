@@ -14,8 +14,8 @@ const RUN_ID = { type: 'string', description: 'run id，例如 kr-20261106-01234
 const TOOLS = [
   {
     name: 'ai-cli_kernel_archive_list',
-    description: 'List every unarchived stopped or interrupted run, including triggered runs. Returns journal-derived packets. Does not write Planner or Knowledge or execute commands.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    description: 'List compact summaries of every unarchived stopped or interrupted run. goal is limited to 80 characters and candidateMemories is a count; full packets are available only through archive_show. Optional absolute repo path matches git common-dir identity (including linked worktrees); workFolder matches the original start directory exactly; both filters intersect. Unreadable identities remain visible as unreadable summaries. No external writes.',
+    inputSchema: { type: 'object', properties: { repo: { type: 'string', description: '絕對 git repo 路徑，包含其 linked worktree 的 run。' }, workFolder: { type: 'string', description: '原始 start 工作目錄的絕對路徑，精確比對；非子目錄遞迴篩選。' } }, additionalProperties: false },
   },
   {
     name: 'ai-cli_kernel_archive_show',
@@ -41,6 +41,7 @@ const TOOLS = [
         goal: { type: 'string', description: '要達成什麼。' },
         contextCommand: { type: 'string', description: '使用者提供的唯讀外部資料命令。核准後開工前跑一次，失敗不擋；命令以本人權限執行，不是隔離環境，也不受 AI hook 管制。請先顯示命令讓使用者確認；kernel 不提供 Planner／Knowledge 寫入工具。' },
         workFolder: { type: 'string', description: '工作目錄的絕對路徑。' },
+        baseRef: { type: 'string', description: 'develop：本 repo 的本地分支名或 commit ID。建立委任書時解析並綁定 commit；workFolder 仍是來源 repo。省略時維持 HEAD 基準。' },
         template: { type: 'string', enum: ['readonly-audit', 'develop'], description: '範本，預設 readonly-audit。develop 會改程式，未隔離。' },
         model: { type: 'string', description: 'worker 模型，預設 gpt-6.1-sol。' },
         effort: { type: 'string', description: 'worker effort，預設 medium。' },
@@ -132,7 +133,7 @@ export async function aiCliKernelHandleTool(name: string, args: Record<string, u
   if (!aiCliKernelEnabled()) throw new Error('ai-cli_kernel 尚未開啟。請先執行 ai-cli kernel enable');
   switch (name) {
     case 'ai-cli_kernel_archive_list':
-      return aiCliKernelArchiveList(args as Record<string, never>);
+      return aiCliKernelArchiveList(args);
     case 'ai-cli_kernel_archive_show':
     case 'ai-cli_kernel_archive_done': {
       const allowed = name === 'ai-cli_kernel_archive_done' ? ['runId', 'note', 'journalSeq', 'releaseEvents'] : ['runId'];
@@ -157,6 +158,7 @@ export async function aiCliKernelHandleTool(name: string, args: Record<string, u
           workerModels: optionalStrings(args, 'workerModels'), testCommand: optionalString(args, 'testCommand'), setupCommand: optionalString(args, 'setupCommand'),
           allowedPaths: optionalStrings(args, 'allowedPaths'), mandateHours: typeof args.mandateHours === 'number' ? args.mandateHours : undefined,
           checkpoint: optionalString(args, 'checkpoint'),
+          baseRef: optionalString(args, 'baseRef'),
         }).filter(([, value]) => value !== undefined)),
       });
     case 'ai-cli_kernel_approve':

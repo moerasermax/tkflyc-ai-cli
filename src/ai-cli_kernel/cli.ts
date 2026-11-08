@@ -33,6 +33,7 @@ readonly-audit（預設）只讀不改。develop 會在獨立的 worktree 和分
       [--allow-unverified]               探針沒過也照跑，標籤會寫「未驗證」
       [--context-command <唯讀指令>]     核准後開工前讀一次外部資料；以本人權限執行，不受 AI hook 限制
     develop 範本：
+      [--base-ref <分支或 commit>]       建立時固定解析 commit；省略維持 HEAD 基準
       --test <指令>                      kernel 自己跑的驗收指令（必填），模型不能改
       [--setup <指令>]                   新 worktree 要先跑的準備指令，例如 npm ci
       [--allow-path <a,b>]               只能改這些路徑（相對 --cwd），不給就是整個 repo
@@ -47,7 +48,7 @@ readonly-audit（預設）只讀不改。develop 會在獨立的 worktree 和分
   status [run]                           看狀態；不給 run 就列出最近的
   actions <run> --json                    列出此刻可用操作與確認參數
   dashboard [--new-tab]                   全螢幕控制面板；新分頁僅支援 Windows Terminal
-  archive list                          列出所有待歸檔 run（包含停住或當掉的）
+  archive list [--repo <路徑>] [--work-folder <路徑>] 列出待歸檔摘要（完整包用 show）
   archive show <run>                     從日誌計算歸檔包，不執行命令、不寫外部服務
   archive done <run> [--note <文字>]     主 session 完成交接後，只在本機標記
   result <run>                           看最終報告與裁決
@@ -137,6 +138,7 @@ function startInput(flags: Map<string, string | true>): KernelStartInput {
       workerModels: listFlag(flags, 'worker-models'), testCommand: stringFlag(flags, 'test'), setupCommand: stringFlag(flags, 'setup'),
       allowedPaths: listFlag(flags, 'allow-path'), mandateHours: numberFlag(flags, 'mandate-hours'),
       checkpoint: stringFlag(flags, 'checkpoint'),
+      baseRef: stringFlag(flags, 'base-ref'),
       contextCommand: stringFlag(flags, 'context-command'),
     }),
   };
@@ -165,6 +167,7 @@ export function formatStatus(status: KernelRunStatus): string {
     ...(status.develop ? [
       `來源     ${status.develop.repoRoot}（這裡不會被改動）`,
       `分支     ${status.develop.branch}（基準 ${status.develop.baseCommit.slice(0, 10)}）`,
+      ...(status.develop.baseRef !== undefined ? [`基準輸入 ${status.develop.baseRef} → ${status.develop.baseCommit}${status.develop.dependsOnRunId ? `；依賴 ${status.develop.dependsOnRunId}` : ''}`] : []),
       ...(status.develop.checkpoint ? [`回復點   ${status.develop.checkpointMode}；遠端 ${status.develop.checkpoint.remote ?? '無'}；分支 ${status.develop.checkpoint.ref}${status.develop.checkpointResult ? ` @ ${status.develop.checkpointResult.commit}（${status.develop.checkpointResult.pushed ? '已推送' : '只留本地'}）` : status.develop.checkpointPrepared ? ` @ ${status.develop.checkpointPrepared.commit}（尚未完成）` : ''}`] : []),
       `測試     ${status.develop.testCommand}${status.develop.setupCommand ? `（先跑 ${status.develop.setupCommand}）` : ''}${status.develop.verifiedCommit ? `，${status.develop.verifiedCommit.slice(0, 10)} 已通過` : ''}${status.develop.testFailures ? `，失敗 ${status.develop.testFailures} 次` : ''}`,
       `範圍     ${status.develop.allowedPaths.length ? status.develop.allowedPaths.join('、') : '整個 repo（沒有限制路徑）'}`,
@@ -217,12 +220,12 @@ export async function runKernelCli(argv: string[], io: Io, deps: { schedule?: Ke
       case 'archive': {
         const [operation, runId] = positionals;
         if (!['list', 'show', 'done'].includes(operation) || positionals.length !== (operation === 'list' ? 1 : 2)) throw new Error('用法：archive list，或 archive show|done <run> [--note <文字>]');
-        const allowed = operation === 'done' ? ['note', 'json'] : ['json'];
+        const allowed = operation === 'done' ? ['note', 'json'] : operation === 'list' ? ['repo', 'work-folder', 'json'] : ['json'];
         for (const flag of flags.keys()) if (!allowed.includes(flag)) throw new Error(`archive ${operation} 不接受 --${flag}`);
         if (flags.has('json') && flags.get('json') !== true) throw new Error('--json 不接受值');
         if (operation === 'list') {
-          const packets = await aiCliKernelArchiveList();
-          emit(packets, `待歸檔 ${packets.length} 筆\n` + packets.map(packet => `${packet.runId}  ${packet.effectiveState}${packet.origin ? `  [觸發：${packet.origin.mandate}]` : ''}  ${packet.goal.replace(/\s+/g, ' ')}`).join('\n') + (packets.length ? '\n' : ''));
+          const packets = await aiCliKernelArchiveList(optionalFields({ repo: stringFlag(flags, 'repo'), workFolder: stringFlag(flags, 'work-folder') }));
+          emit(packets, `待歸檔 ${packets.length} 筆\n${JSON.stringify(packets, null, 2)}\n`);
         } else if (operation === 'show') {
           const packet = await aiCliKernelArchiveShow({ runId });
           emit(packet, JSON.stringify(packet, null, 2) + '\n');

@@ -6,7 +6,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { KNOWN_BAD_MODELS, isKnownModelTarget, isRemovedModel, removedModelMessage, resolveAgentIdForModel, resolveModelAlias } from '../models/catalog.js';
 import { ALLOWED_REASONING_EFFORTS } from '../core/reasoning.js';
 import { KERNEL_SCHEMA_VERSION, type DevelopSpec, type KernelBudget, type KernelContract } from './types.js';
-import { aiCliKernelCheckpointSpec, describeRepo, normalizeAllowedPaths } from './workspace.js';
+import { aiCliKernelCheckpointSpec, aiCliKernelResolveBaseRef, describeRepo, normalizeAllowedPaths } from './workspace.js';
 import { hasProbeEvidenceFormat, probeResultLabel } from './probe.js';
 
 export const DEFAULT_MODEL = 'gpt-6.1-sol';
@@ -22,6 +22,7 @@ const DEVELOP_BUDGET: Partial<KernelBudget> = { maxWorkerSteps: 10, maxDecides: 
 const DEFAULT_MANDATE_HOURS = 24;
 
 export interface KernelStartInput {
+  baseRef?: string;
   contextCommand?: string;
   checkpoint?: string;
   goal: string;
@@ -134,9 +135,11 @@ function buildDevelopSpec(input: KernelStartInput, workFolder: string, now: Date
   if (!repo) throw new Error(`develop 範本需要 git repo，而且至少有一個 commit：${workFolder}`);
   const hours = input.mandateHours ?? DEFAULT_MANDATE_HOURS;
   if (!Number.isFinite(hours) || hours <= 0) throw new Error('mandateHours 必須是正數');
+  const base = input.baseRef === undefined ? null : aiCliKernelResolveBaseRef(repo.root, input.baseRef);
   return {
     checkpoint: aiCliKernelCheckpointSpec(repo.root, context.runId, input.checkpoint),
-    repoRoot: repo.root, prefix: repo.prefix, baseCommit: repo.head, branch: `ai-cli_kernel/${context.runId}`, worktree: context.worktree, testCommand,
+    repoRoot: repo.root, prefix: repo.prefix, baseCommit: base?.commit ?? repo.head, branch: `ai-cli_kernel/${context.runId}`, worktree: context.worktree, testCommand,
+    ...(base ? { baseRef: input.baseRef!, ...(base.ref ? { baseRefRef: base.ref } : {}) } : {}),
     ...(input.setupCommand?.trim() ? { setupCommand: input.setupCommand.trim() } : {}),
     allowedPaths: normalizeAllowedPaths(input.allowedPaths ?? [], repo.prefix), dirtyAtStart: repo.dirty,
     expiresAt: new Date(now.getTime() + hours * 3600000).toISOString(),
@@ -157,8 +160,8 @@ export function buildContract(input: KernelStartInput, now = new Date(), context
   try { if (!statSync(workFolder).isDirectory()) throw new Error('not a directory'); }
   catch { throw new Error(`工作目錄不存在：${workFolder}`); }
   const isDevelop = templateName === 'develop';
-  if (!isDevelop && (input.checkpoint !== undefined || input.testCommand !== undefined || input.setupCommand !== undefined || input.allowedPaths !== undefined || input.mandateHours !== undefined)) {
-    throw new Error(`testCommand、setupCommand、allowedPaths、mandateHours 只有 develop 範本能用，${templateName} 不會改檔`);
+  if (!isDevelop && (input.baseRef !== undefined || input.checkpoint !== undefined || input.testCommand !== undefined || input.setupCommand !== undefined || input.allowedPaths !== undefined || input.mandateHours !== undefined)) {
+    throw new Error(`baseRef、testCommand、setupCommand、allowedPaths、mandateHours 只有 develop 範本能用，${templateName} 不會改檔`);
   }
   const workerModel = assertDispatchableModel(input.model ?? DEFAULT_MODEL);
   const decideModel = assertDispatchableModel(input.decideModel ?? input.model ?? DEFAULT_MODEL);

@@ -5,8 +5,8 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { aiCliKernelCreateRelease, aiCliKernelRunRelease, aiCliKernelRunTrigger, type KernelTriggerDeps, type KernelReleaseCreateInput, type KernelReleaseDeps } from './loop.js';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_DIR } from '../core/user-config.js';
 import { lookupIdentities } from '../core/live-jobs.js';
@@ -19,9 +19,9 @@ import { activeMinutes, nextStep, openActions, replayJournal, unprocessedActions
 import { agentForModel } from './runtime.js';
 import { buildContract, TEMPLATES, type KernelStartInput } from './templates.js';
 import { isTerminalState, workDirOf, type ActionOutcome, type BoundaryStatus, type DevelopSpec, type KernelContract, type KernelExecutor, type RunState } from './types.js';
-import { aiCliKernelRestoreCheckpointBranch, cleanupWorkspace, realWorkspace } from './workspace.js';
+import { aiCliKernelRepoIdentity, aiCliKernelResolveBaseRef, aiCliKernelRestoreCheckpointBranch, cleanupWorkspace, describeRepo, realWorkspace } from './workspace.js';
 import { AiCliKernelMemoryStore, aiCliKernelMemoryRepo, type KernelMemory } from './memory.js';
-import { aiCliKernelBuildArchivePacket, type KernelArchiveMark, type KernelArchivePacket } from './archive.js';
+import { aiCliKernelArchiveSummary, aiCliKernelBuildArchivePacket, type KernelArchiveMark, type KernelArchivePacket, type KernelArchiveSummary } from './archive.js';
 
 export type { KernelStartInput } from './templates.js';
 
@@ -93,7 +93,7 @@ export interface KernelRunStatus {
   template: string;
   models: { decide: KernelContract['decide']; worker: KernelContract['worker']; allowedWorkers: string[] };
   /** develop 範本才有。委任書要讓人看清楚的東西都在這裡。 */
-  develop: (Pick<DevelopSpec, 'repoRoot' | 'branch' | 'baseCommit' | 'worktree' | 'testCommand' | 'setupCommand' | 'allowedPaths' | 'dirtyAtStart' | 'expiresAt' | 'notices' | 'checkpoint'> & { testFailures: number; verifiedCommit: string | null; checkpointResult: RunView['checkpoint']; checkpointPrepared: RunView['checkpointPrepared']; checkpointMode: string | null }) | null;
+  develop: (Pick<DevelopSpec, 'repoRoot' | 'branch' | 'baseCommit' | 'baseRef' | 'baseRefRef' | 'dependsOnRunId' | 'worktree' | 'testCommand' | 'setupCommand' | 'allowedPaths' | 'dirtyAtStart' | 'expiresAt' | 'notices' | 'checkpoint'> & { testFailures: number; verifiedCommit: string | null; checkpointResult: RunView['checkpoint']; checkpointPrepared: RunView['checkpointPrepared']; checkpointMode: string | null }) | null;
   contractDigest: string | null;
   boundary: Record<string, BoundaryStatus>;
   boundaryLabel: string;
@@ -195,6 +195,7 @@ async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRun
     models: { decide: contract.decide, worker: contract.worker, allowedWorkers: contract.allowedWorkerModels }, contractDigest: view.contractDigest, boundary,
     develop: contract.develop ? {
       repoRoot: contract.develop.repoRoot, branch: contract.develop.branch, baseCommit: contract.develop.baseCommit, worktree: contract.develop.worktree, testCommand: contract.develop.testCommand,
+      ...(contract.develop.baseRef !== undefined ? { baseRef: contract.develop.baseRef, baseRefRef: contract.develop.baseRefRef, dependsOnRunId: contract.develop.dependsOnRunId } : {}),
       ...(contract.develop.setupCommand ? { setupCommand: contract.develop.setupCommand } : {}), allowedPaths: contract.develop.allowedPaths,
       dirtyAtStart: contract.develop.dirtyAtStart, expiresAt: contract.develop.expiresAt, notices: contract.develop.notices ?? [], testFailures: view.testFailures,
       verifiedCommit: view.verification?.passed ? view.verification.commit : null,
@@ -255,8 +256,28 @@ export async function aiCliKernelStart(input: KernelStartInput): Promise<KernelR
   assertCanStartJob(); // worker 不能再開 run，防止遞迴。
   const runId = newRunId();
   const contract = buildContract(input, new Date(), { runId, worktree: join(kernelRunDir(runId), 'wt') });
-  const store = new RunStore(kernelRunDir(runId));
-  store.create(contract);
+  const spec = contract.develop;
+  const dependencyId = spec?.baseRefRef?.match(/^refs\/heads\/ai-cli_kernel\/(kr-[0-9]{8}-[0-9]{6}-[0-9a-f]{4})$/)?.[1];
+  let dependency: RunStore | null = null;
+  if (spec && dependencyId && existsSync(join(kernelRunDir(dependencyId), 'contract.json'))) {
+    const sourceStore = storeFor(dependencyId);
+    const source = sourceStore.readContract().develop;
+    if (source && spec.baseRefRef === `refs/heads/${source.branch}` && aiCliKernelRepoIdentity(spec.repoRoot) === aiCliKernelRepoIdentity(source.repoRoot)) {
+      spec.dependsOnRunId = dependencyId;
+      dependency = sourceStore;
+    }
+  }
+  const create = () => {
+    if (dependency && spec) {
+      const current = aiCliKernelResolveBaseRef(spec.repoRoot, spec.baseRef!);
+      if (current.commit !== spec.baseCommit || current.ref !== spec.baseRefRef) throw new Error('依賴分支在建立委任書前已變動，請重新 start');
+    }
+    const store = new RunStore(kernelRunDir(runId));
+    store.create(contract);
+    return store;
+  };
+  // 與來源 run 的 cleanup／放行共用既有短鎖，避免檢查依賴和建立契約交錯；不涉及 runner 並行政策。
+  const store = dependency ? dependency.withReleaseLock(create) : create();
   return statusOf(store);
 }
 
@@ -352,17 +373,36 @@ export async function aiCliKernelArchiveShow(input: { runId: string }): Promise<
   return archivePacket(storeFor(input.runId));
 }
 
-/** 不限最近二十筆；讀取不建立任何檔案。 */
-export async function aiCliKernelArchiveList(input: Record<string, never> = {}): Promise<KernelArchivePacket[]> {
-  archiveInput(input, []);
-  const packets: KernelArchivePacket[] = [];
+export interface KernelArchiveListInput { repo?: string; workFolder?: string }
+
+function archiveFilterPath(value: unknown, name: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !value.trim() || value.includes('\0') || !isAbsolute(value)) throw new Error(`${name} 必須是非空的絕對路徑`);
+  if (existsSync(value) && !statSync(value).isDirectory()) throw new Error(`${name} 必須是目錄路徑`);
+  const path = existsSync(value) ? realpathSync.native(value) : resolve(value);
+  return process.platform === 'win32' ? path.toLowerCase() : path;
+}
+
+/** 不限最近二十筆；只傳摘要，不在 list 帶回完整包。兩種篩選同給時取交集。 */
+export async function aiCliKernelArchiveList(input: KernelArchiveListInput = {}): Promise<KernelArchiveSummary[]> {
+  archiveInput(input, ['repo', 'workFolder']);
+  const repoPath = archiveFilterPath(input.repo, 'repo');
+  const repo = repoPath === undefined ? undefined : aiCliKernelRepoIdentity(repoPath);
+  const workFolder = archiveFilterPath(input.workFolder, 'workFolder');
+  const packets: KernelArchiveSummary[] = [];
   for (const runId of listRunIds()) {
     // 一筆壞掉不能讓整份清單出不來，否則其他任務也歸不了檔。壞掉的那筆要留在清單上，不能悄悄消失。
     try {
-      const packet = await archivePacket(storeFor(runId));
-      if (packet.pendingArchive) packets.push(packet);
+      const store = storeFor(runId);
+      const contract = store.readContract();
+      if (workFolder !== undefined && archiveFilterPath(contract.workFolder, 'workFolder') !== workFolder) continue;
+      // readonly-audit 可以是正常的非 git 目錄；已確認非 repo 的紀錄不屬於 repo 篩選結果。
+      if (repo !== undefined && !contract.develop && existsSync(contract.workFolder) && !describeRepo(contract.workFolder)) continue;
+      if (repo !== undefined && aiCliKernelRepoIdentity(contract.develop?.repoRoot ?? contract.workFolder) !== repo) continue;
+      const packet = await archivePacket(store);
+      if (packet.pendingArchive) packets.push(aiCliKernelArchiveSummary(packet));
     } catch (error) {
-      packets.push({ runId, effectiveState: 'unreadable', goal: `紀錄損毀，要人工處理：${(error as Error).message}`, origin: null, pendingArchive: true } as unknown as KernelArchivePacket);
+      packets.push({ runId, state: 'unreadable', reason: 'archive_unreadable', goal: Array.from(`紀錄或篩選身分無法讀取：${(error as Error).message}`).slice(0, 80).join(''), repo: null, branch: null, latestCommit: null, evidence: { journalSeq: null, releaseEvents: null }, candidateMemories: 0 });
     }
   }
   return packets;
@@ -498,7 +538,17 @@ export async function aiCliKernelCleanup(input: { runId: string }): Promise<{ ru
   if (!contract.develop) throw new Error('只有 develop 範本的 run 有 worktree 要清');
   const view = replayJournal(store.read());
   if (!isTerminalState(view.state)) throw new Error(`這個 run 還沒結束（${view.state}），請先完成或 ai-cli kernel cancel ${input.runId}`);
-  return { runId: input.runId, ...cleanupWorkspace(contract.develop) };
+  return store.withReleaseLock(() => {
+    for (const runId of listRunIds()) {
+      if (runId === input.runId) continue;
+      const dependent = storeFor(runId);
+      let spec: DevelopSpec | undefined;
+      try { spec = dependent.readContract().develop; }
+      catch { throw new Error(`拒絕 cleanup：無法讀取 run ${runId} 的委任書，不能確認是否仍有依賴`); }
+      if (spec?.dependsOnRunId === input.runId && !isTerminalState(replayJournal(dependent.read()).state)) throw new Error(`拒絕 cleanup：尚未結束的 run ${runId} 依賴 ${input.runId} 的交付分支（baseRef ${spec.baseRef} @ ${spec.baseCommit}）`);
+    }
+    return { runId: input.runId, ...cleanupWorkspace(contract.develop!) };
+  });
 }
 
 export function aiCliKernelTemplates(): Array<{ name: string; description: string }> {

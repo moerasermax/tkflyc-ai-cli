@@ -58,6 +58,29 @@ export function describeRepo(folder: string): { root: string; prefix: string; he
   return { root: resolve(root.stdout.trim()), prefix: prefix.stdout.trim(), head: head.stdout.trim(), dirty: status.stdout.split('\n').filter(Boolean).length };
 }
 
+/** linked worktree 也用相同身分；不以遠端 URL 或 commit 相等猜測 repo。 */
+export function aiCliKernelRepoIdentity(folder: string): string {
+  const common = resolve(folder, mustGit(folder, 'rev-parse', '--git-common-dir').trim());
+  const path = realpathSync.native(common);
+  return process.platform === 'win32' ? path.toLowerCase() : path;
+}
+
+/** 只接受本 repo 的本地分支或 commit ID，拒絕 revision expression、tag 與選項。 */
+export function aiCliKernelResolveBaseRef(repoRoot: string, baseRef: string): { commit: string; ref?: string } {
+  if (typeof baseRef !== 'string' || !baseRef || baseRef.length > 1024 || baseRef.startsWith('-') || /[\s\x00-\x1f\x7f]/.test(baseRef)) throw new Error('baseRef 必須是分支名稱或 commit ID，不能是選項');
+  const ref = baseRef.startsWith('refs/heads/') ? baseRef : `refs/heads/${baseRef}`;
+  const branch = git(repoRoot, 'check-ref-format', ref).status === 0
+    ? git(repoRoot, 'show-ref', '--verify', '--hash', ref) : null;
+  const isBranch = branch?.status === 0;
+  if (!isBranch && !/^[0-9a-fA-F]{4,64}$/.test(baseRef)) throw new Error(`baseRef 不是存在的本地分支或 commit ID：${baseRef}`);
+  // --disambiguate 只查物件 ID，不讓同名的十六進位 tag／其他 ref 冒充 commit 縮寫。
+  const objects = isBranch ? [branch!.stdout.trim()] : mustGit(repoRoot, 'rev-parse', `--disambiguate=${baseRef.toLowerCase()}`).trim().split('\n').filter(Boolean);
+  if (objects.length !== 1) throw new Error('baseRef commit ID 不存在或有歧義');
+  const commit = objects[0];
+  if (!/^[0-9a-f]{40,64}$/.test(commit) || mustGit(repoRoot, 'cat-file', '-t', commit).trim() !== 'commit') throw new Error('baseRef 必須解析為本 repo 的 commit');
+  return { commit, ...(isBranch ? { ref } : {}) };
+}
+
 /** 遠端只選已設定的 origin，不把其他使用者分支當備份目的地。 */
 export function aiCliKernelCheckpointSpec(repoRoot: string, runId: string, mode?: string): CheckpointSpec {
   if (mode !== undefined && !['push', 'local', 'off'].includes(mode)) throw new Error('checkpoint 必須是 push、local 或 off');
@@ -217,6 +240,11 @@ export const realWorkspace: WorkspaceOps & ReleaseWorkspaceOps = {
       if (commit !== spec.baseCommit && (parents.length !== 2 || parents[1] !== spec.baseCommit)) throw new Error('既有回復點和基準不符');
       return commit;
     }
+    // 明確選別的基準時不把主目錄的 index／未提交檔案套在該 commit 上。
+    if (spec.baseRef !== undefined) {
+      mustGit(spec.repoRoot, 'cat-file', '-e', `${spec.baseCommit}^{commit}`);
+      return spec.baseCommit;
+    }
     const head = mustGit(spec.repoRoot, 'rev-parse', 'HEAD').trim();
     if (head !== spec.baseCommit) throw new Error('來源 HEAD 和委任書基準不符，請重新建立委任書');
     const dir = mkdtempSync(join(tmpdir(), 'ai-cli_kernel-index-'));
@@ -326,7 +354,7 @@ export const realWorkspace: WorkspaceOps & ReleaseWorkspaceOps = {
     return mustGit(spec.repoRoot, 'for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads', 'refs/remotes', 'refs/tags')
       .split('\n').filter(line => {
         const ref = line.slice(line.indexOf(' ') + 1);
-        return line && ref !== `refs/heads/${spec.branch}` && !ref.startsWith('refs/heads/ai-cli_kernel/checkpoints/') && !/^refs\/remotes\/[^/]+\/ai-cli_kernel\/checkpoints\//.test(ref);
+        return line && ref !== `refs/heads/${spec.branch}` && (ref === spec.baseRefRef || (!ref.startsWith('refs/heads/ai-cli_kernel/checkpoints/') && !/^refs\/remotes\/[^/]+\/ai-cli_kernel\/checkpoints\//.test(ref)));
       }).sort();
   },
 

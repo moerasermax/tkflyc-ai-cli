@@ -3450,7 +3450,7 @@
     "name": "kernel develop：不查 ref 變動",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/loop.ts",
-    "from": "return [...new Set([...[...before].filter(line => !after.has(line)), ...now.filter(line => !before.has(line))].map(name))];",
+    "from": "return [...new Set([...pinned, ...changed])];",
     "to": "return [];",
     "expect": "工作樹沒變但 ref 動了也抓得到"
   },
@@ -3690,7 +3690,7 @@
     "name": "kernel L4 refs 比對誤算回復點分支",
     "file": "src/ai-cli_kernel/workspace.ts",
     "script": "verify-ai-cli_kernel.mjs",
-    "from": "        return line && ref !== `refs/heads/${spec.branch}` && !ref.startsWith('refs/heads/ai-cli_kernel/checkpoints/') && !/^refs\\/remotes\\/[^/]+\\/ai-cli_kernel\\/checkpoints\\//.test(ref);",
+    "from": "        return line && ref !== `refs/heads/${spec.branch}` && (ref === spec.baseRefRef || (!ref.startsWith('refs/heads/ai-cli_kernel/checkpoints/') && !/^refs\\/remotes\\/[^/]+\\/ai-cli_kernel\\/checkpoints\\//.test(ref)));",
     "to": "        return line && ref !== `refs/heads/${spec.branch}`;",
     "expect": "develop：改完而且測試通過才走到 completed"
   },
@@ -4833,8 +4833,8 @@
   {
     "name": "kernel archive：已標記不重複列出",
     "file": "src/ai-cli_kernel/api.ts",
-    "from": "if (packet.pendingArchive) packets.push(packet);",
-    "to": "if (true) packets.push(packet);",
+    "from": "if (packet.pendingArchive) packets.push(aiCliKernelArchiveSummary(packet));",
+    "to": "if (true) packets.push(aiCliKernelArchiveSummary(packet));",
     "script": "verify-ai-cli_kernel.mjs",
     "expect": "L5 歸檔 API：已歸檔不再列出"
   },
