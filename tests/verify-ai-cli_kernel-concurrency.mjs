@@ -22,7 +22,8 @@ const commandControls = [];
 let count = 0;
 async function test(name, fn) {
   if (process.env.KERNEL_CONCURRENCY_TEST_FILTER && !name.includes(process.env.KERNEL_CONCURRENCY_TEST_FILTER)) return;
-  await fn(); console.log(`PASS C ${name}`); count++;
+  try { await fn(); console.log(`PASS C ${name}`); count++; }
+  catch (error) { console.error(`FAIL C ${name}`); throw error; }
 }
 function git(folder, ...args) {
   const result = spawnSync('git', ['-C', folder, ...args], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
@@ -194,6 +195,7 @@ try {
     }
   });
   await test('human configuration enforces 1..3 at every admission; MCP exposes no override', async () => {
+    mkdirSync(kernelStateDir(), { recursive: true });
     for (const value of [0, 4, 3.1, NaN, '3', null]) assert.throws(() => validateConcurrencyConfig({ maxRuns: value }));
     const config = join(kernelStateDir(), 'concurrency.json');
     writeFileSync(config, JSON.stringify({ maxRuns: 4 })); await assert.rejects(admit(fresh()), /1～3/);
@@ -344,10 +346,14 @@ try {
     assert.equal(JSON.parse(readFileSync(join(kernelStateDir(), 'test.lock'), 'utf8')).runId, holder.runId);
     await cancelHeld.release();
     const events = store.read(), waiting = events.find(e => e.type === 'test_lock_wait'), acquired = events.find(e => e.type === 'test_lock_acquired');
-    const elapsed = activeMinutes(replayJournal(events), Date.now()) * 60000;
-    assert.ok(elapsed < Date.now() - Date.parse(events.find(e => e.type === 'runner_started').at) - (Date.parse(acquired.at) - Date.parse(waiting.at)) + 100);
+    const terminalEvent = events.findLast(e => e.type === 'state' && e.state !== 'running');
+    const expectedMs = Date.parse(terminalEvent.at) - Date.parse(events.find(e => e.type === 'runner_started').at)
+      - (Date.parse(acquired.at) - Date.parse(waiting.at));
+    const elapsed = activeMinutes(replayJournal(events), Date.parse(terminalEvent.at)) * 60000;
+    assert.ok(Math.abs(elapsed - expectedMs) < 1, `active budget ${elapsed}ms must exclude the recorded lock wait; expected ${expectedMs}ms`);
   });
   clear();
+  assert.ok(count > 0, 'refuse an empty test selection');
   console.log(`PASS C ${count} groups (real cross-process admission and command overlap checks)`);
 } catch (error) {
   console.error(error.stack);

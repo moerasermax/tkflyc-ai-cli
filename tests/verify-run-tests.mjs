@@ -36,17 +36,18 @@ const FAKES = {
   'verify-hang.mjs': `console.log('MARK-HANG'); setInterval(() => {}, 1000);`,
   'verify-selfkill.mjs': `process.kill(process.pid, 'SIGKILL');`,
   'verify-preload.mjs': `console.log('PRELOAD=' + (globalThis.__runTestsPreload ?? 'none'));`,
+  'verify-filters.mjs': `if (['KERNEL_EVIDENCE_TEST_FILTER', 'KERNEL_BASE_ARCHIVE_TEST_FILTER', 'KERNEL_CONCURRENCY_TEST_FILTER'].some(key => process.env[key])) process.exit(7); console.log('FILTERS-CLEAR');`,
 };
 
 /** 建一個情境：tests 目錄放 files 指定的假測試，寫清單，跑 runner，回傳輸出。 */
-function scenario(name, files, manifest, { viaEnv = false } = {}) {
+function scenario(name, files, manifest, { viaEnv = false, envOverrides = {} } = {}) {
   const dir = join(TMP, name);
   const testsDir = join(dir, 'tests');
   mkdirSync(testsDir, { recursive: true });
   for (const f of files) writeFileSync(join(testsDir, f), FAKES[f] ?? `console.log('MARK-${f}');`);
   const manifestPath = join(dir, 'manifest.json');
   writeFileSync(manifestPath, JSON.stringify(manifest));
-  const env = { ...process.env };
+  const env = { ...process.env, ...envOverrides };
   delete env.AI_CLI_TEST_MANIFEST;
   delete env.AI_CLI_TESTS_DIR;
   const args = [RUNNER];
@@ -87,6 +88,14 @@ try {
     ok('全部通過時 exit 0', r.status === 0, `status=${r.status} ${tail(r.out)}`);
     ok('排除清單裡的腳本不會被執行', !r.out.includes('MARK-verify-manual.mjs'), tail(r.out));
     ok('清單項目的 nodeArgs 有帶給子行程', r.out.includes('PRELOAD=yes'), tail(r.out));
+  }
+
+  console.log('情境：正式 runner 不繼承突變的定向篩選');
+  {
+    const r = scenario('filters', ['verify-filters.mjs'], { tests: ['verify-filters.mjs'] }, {
+      envOverrides: { KERNEL_EVIDENCE_TEST_FILTER: 'narrow', KERNEL_BASE_ARCHIVE_TEST_FILTER: 'narrow', KERNEL_CONCURRENCY_TEST_FILTER: 'narrow' },
+    });
+    ok('正式 runner 清除所有定向篩選，仍完整驗收', r.status === 0 && r.out.includes('FILTERS-CLEAR'), tail(r.out));
   }
 
   console.log('情境 3：被 signal 結束');

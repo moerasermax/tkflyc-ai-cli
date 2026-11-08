@@ -5173,5 +5173,269 @@
     "from": "failed: '31', cancelled: '90'",
     "to": "failed: '32', cancelled: '90'",
     "expect": "清單與詳細狀態色"
+  },
+  {
+    "name": "kernel D：diff 不優先測試",
+    "file": "src/ai-cli_kernel/evidence.ts",
+    "from": "  const ordered = [...changes].sort((a, b) => Number(isTestPath(b.path) || isTestPath(b.oldPath ?? '')) - Number(isTestPath(a.path) || isTestPath(a.oldPath ?? '')));",
+    "to": "  const ordered = [...changes].sort(() => 0);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "A1 diff 額度不變、測試優先、逐檔標明全部或部分省略"
+  },
+  {
+    "name": "kernel D：stat 超額不截斷",
+    "file": "src/ai-cli_kernel/evidence.ts",
+    "from": "  if (stat.length <= STAT_CHARS) return stat;",
+    "to": "  if (stat.length >= 0) return stat;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "A1 stat／檔案清單／測試輸出有獨立上限及總數截斷提示"
+  },
+  {
+    "name": "kernel D：清單超額不截斷",
+    "file": "src/ai-cli_kernel/evidence.ts",
+    "from": "    if (used + line.length + 1 > Math.max(0, maxChars - reserve)) break;",
+    "to": "    if (false) break;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "A1 stat／檔案清單／測試輸出有獨立上限及總數截斷提示"
+  },
+  {
+    "name": "kernel D：矛盾 TAP 統計仍當已解析",
+    "file": "src/ai-cli_kernel/evidence.ts",
+    "from": "  else if (tap && Number.isSafeInteger(Number(tap[1])) && Number(tap[1]) === Number(tap[2]) + Number(tap[3]) + tapOther) counts = { passed: Number(tap[2]), failed: Number(tap[3]), unit: '測試（TAP）' };",
+    "to": "  else if (tap && Number.isSafeInteger(Number(tap[1])) && Number(tap[1]) >= Number(tap[2]) + Number(tap[3])) counts = { passed: Number(tap[2]), failed: Number(tap[3]), unit: '測試（TAP）' };",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "A1 只認完整結尾摘要；未知、矛盾、舊小計皆未解析"
+  },
+  {
+    "name": "kernel D：baseline 測試 rename 忽略來源",
+    "file": "src/ai-cli_kernel/evidence.ts",
+    "from": "  return changes.filter(change => /^[MDTR]/.test(change.status) && isTestPath(change.oldPath ?? change.path));",
+    "to": "  return changes.filter(change => /^[MDTR]/.test(change.status) && isTestPath(change.path));",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "A4 測試規則、來源 rename、排除新增與非測試"
+  },
+  {
+    "name": "kernel D：引用缺檔不走唯一候選",
+    "file": "src/ai-cli_kernel/verdict.ts",
+    "from": "      if (candidates.length === 1) target = candidates[0].target;",
+    "to": "      if (candidates.length === 0) target = candidates[0].target;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "A2 唯一 git basename 候選可解析，保留所有行號與大小檢查"
+  },
+  {
+    "name": "kernel D：引用多候選不回傳候選清單",
+    "file": "src/ai-cli_kernel/verdict.ts",
+    "from": "      if (candidates.length > 1) {",
+    "to": "      if (candidates.length > 1000) {",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "A2 多候選最多列 8 條，總數與截斷資訊供 decide 修正"
+  },
+  {
+    "name": "kernel D：引用 junction 不驗實體邊界",
+    "file": "src/ai-cli_kernel/verdict.ts",
+    "from": "    if (outside(realpathSync.native(workFolder), realpathSync.native(target))) { unresolved.push(`${citation}（超出工作目錄）`); continue; }",
+    "to": "    if (false) { unresolved.push(`${citation}（超出工作目錄）`); continue; }",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "A2 相對／絕對逃逸不能經 basename 修正；junction 不能跳出工作目錄"
+  },
+  {
+    "name": "kernel D：report 漏掉 kernel 基準測試統計",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "    if (evidence) store.writeReport(`${store.readOutput(store.reportPath).trimEnd()}${kernelTestInventory(evidence.baselineTests)}`);",
+    "to": "    if ((false as boolean) && evidence) store.writeReport(`${store.readOutput(store.reportPath).trimEnd()}${kernelTestInventory(evidence.baselineTests)}`);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "A4 驗收後 kernel 強制附加基準清單、略新段落不增驗收條件、重跑不重複"
+  },
+  {
+    "name": "kernel D：單 worker 模型沒有警示",
+    "file": "src/ai-cli_kernel/templates.ts",
+    "from": "  if (models.length === 1) notices.push('驗收只代表 worker 寫的測試和既有測試通過，沒有第二個模型檢查');",
+    "to": "  if (models.length === 0) notices.push('驗收只代表 worker 寫的測試和既有測試通過，沒有第二個模型檢查');",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "A3 單一 worker 模型提示沒有第二模型；多模型不冒稱單模型"
+  },
+  {
+    "name": "kernel D：未支援探針格式冒稱有格式",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "export function hasProbeEvidenceFormat(agent: string): boolean { return EVIDENCE_AGENTS.has(agent); }",
+    "to": "export function hasProbeEvidenceFormat(agent: string): boolean { return true; }",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "A5 缺少格式與已支援格式的 FAIL/UNKNOWN 標籤不同，未增 Claude 格式"
+  },
+  {
+    "name": "kernel D：archive 目標摘要超過八十字",
+    "file": "src/ai-cli_kernel/archive.ts",
+    "from": "    goal: Array.from(packet.goal).slice(0, 80).join(''), repo: packet.repo, branch: packet.branch,",
+    "to": "    goal: Array.from(packet.goal).slice(0, 81).join(''), repo: packet.repo, branch: packet.branch,",
+    "script": "verify-ai-cli_kernel-base-archive.mjs",
+    "expect": "B1 摘要固定欄位、Unicode 前80字、記憶數量、大小與 show 完整包"
+  },
+  {
+    "name": "kernel D：archive 記憶計數固定為零",
+    "file": "src/ai-cli_kernel/archive.ts",
+    "from": "    candidateMemories: packet.candidateMemories.length,",
+    "to": "    candidateMemories: 0,",
+    "script": "verify-ai-cli_kernel-base-archive.mjs",
+    "expect": "B1 摘要固定欄位、Unicode 前80字、記憶數量、大小與 show 完整包"
+  },
+  {
+    "name": "kernel D：baseRef 忽略固定基準 commit",
+    "file": "src/ai-cli_kernel/templates.ts",
+    "from": "    repoRoot: repo.root, prefix: repo.prefix, baseCommit: base?.commit ?? repo.head, branch: `ai-cli_kernel/${context.runId}`, worktree: context.worktree, testCommand,",
+    "to": "    repoRoot: repo.root, prefix: repo.prefix, baseCommit: repo.head, branch: `ai-cli_kernel/${context.runId}`, worktree: context.worktree, testCommand,",
+    "script": "verify-ai-cli_kernel-base-archive.mjs",
+    "expect": "B2 委任書顯示輸入與解析 commit，worktree／回復點綁 commit，主目錄保持原樣"
+  },
+  {
+    "name": "kernel D：baseRef 首次 runner 不檢查 pinned ref",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "    const pinned = develop.baseRefRef && !now.includes(`${develop.baseCommit} ${develop.baseRefRef}`) ? [develop.baseRefRef] : [];",
+    "to": "    const pinned = (false as boolean) && develop.baseRefRef && !now.includes(`${develop.baseCommit} ${develop.baseRefRef}`) ? [develop.baseRefRef] : [];",
+    "script": "verify-ai-cli_kernel-base-archive.mjs",
+    "expect": "B2 分支在首次 runner 前移動，ref 閘仍綁建立時 commit"
+  },
+  {
+    "name": "kernel D：依賴 cleanup 忽略未結束 run",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "      if (spec?.dependsOnRunId === input.runId && !isTerminalState(replayJournal(dependent.read()).state)) throw new Error(`拒絕 cleanup：尚未結束的 run ${runId} 依賴 ${input.runId} 的交付分支（baseRef ${spec.baseRef} @ ${spec.baseCommit}）`);",
+    "to": "      if ((false as boolean) && spec?.dependsOnRunId === input.runId && !isTerminalState(replayJournal(dependent.read()).state)) throw new Error(`拒絕 cleanup：尚未結束的 run ${runId} 依賴 ${input.runId} 的交付分支（baseRef ${spec.baseRef} @ ${spec.baseCommit}）`);",
+    "script": "verify-ai-cli_kernel-base-archive.mjs",
+    "expect": "B2 相同 commit 的其他 ref、直接 commit、不同行政 repo 不誤認依賴"
+  },
+  {
+    "name": "kernel D：全機名額不限制",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "    if (!own && others.length >= config.maxRuns) throw new AdmissionBlocked('slots_full', held, `全機名額已滿（上限 ${config.maxRuns}，硬上限 3）`);",
+    "to": "    if ((false as boolean) && !own && others.length >= config.maxRuns) throw new AdmissionBlocked('slots_full', held, `全機名額已滿（上限 ${config.maxRuns}，硬上限 3）`);",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "six real processes contend for three different-repo slots"
+  },
+  {
+    "name": "kernel D：同 repo 不互斥",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "    if (same.length) throw new AdmissionBlocked('same_repo', same.map(slot => slot.runId), '同 repo 同時最多一個 run');",
+    "to": "    if (false) throw new AdmissionBlocked('same_repo', same.map(slot => slot.runId), '同 repo 同時最多一個 run');",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "five real processes contend for one common git repo"
+  },
+  {
+    "name": "kernel D：clone 不比對 origin",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "    const same = others.filter(slot => slot.keys.common === keys.common || keys.origin && slot.keys.origin === keys.origin);",
+    "to": "    const same = others.filter(slot => slot.keys.common === keys.common);",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "worktrees and credential-free normalized clone origins share repo identity"
+  },
+  {
+    "name": "kernel D：舊 active.lock 不計入名額",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "    if (legacy && !active.some(slot => slot.runId === legacy.runId)) active.push(legacy);",
+    "to": "    if ((false as boolean) && legacy && !active.some(slot => slot.runId === legacy.runId)) active.push(legacy);",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "legacy active.lock counts once and stale/missing/terminal reservations recycle"
+  },
+  {
+    "name": "kernel D：死亡核准程序名額不回收",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "      if (!view || view.state === 'awaiting_approval' || abandoned) { releaseRunSlot(slot.runId); continue; }",
+    "to": "      if (!view || view.state === 'awaiting_approval') { releaseRunSlot(slot.runId); continue; }",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "real dead admission owner and dead mutex ticket are reclaimed"
+  },
+  {
+    "name": "kernel D：Codex used 百分比當剩餘",
+    "file": "src/ai-cli_kernel/runtime.ts",
+    "from": "    if (weekly.basis === 'used' && valid(weekly.percentUsed)) return 100 - weekly.percentUsed;",
+    "to": "    if (weekly.basis === 'used' && valid(weekly.percentUsed)) return weekly.percentUsed;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "quota parser uses explicit used/remaining basis and rejects invalid data"
+  },
+  {
+    "name": "kernel D：Claude 未知額度仍可並行",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "    if (!own && others.length && (!validPercent(claude) || claude < config.claudeMinRemainingPercent)) throw new AdmissionBlocked('claude_quota', held, `Claude 週額度${validPercent(claude) ? `剩 ${claude}% < ${config.claudeMinRemainingPercent}%` : '未知'}，全機退回 1 名額`);",
+    "to": "    if (!own && others.length && (validPercent(claude) && claude < config.claudeMinRemainingPercent)) throw new AdmissionBlocked('claude_quota', held, `Claude 週額度${validPercent(claude) ? `剩 ${claude}% < ${config.claudeMinRemainingPercent}%` : '未知'}，全機退回 1 名額`);",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "Claude threshold is strictly below 10; missing/invalid/failed queries reduce to one"
+  },
+  {
+    "name": "kernel D：Codex 未知額度仍可並行",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "    if (!own && codexRun && codexHolders.length && (!validPercent(codex) || codex < config.codexMinRemainingPercent)) throw new AdmissionBlocked('codex_quota', codexHolders.map(slot => slot.runId), `Codex 週額度${validPercent(codex) ? `剩 ${codex}% < ${config.codexMinRemainingPercent}%` : '未知'}，不能同時兩個用到 Codex 的 run`);",
+    "to": "    if (!own && codexRun && codexHolders.length && (validPercent(codex) && codex < config.codexMinRemainingPercent)) throw new AdmissionBlocked('codex_quota', codexHolders.map(slot => slot.runId), `Codex 週額度${validPercent(codex) ? `剩 ${codex}% < ${config.codexMinRemainingPercent}%` : '未知'}，不能同時兩個用到 Codex 的 run`);",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "Codex threshold is strictly below 20 and includes decide/worker/allowed models"
+  },
+  {
+    "name": "kernel D：人用設定放寬硬上限",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "  if (!Number.isInteger(config.maxRuns) || config.maxRuns < 1 || config.maxRuns > 3) throw new Error('maxRuns 只能是 1～3，硬上限 3');",
+    "to": "  if (!Number.isInteger(config.maxRuns) || config.maxRuns < 1 || config.maxRuns > 4) throw new Error('maxRuns 只能是 1～3，硬上限 3');",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "human configuration enforces 1..3 at every admission; MCP exposes no override"
+  },
+  {
+    "name": "kernel D：status.active 改成 null",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "  return { active: activeRuns[0]?.runId ?? null, activeRuns, pendingArchiveCount: (await aiCliKernelArchiveList()).length, runs };",
+    "to": "  return { active: null, activeRuns, pendingArchiveCount: (await aiCliKernelArchiveList()).length, runs };",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "status.active remains string|null; actions array and dashboard show all active runs"
+  },
+  {
+    "name": "kernel D：status.activeRuns 漏掉並行名額",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "  const activeRuns = readActiveRuns();",
+    "to": "  const activeRuns = readActiveRuns().slice(0, 1);",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "status.active remains string|null; actions array and dashboard show all active runs"
+  },
+  {
+    "name": "kernel D：測試鎖忽略存活命令",
+    "file": "src/ai-cli_kernel/test-lock.ts",
+    "from": "      if (held && await identityAlive(held.command ?? held.owner)) return { heldBy: held.runId };",
+    "to": "      if (held && await identityAlive(held.owner)) return { heldBy: held.runId };",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "dead runner retains lease while real command lives, then reclaims dead identities"
+  },
+  {
+    "name": "kernel D：測試鎖等待耗用 wall clock",
+    "file": "src/ai-cli_kernel/replay.ts",
+    "from": "      case 'test_lock_wait': closeActive(event.at); view.testLockWaiting = event.heldBy; break;",
+    "to": "      case 'test_lock_wait': view.testLockWaiting = event.heldBy; break;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "production loop journals waiting/status, excludes wait from deadlines, releases on success/failure/timeout"
+  },
+  {
+    "name": "kernel D：archive 摘要洩漏完整包",
+    "file": "src/ai-cli_kernel/archive.ts",
+    "from": "runId: packet.runId, state: packet.effectiveState, reason: packet.reason,",
+    "to": "...packet, runId: packet.runId, state: packet.effectiveState, reason: packet.reason,",
+    "script": "verify-ai-cli_kernel-base-archive.mjs",
+    "expect": "B1 摘要固定欄位、Unicode 前80字、記憶數量、大小與 show 完整包"
+  },
+  {
+    "name": "kernel D：依賴未持久記錄",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "spec.dependsOnRunId = dependencyId;",
+    "to": "void dependencyId;",
+    "script": "verify-ai-cli_kernel-base-archive.mjs",
+    "expect": "B2 相同 commit 的其他 ref、直接 commit、不同行政 repo 不誤認依賴"
+  },
+  {
+    "name": "kernel D：測試鎖等待耗用命令逾時",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "  const runCheck = async (kind: 'setup' | 'test' | 'context', command: string, seq: number): Promise<{ exitCode: number | null; timedOut: boolean; tail: string; output?: string } | null> => {\n    const lease = kind === 'context' ? null : await waitForTestLock(store, () => store.cancelRequested() || superseded(read()), heldBy => commit(heldBy ? { type: 'test_lock_wait', heldBy } : { type: 'test_lock_acquired' }));\n    if (kind !== 'context' && !lease) {\n      if (store.cancelRequested() && !superseded(read())) setState('cancelled', 'user_cancelled');\n      return null;\n    }\n    let safeToRelease = true;\n    let handle: ReturnType<WorkspaceOps['startCheck']> | undefined;\n    try {\n    try { handle = ws!.startCheck(command, kind === 'context' ? contract.workFolder : workDir, join(store.dir, 'checks', `${kind}-${seq}.log`), kind === 'context' ? 8000 : undefined, kind !== 'context'); }\n    catch (error) {\n      if (kind !== 'context') throw error;\n      return { exitCode: null, timedOut: false, tail: (error as Error).message };\n    }\n    safeToRelease = false;\n    await lease?.command({ pid: handle.pid, started: '', name: '' });\n    /** 確認真的停了才算數。送出訊號不等於停了，舊程序可能還在動工作目錄。 */\n    const stopConfirmed = async (): Promise<boolean> => {\n      if (await handle!.kill()) { safeToRelease = true; commit({ type: 'check_finished', pid: handle!.pid }); return true; }\n      setState('stop_pending', 'check_still_alive', `kernel 跑的檢查指令（pid ${handle!.pid}）還沒確認停止`);\n      return false;\n    };\n    try {\n      // spawn 完馬上記 pid，查身分要好幾秒，不能等。這樣當機時最多只漏掉幾毫秒的窗口。\n      commit({ type: 'check_started', kind, pid: handle.pid, started: '', name: '' });\n      handle.begin?.();\n      const identity = await handle.identify();\n      await lease?.command({ pid: handle.pid, ...identity });\n      commit({ type: 'check_started', kind, pid: handle.pid, started: identity.started, name: identity.name });\n    } catch (error) { safeToRelease = await handle.kill(); throw error; }\n    // 總時間也要算進來：測試跑得比剩下的預算久時，不能等它自己跑完。\n    const startedAt = deps.now();\n",
+    "to": "  const runCheck = async (kind: 'setup' | 'test' | 'context', command: string, seq: number): Promise<{ exitCode: number | null; timedOut: boolean; tail: string; output?: string } | null> => {\n    const startedAt = deps.now();\n    const lease = kind === 'context' ? null : await waitForTestLock(store, () => store.cancelRequested() || superseded(read()), heldBy => commit(heldBy ? { type: 'test_lock_wait', heldBy } : { type: 'test_lock_acquired' }));\n    if (kind !== 'context' && !lease) {\n      if (store.cancelRequested() && !superseded(read())) setState('cancelled', 'user_cancelled');\n      return null;\n    }\n    let safeToRelease = true;\n    let handle: ReturnType<WorkspaceOps['startCheck']> | undefined;\n    try {\n    try { handle = ws!.startCheck(command, kind === 'context' ? contract.workFolder : workDir, join(store.dir, 'checks', `${kind}-${seq}.log`), kind === 'context' ? 8000 : undefined, kind !== 'context'); }\n    catch (error) {\n      if (kind !== 'context') throw error;\n      return { exitCode: null, timedOut: false, tail: (error as Error).message };\n    }\n    safeToRelease = false;\n    await lease?.command({ pid: handle.pid, started: '', name: '' });\n    /** 確認真的停了才算數。送出訊號不等於停了，舊程序可能還在動工作目錄。 */\n    const stopConfirmed = async (): Promise<boolean> => {\n      if (await handle!.kill()) { safeToRelease = true; commit({ type: 'check_finished', pid: handle!.pid }); return true; }\n      setState('stop_pending', 'check_still_alive', `kernel 跑的檢查指令（pid ${handle!.pid}）還沒確認停止`);\n      return false;\n    };\n    try {\n      // spawn 完馬上記 pid，查身分要好幾秒，不能等。這樣當機時最多只漏掉幾毫秒的窗口。\n      commit({ type: 'check_started', kind, pid: handle.pid, started: '', name: '' });\n      handle.begin?.();\n      const identity = await handle.identify();\n      await lease?.command({ pid: handle.pid, ...identity });\n      commit({ type: 'check_started', kind, pid: handle.pid, started: identity.started, name: identity.name });\n    } catch (error) { safeToRelease = await handle.kill(); throw error; }\n    // 總時間也要算進來：測試跑得比剩下的預算久時，不能等它自己跑完。\n",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "production loop journals waiting/status, excludes wait from deadlines, releases on success/failure/timeout"
+  },
+  {
+    "name": "kernel D：正式驗收繼承定向篩選",
+    "file": "tools/run-tests.mjs",
+    "from": "    env: { ...process.env, KERNEL_EVIDENCE_TEST_FILTER: '', KERNEL_BASE_ARCHIVE_TEST_FILTER: '', KERNEL_CONCURRENCY_TEST_FILTER: '' },",
+    "to": "    env: process.env,",
+    "script": "verify-run-tests.mjs",
+    "expect": "正式 runner 清除所有定向篩選，仍完整驗收"
   }
 ]

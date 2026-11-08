@@ -36,7 +36,10 @@ function repo(name) {
   git(folder, 'branch', 'topic', base);
   return { folder, base, head: git(folder, 'rev-parse', 'HEAD') };
 }
-async function check(name, fn) { try { await fn(); passed++; console.log(`PASS ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}\n${e.stack}`); } }
+async function check(name, fn) {
+  if (process.env.KERNEL_BASE_ARCHIVE_TEST_FILTER && !name.includes(process.env.KERNEL_BASE_ARCHIVE_TEST_FILTER)) return;
+  try { await fn(); passed++; console.log(`PASS ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}\n${e.stack}`); }
+}
 async function start(folder, input = {}) {
   const status = await api.aiCliKernelStart({ goal: 'B fixture', workFolder: folder, template: 'develop', testCommand: 'fixture-test', checkpoint: 'local', ...input });
   const store = new RunStore(kernelRunDir(status.runId)); return { status, store, contract: store.readContract() };
@@ -245,4 +248,5 @@ try {
   // 全部都是本測試建立的隨機暫存根目錄。
   rmSync(temp, { recursive: true, force: true });
 }
+assert.ok(passed + failed > 0, 'refuse an empty test selection');
 console.log(`\n${passed} passed, ${failed} failed`); process.exitCode = failed ? 1 : 0;

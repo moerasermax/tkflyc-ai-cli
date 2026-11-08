@@ -8,9 +8,13 @@
 
 ## [Unreleased]
 
-- kernel 以跨行程名額取代全機單一 active.lock：預設／硬上限三個、同 repo 一個，加入 Claude／Codex 額度並行閘門及人用本機設定檔；相容舊鎖、回收失效名額。setup／test 共用可取消、可依行程身分回收的全機測試鎖，等待不計入命令逾時；status 保留 active 並新增 activeRuns，dashboard／actions JSON 顯示全部佔用者。設定、遷移與實測範圍見 `docs/ai-cli_kernel/concurrency.md`。（Codex）
+- A 段（#17、#18、#19、#20、#21、#22 整合議題）：read／report 注入有獨立上限的 Git stat、完整狀態清單與可解析的測試結尾統計，大 diff 優先測試並逐檔標示省略；Git index basename 引用退路保留邊界／行號檢查；報告要求說明既有斷言改動，驗收後另附 kernel 基準測試清單，避免單憑模型自述。單 worker 模型顯示無第二模型檢查；探針區分格式未支援與 FAIL／UNKNOWN。
+- D 段：政策正典同步 v2.3，Codex 並行門檻由剩餘 50% 改成 20%，加入第 13 條 kernel 名額／額度規則，WORKER_CONTEXT 不變；手冊同步新並行與歸檔摘要契約，補齊 A～C 定向突變及測試覆蓋核對。另修正 TAP 總數與 skipped／cancelled／todo 矛盾時仍冒稱已解析的統計錯誤。（政策為使用者 2026-11-08 決定，無對應 issue）
+- 本次未做 #17 第 2 點（第二模型可執行驗證涉及權限邊界）、#22 Claude 證據格式（須真 CLI 實測）與 #8（不在範圍）。不放寬既有驗收；本步不重建 dist、不同步安裝副本。主 session 合併後須同步政策副本，歸檔採 list 摘要加逐筆 show；重建 dist 須等其他 run 全停，避免 version_drift。
 
-- kernel archive list（CLI／MCP）改回固定欄位摘要：goal 前 80 字、evidence 序號與候選記憶數量；完整包改由既有 archive show 讀取。新增 repo／workFolder 精確篩選，格式移轉見 `docs/ai-cli_kernel/base-archive.md`。develop start 新增 baseRef，委任書固定解析 commit、保留分支漂移閘門，並持久記錄交付分支依賴；尚有未結束的依賴 run 時拒絕 cleanup。省略 baseRef 維持原行為。
+- C 段：kernel 以跨行程名額取代全機單一 active.lock：預設／硬上限三個、同 repo 一個，加入 Claude／Codex 額度並行閘門及人用本機設定檔；相容舊鎖、回收失效名額。setup／test 共用可取消、可依行程身分回收的全機測試鎖，等待不計入命令逾時；status 保留 active 並新增 activeRuns，dashboard／actions JSON 顯示全部佔用者。設定、遷移與實測範圍見 `docs/ai-cli_kernel/concurrency.md`。（使用者 2026-11-08 決定，無對應 issue）
+
+- B 段（#17～#22 整合議題）：kernel archive list（CLI／MCP）改回固定欄位摘要：goal 前 80 字、evidence 序號與候選記憶數量；完整包改由既有 archive show 讀取，避免 list 塞滿交接脈絡。新增 repo／workFolder 精確篩選，格式移轉見 `docs/ai-cli_kernel/base-archive.md`。develop start 新增 baseRef，委任書固定解析 commit、保留分支漂移閘門，並持久記錄交付分支依賴；尚有未結束的依賴 run 時拒絕 cleanup，避免清除其基準來源。省略 baseRef 維持原行為。
 
 ### 修正
 - kernel dashboard 新分頁支援 Windows Terminal Store execution alias：以 PATH、lstat 與執行存取檢查定位，保持無 shell spawn 及既有退出碼；失敗時提供引用目前 Node／CLI 入口的 PowerShell 指令，正確處理空白及單引號。（@moerasermax）

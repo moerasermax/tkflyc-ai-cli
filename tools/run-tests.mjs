@@ -56,6 +56,7 @@ const TESTS = [
   'verify-update.mjs',
   'verify-worker-identity.mjs',
   'verify-worker-guards.mjs',
+  'verify-ai-cli_kernel-policy.mjs',
   'verify-jobs.mjs',
   'verify-durable-jobs.mjs',
   'verify-grok.mjs',
@@ -122,6 +123,8 @@ for (const [i, entry] of entries.entries()) {
   const r = spawnSync(process.execPath, [...(entry.nodeArgs ?? []), join(testsDir, entry.file)], {
     cwd: ROOT,
     stdio: 'inherit',
+    // 定向突變的環境篩選不得縮小正式 npm test 驗收。
+    env: { ...process.env, KERNEL_EVIDENCE_TEST_FILTER: '', KERNEL_BASE_ARCHIVE_TEST_FILTER: '', KERNEL_CONCURRENCY_TEST_FILTER: '' },
     ...(entry.timeoutMs ? { timeout: entry.timeoutMs } : {}),
   });
   const ms = Date.now() - started;

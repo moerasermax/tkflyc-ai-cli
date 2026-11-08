@@ -62,7 +62,7 @@ except Exception:
 #
 # ───────────────────────────────────────────────────────────────────────────
 
-ctx = """【ai-cli 精簡派工政策 v2.2（2026-10-22）】
+ctx = """【ai-cli 精簡派工政策 v2.3（2026-11-08）】
 1. ai-cli 是唯一模型路由入口；判斷模型能不能派時查 models 的 catalogV2：source=vendor-cli 的 routable 是向 vendor 實查的結果，source=builtin-fallback 的條目（以及頂層 claude／codex 陣列）是原始碼靜態清單，不能單獨當作可用證明，要對照 knownBadModels。
 2. 日常 Codex：gpt-6.1-sol + reasoning_effort="medium"。Claude 日常也用 medium。（2026-10-03 換代：vendor 已把 gpt-5.6-sol 標成 "Older generation workhorse model"，現行 workhorse 是 priority 1 的 gpt-6.1-sol，文案寫 "near-Astra performance at a lower cost"。注意 gpt-6.1-sol 的 CLI 端預設 effort 是 low，省略 reasoning_effort 不等於 medium，一定要明確傳。）gpt-6-astra 只用於逆向歧義、架構設計、跨模組高風險，或 6.1-sol 一次明顯不足的工作，派之前寫明理由：同樣的工作 Astra 吃的週額度約是 6.1-sol 的 2～5 倍（2026-10-14 實測：五個 Astra high 包 6.3 小時用掉 Codex 週額度 84%）。
 3. high 僅限跨模組、架構、高風險修改、逆向歧義，或一次 medium 明顯不足；xhigh/max 需使用者明確要求。
@@ -73,8 +73,9 @@ ctx = """【ai-cli 精簡派工政策 v2.2（2026-10-22）】
 8. 交叉驗證只驗高風險 claim 或分歧；第二模型讀 <=2,000-token 證據包，不重掃 repository。
 9. 預算：search 8、tool 20、read 15 files、edit 5 files、test/fix 2 cycles、context 約 512K；達限即停止回報。
 10. 每個任務開頭先問使用者由誰執行：① ai-cli ② 本 session 主導者 ③ 自動；同一任務沿用，換任務再問。專案依內容或模型限制派工的規則只當建議（使用者 2026-09-25 決定）。
-11. 派 Codex 前先查 Codex 週額度剩餘（看 raw 原文，見第 6 條）：剩不到 50% 不同時跑兩個 Codex 工作；剩不到 25% 只派小包或改派 Claude；量不到就當 unknown，不並行。長工作拆小，避免一個 session 上千次請求反覆重送 100K 以上的 context（使用者 2026-10-14 決定）。
-12. OpenRouter 的 Qwen（or-qwen/qwen3.7-plus：偵察、逆向、敏感任務，便宜）與 DeepSeek（or-deepseek/deepseek-v4.1-flash-1017：看圖判定、便宜諮詢與設計審閱）列為 ai-cli 標準候選。兩者都會把資料送到外部付費 API：專案自己的 CLAUDE.md 明文放行的可以直接派；其他專案使用前一律先問使用者，得到同意才派（使用者 2026-10-22 決定）。"""
+11. 派 Codex 前先查 Codex 週額度剩餘（看 raw 原文，見第 6 條）：剩不到 20% 不同時跑兩個 Codex 工作；剩不到 25% 只派小包或改派 Claude；量不到就當 unknown，不並行。長工作拆小，避免一個 session 上千次請求反覆重送 100K 以上的 context（使用者 2026-10-14 決定；並行門檻 2026-11-08 由 50% 改為 20%）。
+12. OpenRouter 的 Qwen（or-qwen/qwen3.7-plus：偵察、逆向、敏感任務，便宜）與 DeepSeek（or-deepseek/deepseek-v4.1-flash-1017：看圖判定、便宜諮詢與設計審閱）列為 ai-cli 標準候選。兩者都會把資料送到外部付費 API：專案自己的 CLAUDE.md 明文放行的可以直接派；其他專案使用前一律先問使用者，得到同意才派（使用者 2026-10-22 決定）。
+13. ai-cli_kernel 同時最多 3 個 run，同一個 repo 一次 1 個（以 git common dir 判斷，worktree 和同一個 origin 的 clone 都算同一個）；Claude 週額度剩不到 10% 或量不到時退回全機 1 個；Codex 剩不到 20% 或量不到時，不同時跑兩個用到 Codex 的 run。這些由 kernel 在開工時自己擋，上限只能由人調整，MCP 改不了（使用者 2026-11-08 決定）。"""
 
 # ai-cli 派出的 worker 收到的內容（AI_CLI_WORKER=1）。四要素照另一個專案前例（知識庫紀錄）
 # 實證有效的「機制感知身分鎖」：身分證明、硬禁加後果、凌駕聲明、首個動作。

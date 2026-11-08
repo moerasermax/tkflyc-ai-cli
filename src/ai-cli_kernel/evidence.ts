@@ -63,10 +63,11 @@ export function testSummary(tail: string | undefined): string {
   const runner = clean.match(/(?:^|\n)共 (\d+) 支：PASS (\d+)、FAIL (\d+)，總耗時 [\d.]+s$/);
   const simple = clean.match(/(?:^|\n)(\d+) passed, (\d+) failed$/);
   const tap = clean.match(/(?:^|\n)# tests (\d+)\r?\n# suites \d+\r?\n# pass (\d+)\r?\n# fail (\d+)(?:\r?\n# (?:cancelled|skipped|todo) \d+)*\r?\n# duration_ms [\d.]+$/);
+  const tapOther = tap ? [...tap[0].matchAll(/^# (?:cancelled|skipped|todo) (\d+)\r?$/gm)].reduce((sum, match) => sum + Number(match[1]), 0) : 0;
   let counts: { passed: number; failed: number; unit: string } | null = null;
   if (runner && Number(runner[1]) === Number(runner[2]) + Number(runner[3])) counts = { passed: Number(runner[2]), failed: Number(runner[3]), unit: '測試腳本' };
   else if (simple) counts = { passed: Number(simple[1]), failed: Number(simple[2]), unit: '測試' };
-  else if (tap && Number(tap[1]) >= Number(tap[2]) + Number(tap[3])) counts = { passed: Number(tap[2]), failed: Number(tap[3]), unit: '測試（TAP）' };
+  else if (tap && Number.isSafeInteger(Number(tap[1])) && Number(tap[1]) === Number(tap[2]) + Number(tap[3]) + tapOther) counts = { passed: Number(tap[2]), failed: Number(tap[3]), unit: '測試（TAP）' };
   const header = counts && Number.isSafeInteger(counts.passed) && Number.isSafeInteger(counts.failed)
     ? `通過 ${counts.passed}、失敗 ${counts.failed}（${counts.unit}）` : '未解析（輸出結尾沒有可確認的通過／失敗數）';
   const note = clean.length > TEST_SUMMARY_CHARS - 200 ? `\n（測試輸出尾段共 ${clean.length} 字元，截斷，僅附最後部分）` : '';

@@ -28,6 +28,7 @@ const { detailLines } = await load('dashboard-view');
 
 let passed = 0, failed = 0;
 async function check(name, fn) {
+  if (process.env.KERNEL_EVIDENCE_TEST_FILTER && !name.includes(process.env.KERNEL_EVIDENCE_TEST_FILTER)) return;
   try { await fn(); passed++; console.log(`PASS ${name}`); }
   catch (error) { failed++; console.log(`FAIL ${name}\n  ${error.stack}`); }
 }
@@ -84,6 +85,12 @@ try {
     assert.match(testSummary(undefined), /^未解析/);
     assert.match(testSummary('共 5 支：PASS 3、FAIL 2，總耗時 1.0s\n'), /通過 3、失敗 2（測試腳本）/);
     assert.match(testSummary('# tests 5\n# suites 1\n# pass 3\n# fail 1\n# cancelled 0\n# skipped 1\n# todo 0\n# duration_ms 9.1'), /通過 3、失敗 1/);
+    for (const tail of [
+      '# tests 6\n# suites 1\n# pass 3\n# fail 1\n# skipped 1\n# duration_ms 9.1',
+      '# tests 5\n# suites 1\n# pass 3\n# fail 1\n# skipped 2\n# duration_ms 9.1',
+      '# tests 9007199254740992\n# suites 1\n# pass 3\n# fail 1\n# duration_ms 9.1',
+    ]) assert.match(testSummary(tail), /^未解析/, tail);
+    assert.match(testSummary('# tests 5\r\n# suites 1\r\n# pass 1\r\n# fail 1\r\n# cancelled 1\r\n# skipped 1\r\n# todo 1\r\n# duration_ms 9.1'), /通過 1、失敗 1/);
   });
   await check('A4 測試規則、來源 rename、排除新增與非測試', () => {
     for (const path of ['test/a.ts', 'a/tests/b.ts', '__tests__/a.ts', 'spec/c.ts', 'a.test.js', 'a.spec.ts', 'test_x.py', 'x_test.go']) assert.ok(isTestPath(path), path);
@@ -244,5 +251,6 @@ try {
     }
   });
 } finally { rmSync(temp, { recursive: true, force: true }); }
+assert.ok(passed + failed > 0, 'refuse an empty test selection');
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exitCode = failed ? 1 : 0;
