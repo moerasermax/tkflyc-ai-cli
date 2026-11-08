@@ -1,9 +1,9 @@
 /** 全螢幕生命週期與 Windows Terminal 啟動器；不取消、不停止任何 run。 */
 import { spawn } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { accessSync, constants, lstatSync } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
 import { DashboardController, type DashboardEffects } from './dashboard.js';
-import { renderDashboard, type CommandShell } from './dashboard-view.js';
+import { renderDashboard, colorsEnabled, type CommandShell } from './dashboard-view.js';
 
 export interface DashboardLaunch {
   platform: string; env: NodeJS.ProcessEnv; executable: string; execArgs: string[]; entry: string | undefined; cwd: string;
@@ -20,35 +20,49 @@ export function newTabArgs(config: DashboardLaunch): string[] {
   return ['-w', '0', 'new-tab', '--title', 'ai-cli_kernel', '--startingDirectory', config.cwd, '--',
     config.executable, ...config.execArgs, resolve(config.cwd, config.entry), 'kernel', 'dashboard'];
 }
+/** 引用目前 runtime 與入口；不依賴 PATH 中另一份 ai-cli。 */
+export function dashboardFallback(config: DashboardLaunch): string {
+  if (!config.entry) return '無法取得目前 CLI 入口，請先確認目前安裝位置。\n';
+  const quote = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  return '請在互動 PowerShell 自行貼上：\n& ' +
+    [config.executable, ...config.execArgs, resolve(config.cwd, config.entry), 'kernel', 'dashboard'].map(quote).join(' ') + '\n';
+}
+/** Store execution alias 是 reparse point：stat/isFile 不代表能否執行。 */
+export function findWindowsTerminal(path: string, probe = { lstatSync, accessSync }): string | null {
+  for (const folder of path.split(delimiter)) {
+    if (!folder) continue;
+    const file = join(folder.replace(/^"|"$/g, ''), 'wt.exe');
+    try {
+      const entry = probe.lstatSync(file);
+      if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+      probe.accessSync(file, constants.X_OK);
+      return file;
+    } catch { /* 下一個 PATH 目錄 */ }
+  }
+  return null;
+}
 export async function launchDashboardTab(config: DashboardLaunch, io: { stdout(text: string): void; stderr(text: string): void }): Promise<number> {
   const worker = dashboardRefusal(config.env.AI_CLI_WORKER, true, true);
   if (worker) { io.stderr(worker + '\n'); return 1; }
   if (config.platform !== 'win32' || !config.env.WT_SESSION) {
     io.stderr('dashboard --new-tab 僅支援 Windows Terminal（Windows 且 WT_SESSION 存在）。\n');
-    io.stdout('請在互動終端機自行貼上：ai-cli kernel dashboard\n'); return 2;
+    io.stdout(dashboardFallback(config)); return 2;
   }
   const wt = config.findWt();
   if (!wt) {
     io.stderr('PATH 找不到 wt.exe，沒有啟動其他終端機。\n');
-    io.stdout('請在互動終端機自行貼上：ai-cli kernel dashboard\n'); return 2;
+    io.stdout(dashboardFallback(config)); return 2;
   }
   try {
     const code = await config.launch(wt, newTabArgs(config), config.cwd);
     if (code !== 0) throw new Error(`wt.exe 結束碼 ${code}`);
     io.stdout('Windows Terminal 已接受新分頁啟動要求；新分頁會檢查 TTY 並顯示 dashboard。\n'); return 0;
-  } catch (error) { io.stderr(`無法啟動 dashboard 新分頁：${message(error)}\n`); return 1; }
+  } catch (error) { io.stderr(`無法啟動 dashboard 新分頁：${message(error)}\n`); io.stdout(dashboardFallback(config)); return 1; }
 }
 export function nativeLaunch(startProcess: typeof spawn = spawn): DashboardLaunch {
   return {
     platform: process.platform, env: process.env, executable: process.execPath, execArgs: [...process.execArgv], entry: process.argv[1], cwd: process.cwd(),
-    findWt() {
-      for (const folder of (process.env.PATH ?? '').split(delimiter)) {
-        if (!folder) continue;
-        const file = join(folder.replace(/^"|"$/g, ''), 'wt.exe');
-        try { if (statSync(file).isFile()) return file; } catch { /* 下一個 PATH 目錄 */ }
-      }
-      return null;
-    },
+    findWt() { return findWindowsTerminal(process.env.PATH ?? ''); },
     launch(file, args, cwd) {
       return new Promise((done, reject) => {
         const child = startProcess(file, args, { cwd, shell: false, windowsHide: true, stdio: 'ignore', timeout: 5_000 });
@@ -70,6 +84,7 @@ export interface DashboardTerminal {
   events: Events;
   worker?: string;
   commandShell?: CommandShell;
+  env?: NodeJS.ProcessEnv;
   error(text: string): void;
   clock?: {
     setTimeout(callback: () => void, ms: number): ReturnType<typeof setTimeout>;
@@ -77,7 +92,7 @@ export interface DashboardTerminal {
   };
 }
 export const nativeTerminal = (): DashboardTerminal => ({ input: process.stdin, output: process.stdout, events: process,
-  worker: process.env.AI_CLI_WORKER, commandShell: process.platform === 'win32' ? 'powershell' : 'posix',
+  env: process.env, worker: process.env.AI_CLI_WORKER, commandShell: process.platform === 'win32' ? 'powershell' : 'posix',
   error: text => { process.stderr.write(text); } });
 
 /** 小型可測輸入解碼器：處理跨 chunk 的方向鍵、Esc 及 bracketed paste，貼上內容不變成操作。 */
@@ -132,6 +147,7 @@ export async function runDashboard(effects: DashboardEffects, terminal: Dashboar
   const refusal = dashboardRefusal(terminal.worker, terminal.input.isTTY, terminal.output.isTTY);
   if (refusal) { terminal.error(refusal + '\n'); return 1; }
   const { input, output, events } = terminal;
+  const color = colorsEnabled(terminal.env ?? process.env);
   const clock = terminal.clock ?? { setTimeout, clearTimeout };
   const originalRaw = Boolean(input.isRaw), originalPaused = input.isPaused();
   let touchedRaw = false, alternate = false, cleaned = false, done = false;
@@ -145,7 +161,7 @@ export async function runDashboard(effects: DashboardEffects, terminal: Dashboar
   const controller = new DashboardController(effects, () => draw());
   function draw(): void {
     if (done || !alternate) return;
-    const frame = renderDashboard(controller, output.columns ?? 80, output.rows ?? 24, terminal.commandShell);
+    const frame = renderDashboard(controller, output.columns ?? 80, output.rows ?? 24, terminal.commandShell, color);
     controller.scroll = frame.scroll;
     output.write('\x1b[H\x1b[2J' + frame.text);
   }
@@ -157,7 +173,7 @@ export async function runDashboard(effects: DashboardEffects, terminal: Dashboar
     }
     let first: unknown;
     const restore = (fn: () => void) => { try { fn(); } catch (error) { first ??= error; } };
-    if (alternate) restore(() => { output.write('\x1b[?2004l\x1b[?25h\x1b[?1049l'); });
+    if (alternate) restore(() => { output.write((color ? '\x1b[0m' : '') + '\x1b[?2004l\x1b[?25h\x1b[?1049l'); });
     if (touchedRaw) restore(() => { input.setRawMode(originalRaw); });
     if (originalPaused) restore(() => { input.pause(); });
     if (first) throw first;
@@ -184,7 +200,7 @@ export async function runDashboard(effects: DashboardEffects, terminal: Dashboar
   async function key(key: string): Promise<void> {
     if (done) return;
     try {
-      const frame = renderDashboard(controller, output.columns ?? 80, output.rows ?? 24, terminal.commandShell);
+      const frame = renderDashboard(controller, output.columns ?? 80, output.rows ?? 24, terminal.commandShell, color);
       const result = await controller.key(key, frame.pageSize, frame.confirmationFits);
       if (result === 'quit') { stop(key === 'ctrl+c' ? 130 : 0); return; }
       // 即時更新或操作改變 active 狀態後，立刻改用正確輪詢間隔。

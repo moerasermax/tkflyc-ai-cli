@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
+import { delimiter } from 'node:path';
 import { spawnSync } from 'node:child_process';
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const load = name => import(pathToFileURL(join(ROOT, 'dist/ai-cli_kernel', name + '.js')).href);
@@ -307,7 +309,7 @@ function fakeTerminal({ raw = false, paused = true, failInit = false } = {}) {
   input.resume = () => { paused = false; }; input.pause = () => { paused = true; };
   output.columns = 120; output.rows = 35;
   output.write = (text, cb) => { writes.push(text); if (cb) setImmediate(() => { writes.push('DRAINED'); cb(); }); return true; };
-  return { input, output, events, error: text => errors.push(text), writes, errors, modes };
+  return { input, output, events, env: {}, error: text => errors.push(text), writes, errors, modes };
 }
 await test('輪詢依 active 切換 5 秒與 30 秒，cleanup 只清理自身 timer listener', async () => {
   const host = fakeTerminal(), f = fixture(); let serial = 0;
@@ -363,23 +365,28 @@ await test('worker 與 stdin/stdout 非 TTY 拒絕，拒絕前不動終端機', 
   }
 });
 await test('正常 Ctrl+C SIGTERM 例外及初始化失敗皆恢復終端機並排空 stdout', async () => {
-  for (const mode of ['quit','ctrl+c','SIGTERM','exception','rejection','resize-error','init']) {
-    const host = fakeTerminal({ failInit: mode === 'init' });
+  for (const env of [{}, { NO_COLOR: '1' }]) for (const mode of ['quit','ctrl+c','SIGINT','SIGTERM','exception','rejection','resize-error','input-error','output-error','end','init']) {
+    const host = fakeTerminal({ failInit: mode === 'init' }); host.env = env;
     const running = terminal.runDashboard(fixture().effects,host);
     if (mode !== 'init') {
       await new Promise(setImmediate);
       if (mode === 'quit') host.input.emit('data',Buffer.from('q'));
       if (mode === 'ctrl+c') host.input.emit('data',Buffer.from('\x03'));
       if (mode === 'SIGTERM') host.events.emit('SIGTERM');
+      if (mode === 'SIGINT') host.events.emit('SIGINT');
+      if (mode === 'input-error') host.input.emit('error',new Error('input'));
+      if (mode === 'output-error') host.output.emit('error',new Error('output'));
+      if (mode === 'end') host.input.emit('end');
       if (mode === 'exception') host.events.emit('uncaughtException',new Error('unexpected'));
       if (mode === 'rejection') host.events.emit('unhandledRejection',new Error('promise'));
       if (mode === 'resize-error') { const write = host.output.write; host.output.write = (...args) => { host.output.write = write; throw new Error('render'); }; host.output.emit('resize'); }
     }
     const code = await running;
-    assert.equal(code, mode === 'quit' ? 0 : mode === 'ctrl+c' ? 130 : mode === 'SIGTERM' ? 143 : 1, mode);
+    assert.equal(code, mode === 'quit' ? 0 : ['ctrl+c','SIGINT'].includes(mode) ? 130 : mode === 'SIGTERM' ? 143 : 1, mode);
     assert.equal(host.input.isRaw,false,mode); assert.equal(host.input.isPaused(),true,mode);
     assert.ok(host.writes.includes('DRAINED'),mode);
     if (mode !== 'init') assert.ok(host.writes.some(s => s.includes('\x1b[?1049l') && s.includes('\x1b[?25h')),mode);
+    if (mode !== 'init') assert.equal(host.writes.join('').includes('\x1b[0m\x1b[?2004l'), !env.NO_COLOR, mode);
     for (const emitter of [host.events,host.input,host.output]) assert.equal(emitter.eventNames().length,0,mode);
   }
   const host = fakeTerminal({ raw: true, paused: false }); const running = terminal.runDashboard(fixture().effects,host);
@@ -448,7 +455,7 @@ await test('new-tab worker 不繞過，非 Windows Terminal、wt 缺失、入口
     assert.equal(code,['linux','outside-wt','missing-wt'].includes(mode) ? 2 : 1,mode);
     assert.equal(launched,['error','nonzero'].includes(mode) ? 1 : 0,mode);
     if (['worker','linux','outside-wt'].includes(mode)) assert.equal(searched,0,mode);
-    if (['linux','outside-wt','missing-wt'].includes(mode)) assert.ok(out.join('').includes('ai-cli kernel dashboard'));
+    if (['linux','outside-wt','missing-wt'].includes(mode)) assert.ok(out.join('').includes("'kernel' 'dashboard'"));
     assert.ok(errors.length,mode);
   }
 });
@@ -472,7 +479,112 @@ await test('真實 CLI actions JSON 與 dashboard launcher 檢查次序', async 
   // 清空 WT_SESSION 保證這個測試在任何平台都不會真的開新分頁。
   const tab = spawnSync(process.execPath,[join(ROOT,'dist/bin/ai-cli.js'),'kernel','dashboard','--new-tab'], { cwd:ROOT, env:{...process.env,AI_CLI_WORKER:'',WT_SESSION:''},encoding:'utf8',timeout:15000 });
   assert.equal(tab.status,2); assert.ok(tab.stderr.includes('Windows Terminal'));
-  assert.ok(tab.stdout.includes('ai-cli kernel dashboard')); assert.ok(!tab.stderr.includes('需要 stdin'));
+  assert.ok(tab.stdout.includes("'kernel' 'dashboard'")); assert.ok(!tab.stderr.includes('需要 stdin'));
+});
+
+await test('Terminal alias stat EACCES 仍找到；不存在維持原錯誤與退出碼', async () => {
+  const fs = createRequire(import.meta.url)('node:fs');
+  const original = { statSync: fs.statSync, lstatSync: fs.lstatSync, accessSync: fs.accessSync };
+  const path = process.env.PATH, alias = join(ROOT, 'Store Alias', 'wt.exe'), calls = [];
+  try {
+    process.env.PATH = ['', '"' + join(ROOT, 'missing') + '"', '"' + join(ROOT, 'Store Alias') + '"'].join(delimiter);
+    fs.statSync = () => { throw Object.assign(new Error('alias'), { code: 'EACCES' }); };
+    fs.lstatSync = file => {
+      calls.push(file);
+      if (file !== alias) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      return { isFile: () => false, isSymbolicLink: () => true };
+    };
+    fs.accessSync = (file, mode) => { assert.equal(file, alias); assert.equal(mode, fs.constants.X_OK); };
+    syncBuiltinESMExports();
+    assert.throws(() => fs.statSync(alias), { code: 'EACCES' });
+    assert.equal(terminal.nativeLaunch().findWt(), alias); assert.equal(calls.length, 2);
+    fs.accessSync = () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); };
+    syncBuiltinESMExports(); assert.equal(terminal.nativeLaunch().findWt(), null);
+    fs.lstatSync = () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); };
+    syncBuiltinESMExports();
+    const config = { ...terminal.nativeLaunch(), platform: 'win32', env: { WT_SESSION: 'test' } };
+    let err = '', out = '';
+    assert.equal(await terminal.launchDashboardTab(config, { stderr: s => { err += s; }, stdout: s => { out += s; } }), 2);
+    assert.equal(err, 'PATH 找不到 wt.exe，沒有啟動其他終端機。\n');
+    assert.ok(out.includes("'kernel' 'dashboard'"));
+    fs.lstatSync = () => ({ isFile: () => false, isSymbolicLink: () => false });
+    syncBuiltinESMExports(); assert.equal(terminal.nativeLaunch().findWt(), null, '不可啟動同名目錄');
+  } finally {
+    Object.assign(fs, original); syncBuiltinESMExports();
+    if (path === undefined) delete process.env.PATH; else process.env.PATH = path;
+  }
+});
+await test('fallback 使用目前 Node 入口與 PowerShell 呼叫運算子、空白及單引號安全', async () => {
+  const config = { ...terminal.nativeLaunch(), platform: 'win32', env: { WT_SESSION: 'test' },
+    executable: "C:/Node's Folder/node.exe", execArgs: ['--import', "C:/Loader's Folder/load.mjs"],
+    cwd: ROOT, entry: join(ROOT, "CLI's Folder", 'ai-cli.js'), findWt: () => null };
+  let out = '';
+  assert.equal(await terminal.launchDashboardTab(config, { stdout: s => { out += s; }, stderr() {} }), 2);
+  const q = s => "'" + s.replaceAll("'", "''") + "'";
+  assert.equal(out.split('\n')[1], '& ' + [config.executable, ...config.execArgs, config.entry, 'kernel', 'dashboard'].map(q).join(' '));
+  assert.ok(!out.includes('--new-tab'));
+  assert.ok(terminal.dashboardFallback(terminal.nativeLaunch()).includes(q(process.execPath)));
+  const throwing = terminal.nativeLaunch(() => { throw new Error('synchronous spawn failure'); });
+  await assert.rejects(throwing.launch('missing', [], ROOT), /synchronous spawn failure/);
+  let err = ''; out = '';
+  assert.equal(await terminal.launchDashboardTab({ ...config, findWt: () => 'wt.exe', launch: throwing.launch },
+    { stdout: s => { out += s; }, stderr: s => { err += s; } }), 1);
+  assert.match(err, /無法啟動.*synchronous spawn failure/); assert.ok(out.includes("& 'C:/Node''s Folder"));
+});
+const ESC = '\x1b';
+const sgrOnly = text => text.replace(/\x1b\[[0-9;]*m/g, '');
+await test('有色每行 reset、完整 SGR 裁切與中文 grapheme 寬度', async () => {
+  const c = new DashboardController(fixture().effects); await c.refresh();
+  c.detail.goal = '中e\u0301👨‍👩‍👧‍👦文'.repeat(40) + '\x1b[31m外部樣式\x1b[0m';
+  for (const [columns, rows] of [[2, 2], [21, 10], [31, 24], [101, 40], [140, 80]]) {
+    const frame = view.renderDashboard(c, columns, rows, 'powershell', true);
+    for (const line of frame.text.split('\r\n')) {
+      assert.ok(line.endsWith(ESC + '[0m'), JSON.stringify(line));
+      assert.ok(view.displayWidth(line) <= columns - 1);
+      assert.ok(!sgrOnly(line).includes(ESC), '沒有半截或其他 escape');
+    }
+  }
+  const styled = ESC + '[7m中' + ESC + '[32me\u0301👨‍👩‍👧‍👦文字' + ESC + '[39m' + ESC + '[27m';
+  for (let width = 0; width < 18; width++) {
+    const clipped = view.clipCells(styled, width, true);
+    assert.ok(view.displayWidth(clipped) <= width); assert.ok(!sgrOnly(clipped).includes(ESC));
+    assert.ok(clipped.endsWith(ESC + '[0m'));
+  }
+  c.pending = rules.actionsFor(c.detail)[0];
+  const confirm = view.renderDashboard(c, 200, 50, 'powershell', true).text;
+  assert.match(confirm, /\x1b\[1m\x1b\[31m⚠ 注意：/);
+  const plain = view.clean(confirm).split(/\r?\n/), at = plain.findIndex(line => line === '實際指令：');
+  assert.ok(at >= 0); assert.equal(plain[at + 1], view.commandLine(c.pending.args, 'powershell'));
+  assert.ok(confirm.split('\r\n').every(line => line.endsWith(ESC + '[0m')));
+});
+await test('清單與詳細狀態色、選取反白不中斷、標題標籤結果及按鍵樣式', async () => {
+  for (const [state, code] of Object.entries({ completed:32, running:36, awaiting_approval:33, waiting_human:33, interrupted:33, failed:31, cancelled:90, budget_exhausted:90 })) {
+    const c = new DashboardController(fixture(detail(state)).effects); await c.refresh();
+    const text = view.renderDashboard(c, 100, 80, 'powershell', true).text;
+    const list = text.split('\r\n').find(line => line.includes('▶'));
+    assert.ok(list.includes(ESC + '[7m')); assert.ok(list.includes(ESC + '[' + code + 'm'));
+    const selected = list.slice(list.indexOf(ESC + '[7m'), list.indexOf(ESC + '[27m'));
+    assert.ok(!selected.includes(ESC + '[0m'), '狀態色不能清掉選取反白'); assert.ok(selected.includes(ESC + '[39m'));
+    const status = text.split('\r\n').find(line => line.includes('狀態：'));
+    assert.ok(status.includes(ESC + '[' + code + 'm'), state);
+    assert.ok(text.includes(ESC + '[1m最近的 run')); assert.ok(text.includes(ESC + '[2m目標：'));
+    assert.ok(text.includes(ESC + '[36m↑↓')); assert.ok(text.includes(ESC + '[2m 選擇'));
+    c.notice = 'operation result'; c.noticeTone = 'error';
+    assert.ok(view.renderDashboard(c, 200, 80, 'powershell', true).text.includes(ESC + '[31m結果：operation result'));
+    c.noticeTone = 'success';
+    assert.ok(view.renderDashboard(c, 200, 80, 'powershell', true).text.includes(ESC + '[32m結果：operation result'));
+  }
+});
+await test('NO_COLOR 非空與 TERM dumb 禁用 SGR、空字串有色並保留游標控制及離開 reset', async () => {
+  for (const [env, colored] of [[{}, true], [{NO_COLOR:''}, true], [{NO_COLOR:'0'}, false], [{NO_COLOR:'1'}, false], [{TERM:'dumb'}, false]]) {
+    const host = fakeTerminal(); host.env = env;
+    const running = terminal.runDashboard(fixture().effects, host); await new Promise(setImmediate);
+    host.input.emit('data', 'q'); assert.equal(await running, 0);
+    const text = host.writes.join('');
+    assert.ok(text.includes(ESC + '[?1049h') && text.includes(ESC + '[?1049l'));
+    assert.equal(/\x1b\[[0-9;]*m/.test(text), colored, JSON.stringify(env));
+    if (colored) assert.ok(text.includes(ESC + '[0m' + ESC + '[?2004l'));
+  }
 });
 console.log(`dashboard: ${checks - failures}/${checks} PASS`);
 process.exitCode = failures ? 1 : 0;

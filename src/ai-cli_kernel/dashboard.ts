@@ -42,6 +42,7 @@ export class DashboardController {
   report: string | null = null;
   scroll = 0;
   notice = '';
+  noticeTone: 'success' | 'error' | 'running' = 'success';
   busy = false;
   closed = false;
   private pinned = false;
@@ -118,11 +119,13 @@ export class DashboardController {
       if (key !== 'y' || !confirmationVisible) return;
       const action = this.pending;
       this.pending = null; this.busy = true; this.generation++;
+      this.noticeTone = 'running';
       this.notice = `執行中：${action.label}…`; this.changed();
       try {
         const result = await perform(this.effects, action);
+        this.noticeTone = 'success';
         this.notice = `${action.label}：${typeof result === 'string' ? result : JSON.stringify(result) ?? '完成'}`;
-      } catch (error) { this.notice = `${action.label}失敗：${reason(error)}（不會自動重試）`; }
+      } catch (error) { this.noticeTone = 'error'; this.notice = `${action.label}失敗：${reason(error)}（不會自動重試）`; }
       finally {
         this.busy = false;
         try { await this.refresh(); this.changed(); }
@@ -153,7 +156,7 @@ export class DashboardController {
       try {
         const report = await this.effects.report(runId);
         if (!this.closed && generation === this.generation && !this.pending) { this.report = report; this.scroll = 0; }
-      } catch (error) { this.notice = `讀不到報告：${reason(error)}`; }
+      } catch (error) { this.noticeTone = 'error'; this.notice = `讀不到報告：${reason(error)}`; }
       this.changed(); return;
     }
     if (/^[1-9]$/.test(key) && this.detail?.runId === this.selected) {

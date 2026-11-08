@@ -5141,5 +5141,37 @@
     "from": "shell: false, windowsHide: true, stdio:",
     "to": "shell: true, windowsHide: true, stdio:",
     "expect": "原生 launcher 無 shell"
+  },
+  {
+    "name": "dashboard alias 拒絕 reparse point",
+    "file": "src/ai-cli_kernel/dashboard-terminal.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "if (!entry.isFile() && !entry.isSymbolicLink()) continue;",
+    "to": "if (!entry.isFile()) continue;",
+    "expect": "Terminal alias stat EACCES 仍找到"
+  },
+  {
+    "name": "dashboard 配色錯把空 NO_COLOR 當禁色",
+    "file": "src/ai-cli_kernel/dashboard-view.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "!env.NO_COLOR && env.TERM !== 'dumb'",
+    "to": "env.NO_COLOR === undefined && env.TERM !== 'dumb'",
+    "expect": "NO_COLOR 非空與 TERM dumb"
+  },
+  {
+    "name": "dashboard 配色裁切遺失行尾 reset",
+    "file": "src/ai-cli_kernel/dashboard-view.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "return out + (styled ? RESET : '');",
+    "to": "return out;",
+    "expect": "有色每行 reset"
+  },
+  {
+    "name": "dashboard 配色失敗顯示為成功色",
+    "file": "src/ai-cli_kernel/dashboard-view.ts",
+    "script": "verify-ai-cli_kernel-dashboard.mjs",
+    "from": "failed: '31', cancelled: '90'",
+    "to": "failed: '32', cancelled: '90'",
+    "expect": "清單與詳細狀態色"
   }
 ]

@@ -9,9 +9,12 @@
 ## [Unreleased]
 
 ### 修正
+- kernel dashboard 新分頁支援 Windows Terminal Store execution alias：以 PATH、lstat 與執行存取檢查定位，保持無 shell spawn 及既有退出碼；失敗時提供引用目前 Node／CLI 入口的 PowerShell 指令，正確處理空白及單引號。（@moerasermax）
 - kernel dashboard 的手動更新與輪詢同時完成時，只保留一個更新計時器，確保離開後完整清理。確認指令依 POSIX／PowerShell 引用參數，保護分支名中的 shell 展開字元；新分頁入口的相對路徑以啟動工作目錄解析。（@moerasermax）
 
 ### 新增
+
+- kernel dashboard 加入無依賴 16 色狀態、反白選取、標題／警告／結果及按鍵樣式；支援 NO_COLOR 非空及 TERM=dumb 禁色，ANSI 安全裁切與逐行／退出 reset，保留中文 grapheme 寬度與原安全閘門。新增 alias、fallback、配色回歸與突變；Windows Node v24.15.0 實際 nativeLaunch 啟動 Store alias 返回 0，真人 dashboard 與深淺主題視覺驗收仍待確認。（@moerasermax）
 
 - dashboard 驗收補上正式 API adapter、原生程序啟動器與完整報告導覽的注入測試；新增 create／run 結果不明重試、放行未成功、確認不可見與 launcher shell 的安全突變。提供 `node tests/dashboard-mutations.mjs`，以未提交快照執行原樣突變 harness，檢查指定斷言、編譯及位元組還原，不建立分支或提交；實測範圍另記於 dashboard 驗收紀錄。（@moerasermax）
 
