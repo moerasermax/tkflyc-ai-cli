@@ -8,6 +8,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, truncateSync, writeFileSync, writeSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { readActiveRuns, readReservedRun, releaseRunSlot } from './admission.js';
+import { ProcessMutexBusy, type MutexRetryDeps } from './process-mutex.js';
 import { jobStateDir } from '../core/live-jobs.js';
 import type { KernelContract, KernelEvent, KernelEventBody, KernelReleaseEvent } from './types.js';
 
@@ -180,6 +181,22 @@ export function acquireActiveLock(runId: string): { ok: true } | { ok: false; he
   }
 }
 
-export function releaseActiveLock(runId: string): Promise<void> {
-  return releaseRunSlot(runId);
+export const SLOT_RELEASE_DEFERRED_NOTE = '名額釋放時協調忙碌，重試耗盡；名額檔留著，之後的 admission 會回收指向已結束 run 的名額';
+/** 名額釋放失敗不是 run 的結果：不寫 state，只記一筆 slot_release_failed。寫不進去也不丟出，免得蓋掉呼叫端原本的結論。 */
+export function recordSlotReleaseFailed(runId: string, detail: string): void {
+  try { new RunStore(kernelRunDir(runId)).append({ type: 'slot_release_failed', detail }); }
+  catch { /* 紀錄寫不進去時，殘留名額仍由之後的 admission 回收 */ }
+}
+/**
+ * 釋放名額。admission 協調忙碌時由 releaseRunSlot 有限重試（retryProcessMutex：3 次、間隔 1 秒）；
+ * 仍忙碌就記 slot_release_failed 並回傳 false，不丟例外——已結束的 run 不能因此被改寫成 failed。
+ * 其他錯誤照常丟出。`keep` 在 admission 互斥區內判斷，回 true 就保留名額。
+ */
+export async function releaseActiveLock(runId: string, options: { deps?: Partial<MutexRetryDeps>; keep?: () => boolean | Promise<boolean> } = {}): Promise<boolean> {
+  try { await releaseRunSlot(runId, options.deps, options.keep); return true; }
+  catch (error) {
+    if (!(error instanceof ProcessMutexBusy)) throw error;
+    recordSlotReleaseFailed(runId, `${SLOT_RELEASE_DEFERRED_NOTE}（${error.message}）`);
+    return false;
+  }
 }

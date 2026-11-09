@@ -617,6 +617,97 @@ try {
     const elapsed = activeMinutes(replayJournal(events), Date.parse(terminalEvent.at)) * 60000;
     assert.ok(Math.abs(elapsed - expectedMs) < 1, `active budget ${elapsed}ms must exclude the recorded lock wait; expected ${expectedMs}ms`);
   });
+  await test('G1 busy slot release keeps delivered runs terminal and journals slot_release_failed', async () => {
+    await clear();
+    const { settleRunnerRun } = await load('runner-settle');
+    const dir = folder(), slotFile = store => join(kernelStateDir(), 'active-runs', `${store.runId}.json`);
+    let calls = 0, sleeps = 0;
+    const busy = { mutex: async () => { calls++; throw new ProcessMutexBusy('admission'); }, sleep: async ms => { assert.equal(ms, 1000); sleeps++; } };
+    const noKill = { kill: async () => assert.fail('no open action to kill') };
+    for (const terminal of ['completed', 'failed', 'cancelled']) {
+      const store = fresh(dir); await admit(store); calls = 0; sleeps = 0;
+      const state = await settleRunnerRun(store, noKill, async () => { store.append({ type: 'state', state: terminal }); return terminal; }, runId => releaseActiveLock(runId, { deps: busy }));
+      assert.equal(state, terminal); assert.equal(calls, 3); assert.equal(sleeps, 2);
+      const events = store.read();
+      assert.equal(replayJournal(events).state, terminal, 'busy release must not rewrite the terminal state');
+      assert.ok(!events.some(e => e.type === 'state' && e.reason === 'kernel_error'), 'busy release is not a kernel_error');
+      assert.equal(events.filter(e => e.type === 'slot_release_failed').length, 1); assert.equal(events.at(-1).type, 'slot_release_failed');
+      assert.ok(existsSync(slotFile(store)), 'busy release leaves the slot file behind');
+      // A later admission for the SAME repo reclaims the slot that points at a terminal run.
+      const next = fresh(dir); await admit(next);
+      assert.ok(!existsSync(slotFile(store)), 'admission reclaims slots of terminal runs');
+      assert.deepEqual(readActiveRuns().map(run => run.runId), [next.runId]); await finish(next);
+    }
+    // The real admission mutex held by another live ticket (fast clock) takes the same busy path.
+    const tickets = join(kernelStateDir(), 'admission.tickets'); mkdirSync(tickets, { recursive: true });
+    const holder = join(tickets, 'g1-holder.json');
+    const held = fresh(dir); await admit(held); let clock = 0;
+    writeFileSync(holder, JSON.stringify({ id: 'g1-holder', owner: await processIdentity(), number: 0 }));
+    try {
+      const realBusy = { mutex: (name, work) => withProcessMutex(name, work, { now: () => clock, sleep: async () => { clock += 15000; } }), sleep: async () => {} };
+      assert.equal(await settleRunnerRun(held, noKill, async () => { held.append({ type: 'state', state: 'completed' }); return 'completed'; }, runId => releaseActiveLock(runId, { deps: realBusy })), 'completed');
+      assert.equal(replayJournal(held.read()).state, 'completed'); assert.equal(held.read().at(-1).type, 'slot_release_failed');
+      assert.ok(existsSync(slotFile(held)));
+    } finally { rmSync(holder, { force: true }); }
+    const reclaimer = fresh(dir); await admit(reclaimer); assert.ok(!existsSync(slotFile(held))); await finish(reclaimer);
+    // Only a real program error from the loop becomes failed/kernel_error; the slot is still released.
+    const broken = fresh(dir); await admit(broken);
+    assert.equal(await settleRunnerRun(broken, noKill, async () => { throw new Error('loop bug'); }), 'failed');
+    assert.equal(replayJournal(broken.read()).reason, 'kernel_error'); assert.ok(!existsSync(slotFile(broken)));
+    // Non-busy release errors propagate but never rewrite the delivered state.
+    const ioStore = fresh(dir); await admit(ioStore); const io = new Error('slot disk error');
+    await assert.rejects(settleRunnerRun(ioStore, noKill, async () => { ioStore.append({ type: 'state', state: 'completed' }); return 'completed'; },
+      runId => releaseActiveLock(runId, { deps: { mutex: async () => { throw io; } } })), e => e === io);
+    assert.equal(replayJournal(ioStore.read()).state, 'completed');
+    assert.ok(!ioStore.read().some(e => e.type === 'slot_release_failed')); await releaseActiveLock(ioStore.runId);
+  });
+  await test('G1 cancel stays cancelled when slot release is busy', async () => {
+    await clear();
+    const busy = { mutex: async () => { throw new ProcessMutexBusy('admission'); }, sleep: async () => {} };
+    const store = fresh(); await admit(store);
+    const status = await api.aiCliKernelCancel({ runId: store.runId }, { release: busy });
+    assert.equal(status.state, 'cancelled'); assert.match(status.detail, /admission 會回收/);
+    assert.equal(store.read().filter(e => e.type === 'slot_release_failed').length, 1);
+    // Cancelling an already terminal run with a busy release is not a failure either.
+    const again = await api.aiCliKernelCancel({ runId: store.runId }, { release: busy });
+    assert.equal(again.state, 'cancelled'); assert.match(again.detail, /admission 會回收/);
+    assert.ok(existsSync(join(kernelStateDir(), 'active-runs', `${store.runId}.json`)));
+    const next = fresh(); await admit(next);
+    assert.deepEqual(readActiveRuns().map(run => run.runId), [next.runId]);
+    assert.ok(!existsSync(join(kernelStateDir(), 'active-runs', `${store.runId}.json`)));
+    const quiet = await api.aiCliKernelCancel({ runId: next.runId });
+    assert.equal(quiet.state, 'cancelled'); assert.doesNotMatch(String(quiet.detail), /admission 會回收/);
+  });
+  await test('G3 failed runner launch releases the slot and approve resumes the interrupted run', async () => {
+    await clear();
+    const slotFile = store => join(kernelStateDir(), 'active-runs', `${store.runId}.json`);
+    const store = fresh(), failure = new Error('launcher 結束碼 1');
+    await assert.rejects(api.aiCliKernelApprove({ runId: store.runId }, { quota, launch: async () => { throw failure; } }), e => e === failure);
+    assert.ok(!existsSync(slotFile(store)), 'failed launch releases its slot'); assert.equal(readActiveRuns().length, 0);
+    assert.equal(replayJournal(store.read()).state, 'running');
+    assert.equal((await api.aiCliKernelStatus({ runId: store.runId })).effectiveState, 'interrupted');
+    // A late runner is fenced by claimRunnerSlot.
+    assert.equal(await claimRunnerSlot(store, async () => assert.fail('late runner must be fenced')), false);
+    let launches = 0;
+    const resumed = await api.aiCliKernelApprove({ runId: store.runId }, { quota, launch: async () => { launches++; } });
+    assert.equal(launches, 1); assert.equal(resumed.state, 'running');
+    assert.equal(store.read().filter(e => e.type === 'approved').at(-1).kind, 'continue');
+    assert.deepEqual(readActiveRuns().map(run => run.runId), [store.runId]); await finish(store);
+    // A runner that already claimed the slot (live runner.json) keeps it.
+    const claimed = fresh();
+    await assert.rejects(api.aiCliKernelApprove({ runId: claimed.runId }, { quota, launch: async () => {
+      writeFileSync(claimed.runnerPath, JSON.stringify(await processIdentity())); throw failure;
+    } }), e => e === failure);
+    assert.ok(existsSync(slotFile(claimed)), 'a live runner keeps its slot'); rmSync(claimed.runnerPath); await finish(claimed);
+    // Busy release after a failed launch is journaled and never masks the launch error.
+    const busyStore = fresh();
+    await assert.rejects(api.aiCliKernelApprove({ runId: busyStore.runId }, { quota, launch: async () => { throw failure; },
+      release: { mutex: async () => { throw new ProcessMutexBusy('admission'); }, sleep: async () => {} } }), e => e === failure);
+    assert.equal(busyStore.read().filter(e => e.type === 'slot_release_failed').length, 1);
+    assert.ok(existsSync(slotFile(busyStore)));
+    const own = await api.aiCliKernelApprove({ runId: busyStore.runId }, { quota, launch: async () => {} });
+    assert.equal(own.state, 'running'); await finish(busyStore);
+  });
   await clear();
   assert.ok(count > 0, 'refuse an empty test selection');
   console.log(`PASS C ${count} groups (real cross-process admission and command overlap checks)`);

@@ -25,6 +25,8 @@
 ### 修正
 - kernel dashboard 新分頁支援 Windows Terminal Store execution alias：以 PATH、lstat 與執行存取檢查定位，保持無 shell spawn 及既有退出碼；失敗時提供引用目前 Node／CLI 入口的 PowerShell 指令，正確處理空白及單引號。（@moerasermax）
 - kernel dashboard 的手動更新與輪詢同時完成時，只保留一個更新計時器，確保離開後完整清理。確認指令依 POSIX／PowerShell 引用參數，保護分支名中的 shell 展開字元；新分頁入口的相對路徑以啟動工作目錄解析。（@moerasermax）
+- G1（c646 交付後的獨立稽核）：kernel 釋放名額遇到 admission 協調忙碌時，有限重試（3 次、間隔 1 秒）後只記一筆新的 `slot_release_failed` journal 事件，不再丟出例外。原本 runner 把釋放放在 loop 的 try 裡，忙碌逾時會落進 catch 寫成 `failed／kernel_error`，replay 以最後一筆為準，已交付的 run 因此變成失敗、runner 以 exit 1 結束且名額檔留著。現在收尾抽到 `runner-settle.ts`：只有 loop 丟出的程式錯誤才寫 kernel_error，已是終止狀態的 run 不被改寫，runner 照常結束。殘留名額由之後的 admission 回收（指向已終止 run 的名額檔本來就會清掉，補上同 repo 回收的回歸檢查）。cancel 在 run 已寫成 cancelled 後釋放忙碌，仍回 cancelled，detail 附說明。releaseRunSlot 改走 retryProcessMutex 後，既有突變「kernel F1F3：釋放略過 admission 臨界區」的片段已不在原始碼，只更新它的 from／to 對應新寫法（名稱、expect、位置不變），實跑仍由原斷言抓到。
+- G3（c646 交付後的獨立稽核）：核准取得名額後若 runner 啟動失敗（launcher 結束碼非 0 或 20 秒內沒起來），先釋放名額再丟出原錯誤。原本名額的 owner 是仍活著的 MCP 行程，不會被當成 abandoned 回收，只能等人 cancel。run 停在 running 又沒有 runner，沿用 interrupted，可再 approve 接回；釋放前在 admission 互斥區內確認 runner 沒有已經認領，晚到的 runner 仍由 claimRunnerSlot 擋下。釋放出錯只記 journal，不蓋掉啟動錯誤。既有斷言「主動觸發：啟動失敗不重試且保留鎖與名額」原本用「launcher 失敗、沒有 runner」的情境要求保留名額，與 G3 相反；改成 runner 已認領後 launcher 才回報失敗的情境（這時名額確實可能還在用，仍須保留，既有突變「失敗釋放可能還在用的鎖」照樣由它抓），另加「runner 沒起來就釋放並行名額且不重試」涵蓋原情境。
 
 ### 新增
 

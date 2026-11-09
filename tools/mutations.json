@@ -5505,8 +5505,8 @@
   {
     "name": "kernel F1F3：釋放略過 admission 臨界區",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "await withProcessMutex('admission', () => {",
-    "to": "await ((work: () => void) => work())(() => {",
+    "from": "await retryProcessMutex('admission', async () => {",
+    "to": "await ((work: () => Promise<void>, _deps?: unknown) => work())(async () => {",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "F1 release waits for admission critical section before changing markers"
   },
@@ -5653,5 +5653,45 @@
     "to": "(?:\\r?\\n# todo \\d+)?(?:\\r?\\n# skipped \\d+)?",
     "script": "verify-ai-cli_kernel-evidence.mjs",
     "expect": "F4 TAP optional counters appear once"
+  },
+  {
+    "name": "kernel G1：釋放名額忙碌時丟出而改寫已交付 run",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "from": "    recordSlotReleaseFailed(runId, `${SLOT_RELEASE_DEFERRED_NOTE}（${error.message}）`);\n    return false;",
+    "to": "    throw error;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "G1 busy slot release keeps delivered runs terminal"
+  },
+  {
+    "name": "kernel G1：釋放名額放回 loop 的 try，釋放錯誤被改寫成 kernel_error",
+    "file": "src/ai-cli_kernel/runner-settle.ts",
+    "from": "  try { state = await run(); }",
+    "to": "  try { state = await run(); if (isTerminalState(state)) await release(store.runId); }",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "G1 busy slot release keeps delivered runs terminal"
+  },
+  {
+    "name": "kernel G1：cancel 釋放忙碌時不附說明",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "  await cancelWithoutRunner(store, new FileJobExecutor(), undefined, undefined, deps.release);\n  return cancelStatus(store, view.lastSeq);",
+    "to": "  await cancelWithoutRunner(store, new FileJobExecutor(), undefined, undefined, deps.release);\n  return statusOf(store);",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "G1 cancel stays cancelled when slot release is busy"
+  },
+  {
+    "name": "kernel G3：runner 啟動失敗不釋放名額",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "    await releaseActiveLock(store.runId, { deps: deps.release, keep: async () => await aiCliKernelRunnerAlive(store) !== false })\n      .catch(",
+    "to": "    await Promise.resolve()\n      .catch(",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "G3 failed runner launch releases the slot"
+  },
+  {
+    "name": "kernel G3：啟動失敗時連已認領的 runner 名額也釋放",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "keep: async () => await aiCliKernelRunnerAlive(store) !== false",
+    "to": "keep: async () => false",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "G3 failed runner launch releases the slot"
   }
 ]

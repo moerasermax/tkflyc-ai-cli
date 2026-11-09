@@ -20,7 +20,7 @@ CLI 核准、接回與觸發開工共用跨行程 admission。預設全機三個
 
 `active-runs/<runId>.json` 保存名額，短臨界區使用獨立行程票券協調檢查與寫入。票券採唯一名稱與完整原子發布；choosing 與編號階段分別只發布一次，讀者取同 ID 的編號階段，避免 Windows 多讀者下覆寫票券的 rename 偶發 EPERM。死行程票券可按行程建立時間身分回收，不會刪到後來持有者的同名鎖。內部協調最長等待 15 秒，超時報忙碌；這不是名額不足時的開工佇列。仍然先建立 run，再取得名額；找不到、已結束、尚未核准的遺留名額會回收。核准程序在 runner 啟動前死掉且沒有未結案動作／檢查時，留下的名額也可回收。runner 進場在同一臨界區確認名額後取得原有每 run 鎖；延遲啟動的 launcher 不能在名額已回收後補開工。被 admission 擋下的觸發 run 留下 cancelled 狀態與 skipped 帳本供對帳，不扣 reserved 次數。
 
-新版只要有名額，就維持舊格式 `active.lock`（`{runId, at}`）作為相容標記，runId 指向其中一個佔名額 run。建立使用 wx；改指向以原子替換保持排他檔存在；建立、改指向、刪除均在 admission 跨行程臨界區內。runner 結束、實際 cancel、失效名額回收與核准 start 回呼失敗都協調釋放；標記指向被釋放 run 時，有其他名額則改指向，最後一個名額釋放才刪除。舊版 releaseActiveLock 可能刪掉標記，下一次新版取得（包含被閘門拒絕）或釋放名額時會補回。啟動結果不明仍依既有規則保留名額，由 cancel 或確認無存活動作後回收，避免延遲 runner 超額進場。每個 run 原有 `runner-lock.ts` 保持原樣。
+新版只要有名額，就維持舊格式 `active.lock`（`{runId, at}`）作為相容標記，runId 指向其中一個佔名額 run。建立使用 wx；改指向以原子替換保持排他檔存在；建立、改指向、刪除均在 admission 跨行程臨界區內。runner 結束、實際 cancel、失效名額回收與核准 start 回呼失敗都協調釋放；標記指向被釋放 run 時，有其他名額則改指向，最後一個名額釋放才刪除。舊版 releaseActiveLock 可能刪掉標記，下一次新版取得（包含被閘門拒絕）或釋放名額時會補回。核准取得名額後 runner 啟動失敗（launcher 結束碼非 0 或 20 秒內沒起來）時，先在 admission 臨界區確認沒有 runner 已認領，再釋放名額並丟出原錯誤；run 留在 running、沒有 runner，即 interrupted，可再 approve 接回。晚到的 runner 由 `claimRunnerSlot` 在同一臨界區擋下，所以不會超額進場（G3）。每個 run 原有 `runner-lock.ts` 保持原樣。
 
 標記 runId 已有新版名額檔時只計一次；沒有名額檔才當作真正的舊版佔用。舊版先建立 active.lock 才寫 approved，因此指向 `awaiting_approval` 的舊鎖必須保留並阻擋新版取得名額，錯誤包含 runId 及 `ai-cli kernel cancel <runId>` 提示；請用實際 cancel 釋放，不要手動刪鎖。不存在或已結束的舊 run 可回收。單純建立尚未核准的委任書仍不佔名額。
 
@@ -31,6 +31,8 @@ CLI 核准、接回與觸發開工共用跨行程 admission。預設全機三個
 F2（5579 交付後獨立稽核）將 15 秒協調忙碌逾時改為 `ProcessMutexBusy`，以型別識別，不比對文字。測試鎖等待遇忙碌仍視為等待，每輪檢查取消／fencing，其他錯誤照常上拋。租約輪詢間隔為 1 秒；同 token／同命令身分先用既有 `mayBeAlive`（kill(0)）確認存活，完整身分查詢最多每 30 秒一次。token 或命令身分變更立即完整查詢；死亡下一輪即可回收，PID 重用最晚下一次完整查詢識別。
 
 `command()`、`release()`／停止後清理及 runner 的 `claimRunnerSlot()`，對協調忙碌最多嘗試三次，每次 mutex 協調等待上限 15 秒、重試間隔 1 秒；不重試其他錯誤。command 與 claim 耗盡後上拋，claim 每次仍在 admission 臨界區檢查名額 fence。release 耗盡則寫 `test_lock_release_deferred` journal，避免 finally 的忙碌覆蓋已通過測試；租約的 command 身分屬於已停止的測試命令，其他 run 可確認死亡後回收。所有權已變動的既有檢查保持：延遲 command 不能覆寫後來持有者，release 也不能刪除他人的 token。短臨界區內 bakery ticket 的輕量輪詢維持既有行為，1 秒間隔適用於測試租約等待與協調重試。
+
+名額釋放（G1，c646 交付後獨立稽核）同樣走有限重試：`releaseRunSlot` 經 `retryProcessMutex`，最多三次、間隔 1 秒。仍忙碌時 `releaseActiveLock` 只寫 `slot_release_failed` journal 並回傳 false，不丟出；這個事件不是 state，replay 不讀它，終止狀態維持原樣。runner 收尾在 `runner-settle.ts`：只有 loop 丟出的程式錯誤才寫 `failed／kernel_error`，釋放名額在結果之外，所以已交付的 run 不會因釋放忙碌變成失敗，runner 照常 exit 0。留下的名額檔指向已終止 run，下一次 admission（含同 repo）會回收。cancel 在 run 已寫成 cancelled 後釋放忙碌，仍回 cancelled，detail 附說明。
 
 `status.active` 維持 `string|null`，代表排序最前的佔名額 run。新增 `activeRuns`，每筆含 `runId`、`repo`、`models`（decide、worker、allowedWorkers）與 `acquiredAt`。dashboard 顯示全部佔用者；`actions --json` 保留陣列及原操作欄位，每個操作額外附 `activeRuns`。
 
@@ -47,6 +49,7 @@ F2（5579 交付後獨立稽核）將 15 秒協調忙碌逾時改為 `ProcessMut
 | F1 | 以 journal.acquireActiveLock 模擬舊版；新版標記阻擋舊版、最後釋放後可取得；舊 awaiting_approval 保留與真 cancel；wx 競爭保留舊贏家；三名額去重、釋放改指向、標記補回、釋放等待 admission 臨界區、start 失敗回滾 |
 | F3 | 可控查詢第一次缺失／空 started／reject、第二次成功、第三次命中成功快取；不透過環境變數變更正式行為 |
 | F2 | 注入型別化忙碌／時鐘／身分查詢：等鎖持續及停止、release 不覆蓋通過結果且記 journal、command 與 runner claim 三次上限、不吞其他錯誤、所有權保護；61 秒等待只完整查詢三次、每輪 kill(0)、死亡下一輪回收、token／命令身分換人即查、PID 重用最晚 30 秒查出 |
+| G1、G3 | 注入釋放忙碌（含真 admission 票券＋快轉時鐘）：completed／failed／cancelled 維持原狀態、journal 一筆 `slot_release_failed`、同 repo 下一次 admission 回收殘留名額；loop 程式錯誤才是 kernel_error，非忙碌的釋放錯誤上拋但不改寫狀態；cancel 忙碌仍回 cancelled 並附說明；`deps.launch` 失敗釋放名額、interrupted 可接回、晚到 runner 被擋、已認領 runner 保留名額、釋放忙碌不蓋掉啟動錯誤 |
 
 F1／F3 既有驗證（01816dc，非此次重跑）：`tsc --noEmit` 通過；concurrency source 完整 24 組通過，最後新增的 wx 競態組另以定向選取通過；既有 kernel source 測試為 762 passed、0 failed。`tools/mutations.json` 新增的 11 筆 `kernel F1F3：` 與調整片段後的兩筆既有 D 段突變（舊鎖計數、死亡核准程序回收），均在 repo 外隔離快照編譯成功並由對應 expect 斷言抓到；原始 log 不進 repo。本段未重建工作區 dist、未執行正式 npm test，最終驗收交由 kernel。
 

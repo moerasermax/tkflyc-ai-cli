@@ -125,12 +125,15 @@ export function readActiveRuns(): ActiveRun[] {
   if (legacy) slots.push(legacy);
   return slots.sort((a, b) => a.acquiredAt.localeCompare(b.acquiredAt) || a.runId.localeCompare(b.runId)).map(({ runId, repo, models, acquiredAt }) => ({ runId, repo, models, acquiredAt }));
 }
-export async function releaseRunSlot(runId: string): Promise<void> {
-  await withProcessMutex('admission', () => {
+/** Bounded retries (retryProcessMutex). `keep` runs inside the admission mutex, so a
+ * runner claiming its slot cannot interleave between the check and the removal. */
+export async function releaseRunSlot(runId: string, deps: Partial<MutexRetryDeps> = {}, keep?: () => boolean | Promise<boolean>): Promise<void> {
+  await retryProcessMutex('admission', async () => {
+    if (keep && await keep()) return;
     rmSync(slotPath(runId), { force: true });
     const remaining = storedSlots().filter(slot => { const view = liveState(slot.runId); return view && view.state !== 'awaiting_approval'; });
     reconcileLegacyMarker(remaining, new Set([runId]), false);
-  });
+  }, deps);
 }
 /** A launcher can outlive its approving process. Fence a delayed runner against
  * reclamation before it creates runner.json; keep the per-run lock unchanged. */
