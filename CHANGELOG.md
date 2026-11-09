@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+- 新增正式 Claude Code plugin `ai-cli_kernel_panel` 0.1.0：`/kernel` 開 Terminal 新分頁、`/kernel side` 開 session 側邊面板，未知參數回用法；操作改讀 CLI actions JSON、確認時重查 commit 與操作內容，支援多 run 及完整失敗輸出，並將無 Claude CLI 的核心回歸納入 npm test。（@moerasermax）
+
 - A 段（#17、#18、#19、#20、#21、#22 整合議題）：read／report 注入有獨立上限的 Git stat、完整狀態清單與可解析的測試結尾統計，大 diff 優先測試並逐檔標示省略；Git index basename 引用退路保留邊界／行號檢查；報告要求說明既有斷言改動，驗收後另附 kernel 基準測試清單，避免單憑模型自述。單 worker 模型顯示無第二模型檢查；探針區分格式未支援與 FAIL／UNKNOWN。
 - D 段：政策正典同步 v2.3，Codex 並行門檻由剩餘 50% 改成 20%，加入第 13 條 kernel 名額／額度規則，WORKER_CONTEXT 不變；手冊同步新並行與歸檔摘要契約，補齊 A～C 定向突變及測試覆蓋核對。另修正 TAP 總數與 skipped／cancelled／todo 矛盾時仍冒稱已解析的統計錯誤。（政策為使用者 2026-11-08 決定，無對應 issue）
 - 本次未做 #17 第 2 點（第二模型可執行驗證涉及權限邊界）、#22 Claude 證據格式（須真 CLI 實測）與 #8（不在範圍）。不放寬既有驗收；本步不重建 dist、不同步安裝副本。主 session 合併後須同步政策副本，歸檔採 list 摘要加逐筆 show；重建 dist 須等其他 run 全停，避免 version_drift。

@@ -1,0 +1,9 @@
+{
+  "name": "ai-cli_kernel_panel",
+  "version": "0.1.0",
+  "description": "ai-cli_kernel 控制面板：看 run 狀態，並能核准、取消、合併、推送、回復。每個操作都由人按兩次，模型呼叫不到。",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "YC (moerasermax)"
+  }
+}

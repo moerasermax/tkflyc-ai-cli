@@ -1,5 +1,7 @@
 # ai-cli-mcp
 
+Optional [ai-cli_kernel_panel](plugins/ai-cli_kernel_panel/README.md): `/kernel` opens the dashboard in a new Terminal tab; `/kernel side` opens an embedded session pane with two-step confirmation.
+
 [![CI](https://github.com/moerasermax/tkflyc-ai-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/moerasermax/tkflyc-ai-cli/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/%40tkflyc%2Fai-cli-mcp)](https://www.npmjs.com/package/@tkflyc/ai-cli-mcp)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)

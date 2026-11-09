@@ -1,0 +1,2 @@
+# 此 plugin 保留可攜的 SDK tsconfig 入口；機器產生的 SDK types 仍依 repo 規則忽略。
+!/tsconfig.json
