@@ -28,11 +28,36 @@ CLI 核准、接回與觸發開工共用跨行程 admission。預設全機三個
 
 H1～H3 來自 8a63 交付後的獨立稽核，處理新舊版 MCP server 共存時 active.lock 的空窗。下面的行為以 `admission.ts`／`runner.ts` 的程式與 `verify-ai-cli_kernel-concurrency.mjs` 的模擬測試為準；**真的有新舊版 MCP server 同時在跑的情境沒有實測。**
 
-**H1：新版名額之間改指向，改用原子覆蓋。** 標記原本指向新版名額（target，或正在釋放的 run）、要改指向另一個新版名額時，`replaceMarker` 在同目錄寫暫存檔（wx、fsync）再 rename 蓋過 `active.lock`，寫完重讀確認，不符就進下一輪協調。理由：過去這種情況也走 take＋put，rename 與 wx 之間 `active.lock` 不存在，舊版 launcher 的 wx 剛好在這個窗口成功就會不受任何 admission 限制開跑。覆蓋不會蓋掉舊版的東西：檔案存在時舊版的 wx 贏不了，而舊版釋放只刪指向它自己 run 的標記，所以被蓋掉的一定是新版名額的標記，`active.lock` 全程存在。只有標記指向舊版或不明 run 時才照舊走 take＋put，被取出的活 run 記成 legacy 紀錄，保留 G2c 的保證（不覆寫舊版剛用 wx 取得的鎖）。Windows 上 rename 遇到 EPERM／EBUSY／EACCES（例如防毒或其他程序開著檔案）時重試，最多 20 次、每次間隔約 25 毫秒；仍失敗就丟出 `LegacyMarkerReplaceFailed`（`code` 為 `KERNEL_LEGACY_MARKER_REPLACE_FAILED`），這時 `active.lock` 維持覆蓋前的內容，仍指向新版名額，暫存檔一律清掉。
+**H1：新版名額之間改指向，改用原子覆蓋。** 標記原本指向新版名額（target，或正在釋放的 run）、要改指向另一個新版名額時，`replaceMarker` 在同目錄寫暫存檔（wx、fsync）再 rename 蓋過 `active.lock`，寫完重讀確認，不符就進下一輪協調。理由：過去這種情況也走 take＋put，rename 與 wx 之間 `active.lock` 不存在，舊版 launcher 的 wx 剛好在這個窗口成功就會不受任何 admission 限制開跑。檔案存在時舊版的 wx 贏不了，所以新版覆蓋時 `active.lock` 全程存在，舊版 launcher 不會趁這一步取得。但這**不等於**覆蓋一定不會蓋掉舊版的鎖：舊版釋放是先讀後刪、不經過新版的互斥，它可能在新版寫好暫存檔、rename 之前把標記刪掉，讓另一個舊版 launcher 用 wx 搶到，接著被新版的 rename 蓋掉，見下方「剩餘風險」（I4 更正；8a63 時這裡寫的「覆蓋不會蓋掉舊版的東西，被蓋掉的一定是新版名額的標記」說得太滿）。只有標記指向舊版或不明 run 時才照舊走 take＋put，被取出的活 run 記成 legacy 紀錄，保留 G2c 的保證（不覆寫舊版剛用 wx 取得的鎖）。Windows 上 rename 遇到 EPERM／EBUSY／EACCES（例如防毒或其他程序開著檔案）時重試，最多 20 次、每次間隔約 25 毫秒；仍失敗就丟出 `LegacyMarkerReplaceFailed`（`code` 為 `KERNEL_LEGACY_MARKER_REPLACE_FAILED`），這時 `active.lock` 維持覆蓋前的內容，仍指向新版名額，暫存檔一律清掉。
 
-**H2：runner 定期補回標記。** 舊版釋放是「讀到 runId 等於自己就刪」，先讀後刪不是原子操作：舊版讀完、還沒刪之前，新版剛好把標記改指向新版名額，舊版接著就會把新版的標記刪掉。這是舊版程式本身的問題，新版無法消除，只能縮短沒有標記的時間。新版 runner 開跑後用 `startLegacyMarkerWatch` 每 20 秒呼叫一次 `ensureLegacyMarker`（單飛，上一次沒跑完就跳過；run 結束時停止）。平常只讀 `active.lock` 和名額檔，不進互斥；只有「有新版名額檔，而標記不存在或沒指向新版名額」時才進 admission 互斥，對仍佔名額的新版 run 用既有協調補回。互斥忙碌（`ProcessMutexBusy`）就回 busy、下次再試，不重試；其他錯誤只寫一筆 `legacy_marker_check_failed` journal（不是 state 事件，replay 不讀），不丟出，不影響 run 的狀態。在下一次檢查、admission 或釋放名額補回之前，舊版 launcher 仍可能趁空窗開跑，之後被取出並記成 legacy 紀錄。
+**H2：runner 定期補回標記。** 舊版釋放是「讀到 runId 等於自己就刪」，先讀後刪不是原子操作：舊版讀完、還沒刪之前，新版剛好把標記改指向新版名額，舊版接著就會把新版的標記刪掉。這是舊版程式本身的問題，新版無法消除，只能縮短沒有標記的時間。新版 runner 開跑後用 `startLegacyMarkerWatch` 每 20 秒呼叫一次 `ensureLegacyMarker`（單飛，上一次沒跑完就跳過；run 結束時停止）。平常只讀 `active.lock` 和名額檔，不進互斥；只有「有新版名額檔，而標記不存在、沒指向新版名額，或指向的名額檔屬於已終止的 run（I1 覆蓋失敗留下的）」時才進 admission 互斥，對仍佔名額的新版 run 用既有協調補回。取互斥的等待上限是 `LEGACY_MARKER_CHECK_WAIT_MS`（500 毫秒，I3），取不到就回 busy、下次再試，不重試、不排隊；其他錯誤只寫一筆 `legacy_marker_check_failed` journal（不是 state 事件，replay 不讀），不丟出，不影響 run 的狀態。在下一次檢查、admission 或釋放名額補回之前，舊版 launcher 仍可能趁空窗開跑，之後被取出並記成 legacy 紀錄。
 
 **H3：catch 路徑的取捨。** `admitRun` 被拒絕時，catch 路徑用 `blockAwaiting=false` 再協調一次標記。如果拒絕的原因是標記指向舊版 `awaiting_approval` 的 run，而還有其他新版名額，這一輪會把標記改指向新版名額，並把該舊版 run 記成 legacy 紀錄。這和前面「指向 awaiting_approval 的舊鎖保留、不刪、不放行」的字面不同，刻意保留，理由有兩個：一是 G2 主規則（有新版名額時標記一定指向新版名額）優先，否則舊版 run 結束時會刪掉標記，留下沒人看守的空窗；二是那個舊版 run 仍以 legacy 紀錄計入硬上限與同 repo，所以沒有任何 run 因此被放行。行為沒改，只補了測試與程式註解。
+
+I1～I5 來自 3a1a（H1～H4）交付後的獨立稽核。依據同樣是 `admission.ts`／`journal.ts`／`process-mutex.ts`／`runner-settle.ts` 的程式與 `verify-ai-cli_kernel-concurrency.mjs` 的模擬測試；**真的新舊版 MCP server 同時在跑仍沒有實測。**
+
+**I1：覆蓋失敗之後的恢復，不退回 take＋put。** H1 時釋放是先刪名額檔、再協調標記。如果原子覆蓋重試耗盡，標記還指向 A，A 的名額檔卻已經刪了；之後的協調認不出 A 是新版 run（它既不是 target 也不在 released 裡），只能走 take＋put，又出現 H1 要消除的空窗。現在**已終止（或 run 目錄不存在）的 run 的名額檔，要等標記改指向別處之後才刪**：協調在 `finally` 呼叫 `dropReleasedSlots`，標記仍指向它就留著，`active.lock` 讀不出來時全部留著。名額檔是「標記指向的是新版 run」唯一能持久留下的證據。留著的名額檔不佔名額：admission、`readActiveRuns` 只算 run 還活著、而且已經過核准的名額。下一次協調會把它們當成 released，照樣走原子覆蓋，改指向成功之後才回收。會做這件事的協調有三種：
+- runner 的定期檢查（H2）：標記指向的名額檔屬於已終止的 run 時，也會進互斥處理。
+- 下一次 `releaseRunSlot`：所有已終止 run 留下的名額檔都一起算進 released。
+- 下一次 `admitRun`：回收過期名額時同樣等標記移走才刪。
+
+還活著的 run（例如 G3 核准後 runner 起不來時的釋放）的名額檔照舊先刪。理由是同一個 runId 若被舊版 launcher 接手（舊版遇到同 runId 的標記直接成功），它必須走 G2c 的 take＋put 記成 legacy 紀錄。`awaiting_approval` 與 abandoned 的名額也照舊直接刪。恢復之前標記仍指向已終止的 A，舊版 launcher 會被擋住，方向是少放、不是多放。如果這時已經沒有任何新版 runner 在跑，要等下一次新版 admission 或釋放才回收（依程式推論，沒有對應測試）。
+
+**I2：釋放時覆蓋失敗不讓 runner 以失敗結束。** `releaseActiveLock` 遇到 `LegacyMarkerReplaceFailed` 時，比照 G1 的忙碌處理：寫一筆 `slot_release_failed` journal（detail 以「名額釋放時 active.lock 改指向重試耗盡」開頭，和忙碌的說明不同）並回傳 false，不丟出。原本這個錯誤會從釋放一路丟到 runner 的 `main`，runner 寫 `runner-crash.log` 並以 exit 1 結束。終止狀態有 G1 的收尾保護、沒有被改寫，但已交付的 run 看起來像 runner 出錯。現在 runner 照常 exit 0；cancel 在 run 已寫成 cancelled 後遇到這種失敗，仍回 cancelled，detail 附覆蓋失敗的說明。`retryProcessMutex` 只重試互斥忙碌，覆蓋失敗不會在互斥層再重試（rename 本身已重試 20 次）；其他錯誤照常丟出。之後由 I1 的協調補上。
+
+**I3：定期檢查取互斥的等待有上限。** `ensureLegacyMarker` 呼叫 `withProcessMutex` 時帶 `maxWaitMs = LEGACY_MARKER_CHECK_WAIT_MS`（500 毫秒）；原本沒帶，用的是預設的 15 秒。runner 的檢查是單飛，所以那 15 秒內這個 run 的定期檢查等於停住。上限從呼叫起算，包含第一次批次身分查詢：查詢超過期限就不等它，PID 還在的 ticket 一律當成活著（只會更容易判忙碌，不會放行不該放的）。取不到就丟 `ProcessMutexBusy`、清掉自己的 ticket，檢查回 busy。不在這個截斷裡的有兩項：自己行程的身分查詢（runner 內第一次成功後就快取），以及等待期間才出現的新 ticket 的身分查詢。所以實際放棄的時間可能略超過 500 毫秒。測試在另一個持有者佔著 admission 互斥時，量到檢查在 1 秒內回 busy，而且沒留下 ticket、沒寫 journal。其他呼叫端（admission、釋放、runner claim）仍是 15 秒加 `retryProcessMutex` 的三次重試。
+
+**I5：同 repo 被舊版 run 擋下時附 cancel 提示。** `admitRun` 以 `same_repo` 拒絕時，擋住它的若有舊版 legacy 紀錄，錯誤訊息逐一附上「可用 ai-cli kernel cancel <runId> 釋放」。理由是 legacy 紀錄只會在該 run 終止或被 cancel 後才回收，使用者看到「同 repo 同時最多一個 run」卻不知道要對哪個 run 做什麼。寫法和「舊版正在核准」的拒絕一致。擋住的是新版名額時不附，因為新版 run 結束會自己釋放。
+
+**剩餘風險：舊版先讀後刪的釋放，可能讓新版覆蓋蓋掉另一個舊版剛取得的鎖。** 稽核找到的交錯如下：
+1. 舊版 run O 結束，它的 MCP server 讀到 `active.lock` 指向 O 自己，在刪除前暫停。
+2. 新版之後把標記改指向新版名額 A（H1 覆蓋，或 G2 協調）。
+3. 新版釋放 A，寫好暫存檔，準備 rename 覆蓋成指向 B。
+4. O 恢復，照它先前讀到的結果刪掉 `active.lock`（這時其實指向 A）。
+5. 另一個舊版 launcher P 用 wx 搶到 `active.lock`。
+6. 新版的 rename 蓋掉 P 的標記。
+
+結果 P 照舊版邏輯開跑，卻沒有新版名額，也沒有 legacy 紀錄，不計入硬上限與同 repo 判斷。要發生需要兩個舊版 run 在同一瞬間撞上：一個剛好在讀與刪之間被新版改指向，另一個剛好在刪除與 rename 之間用 wx 取得。新版無法完全消除，因為舊版的釋放是先讀後刪、不經過新版的 admission 互斥，新版在 rename 前無論再讀幾次，都還是有「讀完到 rename」的窗口。改回 take＋put 也不行，會重新打開 H1 要關掉的空窗，而且那個空窗不需要兩個舊版同時撞上。所有舊版 MCP server 都重開、換成新版之後，就沒有先讀後刪的釋放者，這個風險隨之消失。在那之前，避免在新舊版並存期間同時從多個舊 session 核准 run。這條是依程式與稽核描述推論，沒有測試重現，也沒有實測。
 
 更新 dist 後，既有 session 的 MCP server 在重啟前仍跑舊程式，不能假設更新檔案就已切換。新版以 active.lock 讓舊程式的 wx 取得直接拒絕，避免舊程式看不到新版名額而另開 run；重啟舊 session 的 MCP server 後才會改用新版並行。不要手動移除相容標記。程序身分只快取有 started 的成功查詢；失敗／空 started 當次沿用原本回退方式，下次重查，避免暫時失敗永久污染身分快取。
 
@@ -65,6 +90,13 @@ F2（5579 交付後獨立稽核）將 15 秒協調忙碌逾時改為 `ProcessMut
 | H1 | 新版名額之間改指向時，`active.lock` 全程存在；注入 rename EPERM 時有限重試，持續失敗則丟出 `LegacyMarkerReplaceFailed`，標記維持原指向 |
 | H2 | 標記被刪後 `ensureLegacyMarker` 補回並指向新版名額；互斥忙碌回 busy、其他錯誤回 failed 並記 journal，不丟出；標記健康時不進 admission 互斥；`startLegacyMarkerWatch` 會重複檢查直到停止 |
 | H3 | 核准被舊版 awaiting_approval 標記拒絕（附 cancel 提示）後，標記改指向既有新版名額、該舊版 run 記成 legacy 紀錄；它仍列在 activeRuns、擋住同 repo 的核准；實際 cancel 並釋放最後一個新版名額後，紀錄與標記都回收 |
+| I1 | 注入 rename EPERM 讓釋放的覆蓋失敗：沒有 wx 空窗、標記仍指向 A、A 的名額檔留著但不列在 activeRuns；之後分別由定期檢查（回 repaired）與下一次 admission 恢復，恢復期間舊版 launcher 的 wx 一次都沒成功、至少一次原子覆蓋，標記改指向活著的新版名額後 A 的名額檔被回收；admission 回收時覆蓋失敗也保留名額檔，交給下一次協調 |
+| I2 | 覆蓋失敗時 `settleRunnerRun` 仍回 completed、不寫 failed／kernel_error、journal 一筆 `slot_release_failed`；`releaseActiveLock` 回 false；cancel 回 cancelled 且 detail 附覆蓋失敗說明；其他錯誤照常丟出 |
+| I3 | 另一個真的持有者佔著 admission 互斥時，`ensureLegacyMarker` 在 1 秒內回 busy，不留 ticket、不寫 journal、run 仍是 running；持有者放開後下一次檢查回 repaired |
+| I5 | 被 legacy 紀錄擋下的 same_repo 錯誤含該 runId 的 cancel 提示；被新版名額擋下時不含 cancel；H3 的情境同樣帶提示 |
+| 剩餘風險 | 舊版先讀後刪與新版覆蓋交錯、兩個舊版同時撞上的情境**沒有測試**，只是依程式推論 |
+
+I1～I5 另在 `tools/mutations.json` 新增 8 筆 `kernel I1`～`kernel I5` 突變，並調整幾筆既有突變的片段以對應新寫法；這些突變是否實跑過，以該步交付報告為準，本文件這一步沒有跑。
 
 F1／F3 既有驗證（01816dc，非此次重跑）：`tsc --noEmit` 通過；concurrency source 完整 24 組通過，最後新增的 wx 競態組另以定向選取通過；既有 kernel source 測試為 762 passed、0 failed。`tools/mutations.json` 新增的 11 筆 `kernel F1F3：` 與調整片段後的兩筆既有 D 段突變（舊鎖計數、死亡核准程序回收），均在 repo 外隔離快照編譯成功並由對應 expect 斷言抓到；原始 log 不進 repo。本段未重建工作區 dist、未執行正式 npm test，最終驗收交由 kernel。
 
