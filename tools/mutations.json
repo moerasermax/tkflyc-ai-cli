@@ -5329,16 +5329,16 @@
   {
     "name": "kernel D：舊 active.lock 不計入名額",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "    if (legacy && !active.some(slot => slot.runId === legacy.runId)) active.push(legacy);",
-    "to": "    if ((false as boolean) && legacy && !active.some(slot => slot.runId === legacy.runId)) active.push(legacy);",
+    "from": "    if (legacy) active.push(legacy);",
+    "to": "    if (legacy && (false as boolean)) active.push(legacy);",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "legacy active.lock counts once and stale/missing/terminal reservations recycle"
   },
   {
     "name": "kernel D：死亡核准程序名額不回收",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "      if (!view || view.state === 'awaiting_approval' || abandoned) { releaseRunSlot(slot.runId); continue; }",
-    "to": "      if (!view || view.state === 'awaiting_approval') { releaseRunSlot(slot.runId); continue; }",
+    "from": "      if (!view || view.state === 'awaiting_approval' || abandoned) { rmSync(slotPath(slot.runId), { force: true }); reclaimed.add(slot.runId); continue; }",
+    "to": "      if (!view || view.state === 'awaiting_approval') { rmSync(slotPath(slot.runId), { force: true }); reclaimed.add(slot.runId); continue; }",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "real dead admission owner and dead mutex ticket are reclaimed"
   },
@@ -5437,5 +5437,93 @@
     "to": "    env: process.env,",
     "script": "verify-run-tests.mjs",
     "expect": "正式 runner 清除所有定向篩選，仍完整驗收"
+  },
+  {
+    "name": "kernel F1F3：新版不建立相容標記",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "const priorMarker = reconcileLegacyMarker([...active, candidate], reclaimed);",
+    "to": "const priorMarker = readLegacyLock();",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F1 new reservations exclude legacy launchers until final release"
+  },
+  {
+    "name": "kernel F1F3：忽略舊版尚未核准鎖",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "if (legacy && liveState(legacy.runId)?.state === 'awaiting_approval')",
+    "to": "if ((false as boolean) && legacy && liveState(legacy.runId)?.state === 'awaiting_approval')",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F1 awaiting legacy reservation blocks admission and real cancel releases it"
+  },
+  {
+    "name": "kernel F1F3：相容標記重複計數",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "if (!legacy || slots.some(slot => slot.runId === legacy.runId)) return null;",
+    "to": "if (!legacy) return null;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F1 marker deduplication permits three slots and release repoints it"
+  },
+  {
+    "name": "kernel F1F3：釋放後不修復相容標記",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "reconcileLegacyMarker(remaining, new Set([runId]), false);",
+    "to": "void remaining;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F1 marker deduplication permits three slots and release repoints it"
+  },
+  {
+    "name": "kernel F1F3：釋放保留舊指向",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "if (legacy && !released.has(legacy.runId) &&",
+    "to": "if (legacy &&",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F1 marker deduplication permits three slots and release repoints it"
+  },
+  {
+    "name": "kernel F1F3：start 失敗不回收名額",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "if (!own) { rmSync(slotPath(store.runId), { force: true }); reclaimed.add(store.runId); }",
+    "to": "if (!own) { reclaimed.add(store.runId); }",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F1 failed starts restore remaining marker and release the last reservation"
+  },
+  {
+    "name": "kernel F1F3：失敗身分永久快取",
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "from": "if (identity.started) self = identity;",
+    "to": "self = identity;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F3 failed identity lookup retries then caches only a successful identity"
+  },
+  {
+    "name": "kernel F1F3：成功身分不快取",
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "from": "if (identity.started) self = identity;",
+    "to": "if (false) self = identity;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F3 failed identity lookup retries then caches only a successful identity"
+  },
+  {
+    "name": "kernel F1F3：釋放略過 admission 臨界區",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "await withProcessMutex('admission', () => {",
+    "to": "await ((work: () => void) => work())(() => {",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F1 release waits for admission critical section before changing markers"
+  },
+  {
+    "name": "kernel F1F3：wx 競爭後忽略舊版持有者",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "} catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }",
+    "to": "} catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; return null; }",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F1 legacy wx winner is preserved when new marker creation races"
+  },
+  {
+    "name": "kernel F1F3：多名額時漏補遺失標記",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "const target = slots[0];",
+    "to": "const target = slots.length === 1 ? slots[0] : undefined;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F1 acquisition rejection and release repair a deleted legacy marker"
   }
 ]

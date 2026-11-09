@@ -494,20 +494,20 @@ export async function cancelWithoutRunner(store: RunStore, executor: KernelExecu
     }
   }
   store.append({ type: 'state', state: 'cancelled', reason: 'user_cancelled' });
-  releaseActiveLock(store.runId);
+  await releaseActiveLock(store.runId);
 }
 
 export async function aiCliKernelCancel(input: { runId: string; timeoutSec?: number }): Promise<KernelRunStatus> {
   const store = storeFor(input.runId);
   const view = replayJournal(store.read());
-  if (isTerminalState(view.state)) { releaseActiveLock(input.runId); return statusOf(store); }
+  if (isTerminalState(view.state)) { await releaseActiveLock(input.runId); return statusOf(store); }
   store.requestCancel();
   if (view.state === 'running' && await aiCliKernelRunnerAlive(store) !== false) {
     // runner 活著就交給它：只有一個程序寫日誌，比較不會打架。
     const deadline = Date.now() + (input.timeoutSec ?? 45) * 1000;
     while (Date.now() < deadline) {
       const now = replayJournal(store.read());
-      if (now.state !== 'running') { if (isTerminalState(now.state)) releaseActiveLock(input.runId); return statusOf(store); }
+      if (now.state !== 'running') { if (isTerminalState(now.state)) await releaseActiveLock(input.runId); return statusOf(store); }
       await new Promise(resolve => setTimeout(resolve, 500));
     }
     return statusOf(store);

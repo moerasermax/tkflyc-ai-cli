@@ -32,14 +32,14 @@ async function main(): Promise<void> {
       versionId: kernelVersionId, snapshot: gitSnapshot, now: () => Date.now(),
       sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), pollMs: 2000, killConfirmMs: 20000, pid: process.pid, workspace: realWorkspace,
     });
-    if (isTerminalState(state)) releaseActiveLock(store.runId);
+    if (isTerminalState(state)) await releaseActiveLock(store.runId);
   } catch (error) {
     // 程式錯誤時留下狀態，不要讓 run 看起來還在跑。run 結束後就沒人管了，還在跑的 worker 要先試著停掉。
     for (const action of openActions(replayJournal(store.read()))) {
       if (action.job) await executor.kill(action.job).catch(() => false);
     }
     store.append({ type: 'state', state: 'failed', reason: 'kernel_error', detail: (error as Error).stack ?? String(error) });
-    releaseActiveLock(store.runId);
+    await releaseActiveLock(store.runId);
   } finally {
     releaseRunnerLock(store, self);
   }

@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url))), source = process.argv.includes('--source');
 const load = name => import(pathToFileURL(join(ROOT, source ? 'src' : 'dist', 'ai-cli_kernel', `${name}.${source ? 'ts' : 'js'}`)).href);
-const { RunStore, kernelRunDir, kernelStateDir, newRunId, releaseActiveLock } = await load('journal');
+const { RunStore, kernelRunDir, kernelStateDir, newRunId, acquireActiveLock, releaseActiveLock } = await load('journal');
 const { admitRun, readActiveRuns, validateConcurrencyConfig, normalizedOrigin, claimRunnerSlot } = await load('admission');
 const { buildContract } = await load('templates');
 const { remainingPercentFromUsage } = await load('runtime');
@@ -41,9 +41,9 @@ function running(store) {
 }
 const quota = async () => 80;
 async function admit(store, extra = {}) { await admitRun(store, () => running(store), { quota, ...extra }); }
-function finish(store) { store.append({ type: 'state', state: 'cancelled' }); releaseActiveLock(store.runId); }
-function clear() {
-  for (const run of readActiveRuns()) finish(new RunStore(kernelRunDir(run.runId)));
+async function finish(store) { store.append({ type: 'state', state: 'cancelled' }); await releaseActiveLock(store.runId); }
+async function clear() {
+  for (const run of readActiveRuns()) await finish(new RunStore(kernelRunDir(run.runId)));
   rmSync(join(kernelStateDir(), 'active.lock'), { force: true });
   rmSync(join(kernelStateDir(), 'concurrency.json'), { force: true });
 }
@@ -92,6 +92,145 @@ async function race(stores, expected, extra = {}) {
 }
 
 try {
+  await test('F1 new reservations exclude legacy launchers until final release', async () => {
+    const a = fresh(), old = fresh(), marker = join(kernelStateDir(), 'active.lock');
+    await admitRun(a, () => {
+      const value = JSON.parse(readFileSync(marker, 'utf8'));
+      assert.deepEqual(Object.keys(value).sort(), ['at', 'runId']);
+      assert.equal(value.runId, a.runId);
+      assert.ok(Number.isFinite(Date.parse(value.at)));
+      assert.deepEqual(acquireActiveLock(old.runId), { ok: false, heldBy: a.runId });
+      running(a);
+    }, { quota });
+    assert.equal(acquireActiveLock(old.runId).ok, false);
+    await finish(a);
+    assert.equal(existsSync(marker), false);
+    assert.equal(acquireActiveLock(old.runId).ok, true);
+    await finish(old);
+  });
+  await test('F1 awaiting legacy reservation blocks admission and real cancel releases it', async () => {
+    const old = fresh(), next = fresh(), marker = join(kernelStateDir(), 'active.lock');
+    assert.equal(acquireActiveLock(old.runId).ok, true);
+    const before = readFileSync(marker, 'utf8');
+    for (const store of [next, old]) {
+      await assert.rejects(admit(store), e => e.heldBy.includes(old.runId) && e.message.includes('cancel'));
+      assert.equal(readFileSync(marker, 'utf8'), before);
+      assert.equal(replayJournal(store.read()).state, 'awaiting_approval');
+      assert.equal(existsSync(join(kernelStateDir(), 'active-runs', `${store.runId}.json`)), false);
+    }
+    assert.equal((await api.aiCliKernelCancel({ runId: old.runId })).state, 'cancelled');
+    assert.equal(existsSync(marker), false);
+    await admit(next); await finish(next);
+  });
+  await test('F1 legacy wx winner is preserved when new marker creation races', async () => {
+    const { default: fs } = await import('node:fs');
+    const { syncBuiltinESMExports } = await import('node:module');
+    const old = fresh(), next = fresh(), marker = join(kernelStateDir(), 'active.lock');
+    const original = fs.openSync;
+    let raced = false;
+    fs.openSync = (path, flags, mode) => {
+      if (!raced && path === marker && flags === 'wx') {
+        raced = true;
+        assert.equal(acquireActiveLock(old.runId).ok, true);
+      }
+      return original(path, flags, mode);
+    };
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(admit(next), e => e.heldBy?.includes(old.runId) && e.message.includes('cancel'));
+      assert.equal(raced, true);
+      assert.equal(JSON.parse(readFileSync(marker, 'utf8')).runId, old.runId);
+      assert.equal(existsSync(join(kernelStateDir(), 'active-runs', `${next.runId}.json`)), false);
+    } finally { fs.openSync = original; syncBuiltinESMExports(); }
+    await api.aiCliKernelCancel({ runId: old.runId });
+    await admit(next); await finish(next);
+  });
+  await test('F1 marker deduplication permits three slots and release repoints it', async () => {
+    const stores = [fresh(), fresh(), fresh()], old = fresh();
+    const marker = join(kernelStateDir(), 'active.lock');
+    for (const store of stores) await admit(store);
+    assert.equal(readActiveRuns().length, 3, 'a same-run marker must not consume a fourth place');
+    await assert.rejects(admit(fresh()), e => e.reason === 'slots_full');
+    const remaining = [...stores];
+    while (remaining.length) {
+      const marked = JSON.parse(readFileSync(marker, 'utf8')).runId;
+      const index = remaining.findIndex(store => store.runId === marked);
+      assert.ok(index >= 0, 'marker must point to an occupied reservation');
+      await finish(remaining.splice(index, 1)[0]);
+      if (remaining.length) {
+        const repointed = JSON.parse(readFileSync(marker, 'utf8')).runId;
+        assert.notEqual(repointed, marked);
+        assert.ok(remaining.some(store => store.runId === repointed));
+        assert.equal(acquireActiveLock(old.runId).ok, false);
+      }
+    }
+    assert.equal(existsSync(marker), false);
+  });
+  await test('F1 acquisition rejection and release repair a deleted legacy marker', async () => {
+    const a = fresh(), b = fresh(), marker = join(kernelStateDir(), 'active.lock');
+    await admit(a);
+    rmSync(marker); // Old releaseActiveLock can remove a compatibility marker.
+    await assert.rejects(admit(fresh(a.readContract().workFolder)), e => e.reason === 'same_repo');
+    assert.equal(JSON.parse(readFileSync(marker, 'utf8')).runId, a.runId);
+    rmSync(marker);
+    await admit(b);
+    assert.equal(JSON.parse(readFileSync(marker, 'utf8')).runId, a.runId);
+    rmSync(marker);
+    await finish(b);
+    assert.equal(JSON.parse(readFileSync(marker, 'utf8')).runId, a.runId);
+    await finish(a);
+  });
+  await test('F1 release waits for admission critical section before changing markers', async () => {
+    const { withProcessMutex } = await load('process-mutex');
+    const a = fresh(), b = fresh(), marker = join(kernelStateDir(), 'active.lock');
+    await admit(a); await admit(b);
+    let released = false, release;
+    await withProcessMutex('admission', async () => {
+      release = releaseActiveLock(a.runId).then(() => { released = true; });
+      const deadline = Date.now() + 10000;
+      while (!released && readdirSync(join(kernelStateDir(), 'admission.tickets')).filter(f => f.endsWith('.json')).length < 3) {
+        assert.ok(Date.now() < deadline, 'release must publish its admission ticket');
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.equal(released, false, 'release must wait for the current admission holder');
+      assert.ok(existsSync(join(kernelStateDir(), 'active-runs', `${a.runId}.json`)));
+      assert.equal(JSON.parse(readFileSync(marker, 'utf8')).runId, a.runId);
+    });
+    await release;
+    assert.equal(JSON.parse(readFileSync(marker, 'utf8')).runId, b.runId);
+    await finish(a); await finish(b);
+  });
+  await test('F1 failed starts restore remaining marker and release the last reservation', async () => {
+    const marker = join(kernelStateDir(), 'active.lock');
+    for (const occupied of [false, true]) {
+      const holder = occupied ? fresh() : null;
+      if (holder) await admit(holder);
+      const failed = fresh();
+      await assert.rejects(admitRun(failed, () => { throw new Error('start fixture failure'); }, { quota }), /start fixture failure/);
+      assert.equal(existsSync(join(kernelStateDir(), 'active-runs', `${failed.runId}.json`)), false);
+      if (holder) { assert.equal(JSON.parse(readFileSync(marker, 'utf8')).runId, holder.runId); await finish(holder); }
+      assert.equal(existsSync(marker), false);
+    }
+  });
+  await test('F3 failed identity lookup retries then caches only a successful identity', async () => {
+    const { createProcessIdentityReader } = await load('process-mutex');
+    for (const failure of ['missing', 'empty', 'reject']) {
+      let calls = 0;
+      const success = { pid: process.pid, started: 'controlled-start', name: 'node' };
+      const read = createProcessIdentityReader(async pids => {
+        assert.deepEqual(pids, [process.pid]);
+        calls++;
+        if (calls > 1) return new Map([[process.pid, success]]);
+        if (failure === 'reject') throw new Error('identity lookup failed');
+        return failure === 'missing' ? new Map() : new Map([[process.pid, { ...success, started: '' }]]);
+      });
+      if (failure === 'reject') await assert.rejects(read(), /identity lookup failed/);
+      else assert.equal((await read()).started, '');
+      assert.deepEqual(await read(), success);
+      assert.deepEqual(await read(), success);
+      assert.equal(calls, 2);
+    }
+  });
   await test('six real processes contend for three different-repo slots', async () => {
     await race(Array.from({ length: 6 }, () => fresh(repo())), 3);
   });
@@ -114,7 +253,7 @@ try {
     const dir = repo(); git(dir, '-c', 'user.name=test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture');
     const linked = join(work, 'linked'); git(dir, 'worktree', 'add', '--detach', linked, 'HEAD');
     const a = fresh(dir); await admit(a);
-    await assert.rejects(admit(fresh(linked)), e => e.reason === 'same_repo'); finish(a);
+    await assert.rejects(admit(fresh(linked)), e => e.reason === 'same_repo'); await finish(a);
     const other = repo();
     git(dir, 'config', 'remote.origin.url', 'https://dummy:dummy-secret@EXAMPLE.invalid/org/project.git/');
     git(other, 'config', 'remote.origin.url', 'git@example.invalid:org/project');
@@ -122,7 +261,7 @@ try {
     await assert.rejects(admit(fresh(other)), e => e.reason === 'same_repo' && !e.message.includes('dummy-secret'));
     assert.ok(!readFileSync(join(kernelStateDir(), 'active-runs', `${b.runId}.json`), 'utf8').includes('dummy-secret'));
     assert.equal(normalizedOrigin('ssh://git@example.invalid/org/project.git', dir), normalizedOrigin('https://user:secret@example.invalid/org/project/', dir));
-    finish(b);
+    await finish(b);
   });
   await test('legacy active.lock counts once and stale/missing/terminal reservations recycle', async () => {
     const a = fresh(); running(a);
@@ -130,30 +269,30 @@ try {
     writeFileSync(legacy, JSON.stringify({ runId: a.runId, at: new Date().toISOString() }));
     const b = fresh(), c = fresh(); await admit(b); await admit(c);
     await assert.rejects(admit(fresh()), e => e.reason === 'slots_full' && e.heldBy.includes(a.runId));
-    finish(b); finish(c);
+    await finish(b); await finish(c);
     // Continue a paused legacy run, publishing a new slot without double counting the old lock.
     a.append({ type: 'state', state: 'waiting_human' }); await admit(a);
-    assert.equal(readActiveRuns().filter(r => r.runId === a.runId).length, 1); finish(a);
+    assert.equal(readActiveRuns().filter(r => r.runId === a.runId).length, 1); await finish(a);
     for (const kind of ['missing', 'terminal', 'awaiting']) {
       const stale = fresh(); await admit(stale);
       if (kind === 'missing') rmSync(stale.dir, { recursive: true, force: true });
       if (kind === 'terminal') stale.append({ type: 'state', state: 'completed' });
       if (kind === 'awaiting') stale.append({ type: 'state', state: 'awaiting_approval' });
       const next = fresh(); await admit(next);
-      assert.ok(!existsSync(join(kernelStateDir(), 'active-runs', `${stale.runId}.json`))); finish(next);
+      assert.ok(!existsSync(join(kernelStateDir(), 'active-runs', `${stale.runId}.json`))); await finish(next);
     }
     writeFileSync(legacy, JSON.stringify({ runId: newRunId() }));
-    const next = fresh(); await admit(next); assert.ok(!existsSync(legacy)); finish(next);
+    const next = fresh(); await admit(next); assert.equal(JSON.parse(readFileSync(legacy, 'utf8')).runId, next.runId); await finish(next);
   });
   await test('real dead admission owner and dead mutex ticket are reclaimed', async () => {
     const store = fresh(), c = child('admit', store, { crash: true });
     await c.wait('ready'); c.go(); assert.ok((await c.wait('result')).ok); c.stop(); await c.exited;
-    const next = fresh(); await admit(next); assert.equal(readActiveRuns().length, 1); finish(next);
+    const next = fresh(); await admit(next); assert.equal(readActiveRuns().length, 1); await finish(next);
     let entered = false;
     assert.equal(await claimRunnerSlot(store, async () => { entered = true; return true; }), false);
     assert.equal(entered, false, 'a delayed runner cannot enter after its dead admission was reclaimed');
     const holder = child('mutex-crash', fresh()); await holder.wait('ready'); holder.go(); await holder.wait('locked'); holder.stop(); await holder.exited;
-    const last = fresh(); await admit(last); finish(last);
+    const last = fresh(); await admit(last); await finish(last);
     assert.equal(readdirSync(join(kernelStateDir(), 'admission.tickets')).filter(f => f.endsWith('.json')).length, 0);
   });
   await test('quota parser uses explicit used/remaining basis and rejects invalid data', async () => {
@@ -178,9 +317,9 @@ try {
     for (const value of [10, 9.999, null, undefined, NaN, Infinity, -1, 101, 'failure']) {
       const a = fresh(), b = fresh(); await admit(a);
       const deps = { quota: async agent => { if (agent !== 'claude') return 80; if (value === 'failure') throw new Error('query failed'); return value; } };
-      if (value === 10) { await admit(b, deps); finish(b); }
+      if (value === 10) { await admit(b, deps); await finish(b); }
       else await assert.rejects(admit(b, deps), e => e.reason === 'claude_quota');
-      finish(a);
+      await finish(a);
     }
   });
   await test('Codex threshold is strictly below 20 and includes decide/worker/allowed models', async () => {
@@ -189,9 +328,9 @@ try {
     for (const value of [20, 19.999, null, NaN, -1, 101, 'failure']) for (const position of ['decide', 'worker', 'allowed']) {
       const a = fresh(undefined, models('decide')), b = fresh(undefined, models(position)); await admit(a, { agentFor });
       const deps = { agentFor, quota: async agent => { if (agent !== 'codex') return 80; if (value === 'failure') throw new Error('query failed'); return value; } };
-      if (value === 20) { await admit(b, deps); finish(b); }
+      if (value === 20) { await admit(b, deps); await finish(b); }
       else await assert.rejects(admit(b, deps), e => e.reason === 'codex_quota');
-      const claude = fresh(undefined, models('none')); await admit(claude, deps); finish(claude); finish(a);
+      const claude = fresh(undefined, models('none')); await admit(claude, deps); await finish(claude); await finish(a);
     }
   });
   await test('human configuration enforces 1..3 at every admission; MCP exposes no override', async () => {
@@ -200,9 +339,9 @@ try {
     const config = join(kernelStateDir(), 'concurrency.json');
     writeFileSync(config, JSON.stringify({ maxRuns: 4 })); await assert.rejects(admit(fresh()), /1～3/);
     writeFileSync(config, JSON.stringify({ maxRuns: 1 }));
-    const a = fresh(); await admit(a); await assert.rejects(admit(fresh()), e => e.reason === 'slots_full'); finish(a);
+    const a = fresh(); await admit(a); await assert.rejects(admit(fresh()), e => e.reason === 'slots_full'); await finish(a);
     writeFileSync(config, JSON.stringify({ maxRuns: 3, codexMinRemainingPercent: 30 }));
-    const b = fresh(); await admit(b); await assert.rejects(admit(fresh(), { quota: async agent => agent === 'codex' ? 29 : 80 }), e => e.reason === 'codex_quota'); finish(b);
+    const b = fresh(); await admit(b); await assert.rejects(admit(fresh(), { quota: async agent => agent === 'codex' ? 29 : 80 }), e => e.reason === 'codex_quota'); await finish(b);
     rmSync(config);
     const { aiCliKernelToolDefinitions } = await load('mcp-tools');
     const previous = process.env.AI_CLI_KERNEL;
@@ -222,7 +361,7 @@ try {
     assert.equal(readActiveRuns().length, 3);
     const pending = fresh(); assert.ok(!readActiveRuns().some(run => run.runId === pending.runId));
     await assert.rejects(admit(pending), e => e.reason === 'slots_full');
-    for (const store of stores) finish(store);
+    for (const store of stores) await finish(store);
     rmSync(join(kernelStateDir(), 'concurrency.json'));
   });
   await test('quota-blocked triggers skip immediately and record holder without launching', async () => {
@@ -242,7 +381,7 @@ try {
       assert.equal(ledger.at(-1).status, 'skipped');
       assert.ok(!ledger.some(row => row.runId === result.runId && row.event === 'reserved'));
     }
-    finish(holder); api.aiCliKernelTriggersSetEnabled(false);
+    await finish(holder); api.aiCliKernelTriggersSetEnabled(false);
   });
   await test('status.active remains string|null; actions array and dashboard show all active runs', async () => {
     const stores = [fresh(), fresh(), fresh()]; for (const store of stores) await admit(store);
@@ -352,7 +491,7 @@ try {
     const elapsed = activeMinutes(replayJournal(events), Date.parse(terminalEvent.at)) * 60000;
     assert.ok(Math.abs(elapsed - expectedMs) < 1, `active budget ${elapsed}ms must exclude the recorded lock wait; expected ${expectedMs}ms`);
   });
-  clear();
+  await clear();
   assert.ok(count > 0, 'refuse an empty test selection');
   console.log(`PASS C ${count} groups (real cross-process admission and command overlap checks)`);
 } catch (error) {

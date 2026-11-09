@@ -10,10 +10,17 @@ import { lookupIdentities, type ProcessIdentity } from '../core/live-jobs.js';
 import { atomicWrite, kernelStateDir } from './journal.js';
 
 interface Ticket { owner: ProcessIdentity; number: number; id: string }
-let self: Promise<ProcessIdentity> | undefined;
-export function processIdentity(): Promise<ProcessIdentity> {
-  return self ??= lookupIdentities([process.pid]).then(map => map.get(process.pid) ?? { pid: process.pid, started: '', name: 'node' });
+/** Internal factory permits deterministic identity lookup tests without changing process-wide behavior. */
+export function createProcessIdentityReader(lookup: typeof lookupIdentities): () => Promise<ProcessIdentity> {
+  let self: ProcessIdentity | undefined;
+  return async () => {
+    if (self) return self;
+    const identity = (await lookup([process.pid])).get(process.pid) ?? { pid: process.pid, started: '', name: 'node' };
+    if (identity.started) self = identity;
+    return identity;
+  };
 }
+export const processIdentity = createProcessIdentityReader(lookupIdentities);
 export async function identityAlive(owner: ProcessIdentity): Promise<boolean> {
   if (!mayBeAlive(owner.pid)) return false;
   if (owner.pid === process.pid) return !owner.started || sameIdentity(owner, await processIdentity());

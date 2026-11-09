@@ -180,8 +180,6 @@ export function acquireActiveLock(runId: string): { ok: true } | { ok: false; he
   }
 }
 
-export function releaseActiveLock(runId: string): void {
-  releaseRunSlot(runId);
-  try { if (JSON.parse(readFileSync(activeLockPath(), 'utf8')).runId === runId) rmSync(activeLockPath(), { force: true }); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+export function releaseActiveLock(runId: string): Promise<void> {
+  return releaseRunSlot(runId);
 }

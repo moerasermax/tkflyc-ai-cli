@@ -1,6 +1,6 @@
 /** Machine-wide admission. Configuration is local, human-owned, never a mandate/MCP input. */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, writeSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { atomicWrite, digestText, kernelRunDir, kernelStateDir, RunStore } from './journal.js';
@@ -84,25 +84,54 @@ function storedSlots(): Slot[] {
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
   });
 }
-function legacySlot(): Slot | null {
-  let legacy: { runId: string; at?: string };
-  try { legacy = JSON.parse(readFileSync(join(kernelStateDir(), 'active.lock'), 'utf8')); }
+const legacyPath = () => join(kernelStateDir(), 'active.lock');
+function readLegacyLock(): { runId: string; at?: string } | null {
+  try { return JSON.parse(readFileSync(legacyPath(), 'utf8')); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+}
+function legacySlot(slots: Slot[]): Slot | null {
+  const legacy = readLegacyLock();
+  if (!legacy || slots.some(slot => slot.runId === legacy.runId)) return null;
   const view = liveState(legacy.runId);
-  if (!view || view.state === 'awaiting_approval') return null;
+  if (!view) return null;
   const contract = new RunStore(kernelRunDir(legacy.runId)).readContract();
   const keys = repoKeys(contract);
   return { runId: legacy.runId, keys, repo: keys.repo, models: models(contract), codex: usesCodex(contract), acquiredAt: legacy.at ?? '', owner: { pid: 0, started: '', name: 'legacy' } };
 }
+/** Only called inside the admission mutex. Keep wx exclusion while repointing;
+ * if an old launcher wins wx, preserve its reservation instead of overwriting it. */
+function reconcileLegacyMarker(slots: Slot[], released = new Set<string>(), reclaimStale = true): ReturnType<typeof readLegacyLock> {
+  for (;;) {
+    const legacy = readLegacyLock();
+    if (legacy && !released.has(legacy.runId) &&
+      (slots.some(slot => slot.runId === legacy.runId) || !reclaimStale || liveState(legacy.runId))) return legacy;
+    const target = slots[0];
+    if (!target) { if (legacy) rmSync(legacyPath(), { force: true }); return null; }
+    const marker = JSON.stringify({ runId: target.runId, at: target.acquiredAt });
+    if (legacy) { atomicWrite(legacyPath(), marker); return null; }
+    try {
+      const fd = openSync(legacyPath(), 'wx', 0o600);
+      try { writeSync(fd, marker); fsyncSync(fd); } finally { closeSync(fd); }
+      return null;
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  }
+}
 /** Legacy readActiveRun also exposes the short, not-yet-approved reservation window. */
 export function readReservedRun(): string | null { return storedSlots()[0]?.runId ?? null; }
 export function readActiveRuns(): ActiveRun[] {
-  const slots = storedSlots().filter(slot => { const view = liveState(slot.runId); return view && view.state !== 'awaiting_approval'; });
-  const legacy = legacySlot();
-  if (legacy && !slots.some(slot => slot.runId === legacy.runId)) slots.push(legacy);
+  const all = storedSlots();
+  const slots = all.filter(slot => { const view = liveState(slot.runId); return view && view.state !== 'awaiting_approval'; });
+  const legacy = legacySlot(all);
+  if (legacy) slots.push(legacy);
   return slots.sort((a, b) => a.acquiredAt.localeCompare(b.acquiredAt) || a.runId.localeCompare(b.runId)).map(({ runId, repo, models, acquiredAt }) => ({ runId, repo, models, acquiredAt }));
 }
-export function releaseRunSlot(runId: string): void { rmSync(slotPath(runId), { force: true }); }
+export async function releaseRunSlot(runId: string): Promise<void> {
+  await withProcessMutex('admission', () => {
+    rmSync(slotPath(runId), { force: true });
+    const remaining = storedSlots().filter(slot => { const view = liveState(slot.runId); return view && view.state !== 'awaiting_approval'; });
+    reconcileLegacyMarker(remaining, new Set([runId]), false);
+  });
+}
 /** A launcher can outlive its approving process. Fence a delayed runner against
  * reclamation before it creates runner.json; keep the per-run lock unchanged. */
 export async function claimRunnerSlot(store: RunStore, claim: () => Promise<boolean>): Promise<boolean> {
@@ -130,34 +159,44 @@ export async function admitRun(store: RunStore, start: () => void, deps: Admissi
     const contract = store.readContract(), keys = repoKeys(contract);
     const all = storedSlots();
     const active: Slot[] = [];
+    const reclaimed = new Set<string>();
     for (const slot of all) {
       const view = liveState(slot.runId);
       // Paused/interrupted runs keep their place. Reclaim a dead admission process's
       // pre-run crash window only when there are no potentially live child actions.
       const runnerPath = join(kernelRunDir(slot.runId), 'runner.json');
       const abandoned = view && view.state === 'running' && !view.openCheck && !openActions(view).length && !existsSync(runnerPath) && !await identityAlive(slot.owner);
-      if (!view || view.state === 'awaiting_approval' || abandoned) { releaseRunSlot(slot.runId); continue; }
+      if (!view || view.state === 'awaiting_approval' || abandoned) { rmSync(slotPath(slot.runId), { force: true }); reclaimed.add(slot.runId); continue; }
       active.push(slot);
     }
-    const legacy = legacySlot();
-    if (legacy && !active.some(slot => slot.runId === legacy.runId)) active.push(legacy);
-    if (!legacy) rmSync(join(kernelStateDir(), 'active.lock'), { force: true });
-    const current = replayJournal(store.read());
-    if (isTerminalState(current.state) || store.cancelRequested()) throw new Error('run 已結束或取消，拒絕取得名額');
+    const candidate: Slot = { runId: store.runId, repo: keys.repo, keys, models: models(contract), codex: usesCodex(contract, deps.agentFor), acquiredAt: active.find(slot => slot.runId === store.runId)?.acquiredAt ?? new Date().toISOString(), owner: await processIdentity() };
+    // Publish compatibility exclusion BEFORE a new slot/start. A pending legacy
+    // launcher may acquire wx at any time, including during identity lookup.
+    const priorMarker = reconcileLegacyMarker([...active, candidate], reclaimed);
+    const legacy = priorMarker ? legacySlot(active) : null;
+    if (legacy) active.push(legacy);
     const own = active.find(slot => slot.runId === store.runId);
-    const others = active.filter(slot => slot.runId !== store.runId);
-    const same = others.filter(slot => slot.keys.common === keys.common || keys.origin && slot.keys.origin === keys.origin);
-    if (same.length) throw new AdmissionBlocked('same_repo', same.map(slot => slot.runId), '同 repo 同時最多一個 run');
-    const held = others.map(slot => slot.runId);
-    if (!own && others.length >= config.maxRuns) throw new AdmissionBlocked('slots_full', held, `全機名額已滿（上限 ${config.maxRuns}，硬上限 3）`);
-    if (!own && others.length && (!validPercent(claude) || claude < config.claudeMinRemainingPercent)) throw new AdmissionBlocked('claude_quota', held, `Claude 週額度${validPercent(claude) ? `剩 ${claude}% < ${config.claudeMinRemainingPercent}%` : '未知'}，全機退回 1 名額`);
-    const codexRun = usesCodex(contract, deps.agentFor);
-    const codexHolders = others.filter(slot => slot.codex);
-    if (!own && codexRun && codexHolders.length && (!validPercent(codex) || codex < config.codexMinRemainingPercent)) throw new AdmissionBlocked('codex_quota', codexHolders.map(slot => slot.runId), `Codex 週額度${validPercent(codex) ? `剩 ${codex}% < ${config.codexMinRemainingPercent}%` : '未知'}，不能同時兩個用到 Codex 的 run`);
-    mkdirSync(slotsDir(), { recursive: true });
-    const slot: Slot = { runId: store.runId, repo: keys.repo, keys, models: models(contract), codex: codexRun, acquiredAt: own?.acquiredAt ?? new Date().toISOString(), owner: await processIdentity() };
-    atomicWrite(slotPath(store.runId), JSON.stringify(slot));
-    try { start(); }
-    catch (error) { if (!own) releaseRunSlot(store.runId); throw error; }
+    try {
+      if (legacy && liveState(legacy.runId)?.state === 'awaiting_approval') throw new AdmissionBlocked('slots_full', [legacy.runId], `舊版正在核准，保留 active.lock；可用 ai-cli kernel cancel ${legacy.runId} 釋放`);
+      const current = replayJournal(store.read());
+      if (isTerminalState(current.state) || store.cancelRequested()) throw new Error('run 已結束或取消，拒絕取得名額');
+      const others = active.filter(slot => slot.runId !== store.runId);
+      const same = others.filter(slot => slot.keys.common === keys.common || keys.origin && slot.keys.origin === keys.origin);
+      if (same.length) throw new AdmissionBlocked('same_repo', same.map(slot => slot.runId), '同 repo 同時最多一個 run');
+      const held = others.map(slot => slot.runId);
+      if (!own && others.length >= config.maxRuns) throw new AdmissionBlocked('slots_full', held, `全機名額已滿（上限 ${config.maxRuns}，硬上限 3）`);
+      if (!own && others.length && (!validPercent(claude) || claude < config.claudeMinRemainingPercent)) throw new AdmissionBlocked('claude_quota', held, `Claude 週額度${validPercent(claude) ? `剩 ${claude}% < ${config.claudeMinRemainingPercent}%` : '未知'}，全機退回 1 名額`);
+      const codexRun = usesCodex(contract, deps.agentFor);
+      const codexHolders = others.filter(slot => slot.codex);
+      if (!own && codexRun && codexHolders.length && (!validPercent(codex) || codex < config.codexMinRemainingPercent)) throw new AdmissionBlocked('codex_quota', codexHolders.map(slot => slot.runId), `Codex 週額度${validPercent(codex) ? `剩 ${codex}% < ${config.codexMinRemainingPercent}%` : '未知'}，不能同時兩個用到 Codex 的 run`);
+      mkdirSync(slotsDir(), { recursive: true });
+      const slot: Slot = { ...candidate, acquiredAt: own?.acquiredAt ?? candidate.acquiredAt };
+      atomicWrite(slotPath(store.runId), JSON.stringify(slot));
+      start();
+    } catch (error) {
+      if (!own) { rmSync(slotPath(store.runId), { force: true }); reclaimed.add(store.runId); }
+      reconcileLegacyMarker(active, reclaimed);
+      throw error;
+    }
   });
 }

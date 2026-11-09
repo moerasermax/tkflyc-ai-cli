@@ -663,11 +663,11 @@ check('引用範圍正確才算', checkCitations('見 README.md:1-2', WORK, 1).p
   const second = acquireActiveLock(b);
   check('第二個 run 被擋下並指出誰佔用', !second.ok && second.heldBy === a);
   check('同一個 run 重入不會被自己擋', acquireActiveLock(a).ok);
-  releaseActiveLock(b);
+  await releaseActiveLock(b);
   check('別人的 run 不能釋放鎖', !acquireActiveLock(b).ok);
-  releaseActiveLock(a);
+  await releaseActiveLock(a);
   check('釋放後別的 run 才能取得', acquireActiveLock(b).ok);
-  releaseActiveLock(b);
+  await releaseActiveLock(b);
 }
 
 /* ---- 委任書 ---- */
@@ -2154,7 +2154,7 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   const switchPath = join(kernelStateDir(), 'triggers.json');
   const mandatePath = name => join(kernelStateDir(), 'mandates', `${name}.json`);
   const ledger = () => readFileSync(ledgerPath, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
-  const clear = () => { rmSync(ledgerPath, { force: true }); if (readActiveRun()) releaseActiveLock(readActiveRun()); };
+  const clear = async () => { rmSync(ledgerPath, { force: true }); if (readActiveRun()) await releaseActiveLock(readActiveRun()); };
   const input = { goal: 'trigger test', workFolder: WORK, allowUnverifiedBoundary: true };
   const saveApproved = (name = 'trigger-audit', limits = {}, overrides = {}) => {
     save({ name, input: { ...input, ...overrides }, maxRunsPerDay: 10, maxInputTokensPerDay: 1000, ...limits });
@@ -2164,7 +2164,7 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
     store.append({ type: 'action_intent', action: { ...WORKER_INTENT, actionId: 'usage' } });
     store.append({ type: 'action_result', actionId: 'usage', outcome: { ok: true, usage } });
     store.append({ type: 'state', state: 'completed' });
-    releaseActiveLock(store.runId);
+    await releaseActiveLock(store.runId);
   };
   let calls = 0;
   const launch = async store => {
@@ -2172,7 +2172,7 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
     calls++; await completed()(store);
   };
   const invoke = (name = 'trigger-audit', extra = {}) => trigger({ name }, { launch, quota: async () => 80, ...extra });
-  clear(); rmSync(switchPath, { force: true });
+  await clear(); rmSync(switchPath, { force: true });
   const before = listRunIds().join();
   check('主動觸發：預設總開關關閉', !enabled());
   process.env.AI_CLI_KERNEL = 'on';
@@ -2216,11 +2216,11 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   const held = newRun().store.runId; acquireActiveLock(held);
   check('主動觸發：別的 run 佔鎖跳過且不扣次數', (await invoke()).reason === 'same_repo' && !ledger().some(row => row.event === 'reserved') && calls === 0);
   check('主動觸發：鎖佔用記錄持有者', ledger().at(-1).detail.includes(held));
-  releaseActiveLock(held);
+  await releaseActiveLock(held);
   writeFileSync(join(kernelStateDir(), 'triggers.lock'), 'held');
   check('主動觸發：觸發殘鎖不重試', (await invoke()).reason === 'trigger_busy' && calls === 0);
   rmSync(join(kernelStateDir(), 'triggers.lock'));
-  clear(); saveApproved('trigger-audit', { maxRunsPerDay: 1 });
+  await clear(); saveApproved('trigger-audit', { maxRunsPerDay: 1 });
   const first = await invoke();
   const firstStore = new RunStore(kernelRunDir(first.runId));
   check('主動觸發：建 run 核准與啟動且保存來源', first.status === 'started' && firstStore.readContract().origin?.kind === 'trigger' && firstStore.readContract().origin?.mandate === 'trigger-audit' && firstStore.readContract().origin?.digest === api.aiCliKernelMandateShow({ name: 'trigger-audit' }).digest && view(firstStore).state === 'completed' && calls === 1);
@@ -2228,7 +2228,7 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   check('主動觸發：每日次數上限含等號', (await invoke()).reason === 'daily_runs_limit' && calls === 1);
   approve({ name: 'trigger-audit' });
   check('主動觸發：重新核准不清空每日帳本', (await invoke()).reason === 'daily_runs_limit');
-  clear(); saveApproved('trigger-audit', { maxInputTokensPerDay: 150 });
+  await clear(); saveApproved('trigger-audit', { maxInputTokensPerDay: 150 });
   let cap = null;
   const cached = await invoke('trigger-audit', { launch: async store => { cap = store.readContract().budget.maxInputTokens; await completed({ input: 1000, cached: 900, output: 999 })(store); } });
   check('主動觸發：剩餘每日 token 限制套進委任書', cap === 150);
@@ -2236,18 +2236,18 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   const second = await invoke('trigger-audit', { launch: async store => { remaining = store.readContract().budget.maxInputTokens; await completed({ input: 70, cached: 20, output: 900 })(store); } });
   check('主動觸發：只扣未快取 input 並排除 output', cached.status === 'started' && second.status === 'started' && remaining === 50);
   check('主動觸發：每日 token 用完不再派工', (await invoke()).reason === 'daily_tokens_limit');
-  clear(); saveApproved('trigger-audit', { maxInputTokensPerDay: 1000 }, { budget: { maxInputTokens: 17 } });
+  await clear(); saveApproved('trigger-audit', { maxInputTokensPerDay: 1000 }, { budget: { maxInputTokens: 17 } });
   let smallBudget;
   await invoke('trigger-audit', { launch: async store => { smallBudget = store.readContract().budget.maxInputTokens; await completed()(store); } });
   check('主動觸發：每日餘額不能放大原本 run 預算', smallBudget === 17);
-  clear(); saveApproved('trigger-audit', { maxInputTokensPerDay: 150 });
+  await clear(); saveApproved('trigger-audit', { maxInputTokensPerDay: 150 });
   await invoke('trigger-audit', { launch: completed({ input: 1000, cached: 900, output: 999 }) });
   await invoke('trigger-audit', { launch: completed({ input: 70, cached: 20, output: 900 }) });
   const unrelated = await invoke('trigger-other', { launch });
   check('主動觸發：缺失範本不影響既有帳本', unrelated.status === 'skipped' && ledger().filter(row => row.event === 'reserved').length === 2);
   saveApproved('trigger-other');
   check('主動觸發：不同範本獨立計數', (await invoke('trigger-other')).status === 'started');
-  clear(); saveApproved('trigger-audit', { maxRunsPerDay: 1 });
+  await clear(); saveApproved('trigger-audit', { maxRunsPerDay: 1 });
   const midnight = new Date(); midnight.setHours(24, 0, 0, 0);
   const edge = midnight.getTime();
   await invoke('trigger-audit', { now: () => edge - 1 });
@@ -2255,58 +2255,58 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   check('主動觸發：跨本機午夜重開當日額度', (await invoke('trigger-audit', { now: () => edge })).status === 'started' && day(edge - 1) !== day(edge));
   check('主動觸發：帳本保留兩天的名額', new Set(ledger().filter(row => row.event === 'reserved').map(row => row.day)).size === 2);
   check('主動觸發：本機年末日期邊界', day(new Date(2026, 11, 31, 23, 59, 59, 999).getTime()) === '2026-12-31' && day(new Date(2027, 0, 1, 0, 0).getTime()) === '2027-01-01');
-  clear(); saveApproved();
+  await clear(); saveApproved();
   let clockReads = 0;
   await invoke('trigger-audit', { now: () => { clockReads++; return clockReads === 1 ? edge - 1 : edge; } });
   check('主動觸發：單次判斷與記帳固定同一日期', clockReads === 1 && ledger().every(row => row.day === day(edge - 1)));
-  clear(); saveApproved();
+  await clear(); saveApproved();
   const unknown = await invoke('trigger-audit', { launch: completed(null) });
   check('主動觸發：未知用量不視為零', unknown.status === 'started' && (await invoke()).reason === 'trigger_error' && ledger().at(-1).detail.includes('用量未知'));
-  clear();
+  await clear();
   const lost = await invoke('trigger-audit', { launch: async store => {
     store.append({ type: 'action_intent', action: { ...WORKER_INTENT, actionId: 'lost' } });
     store.append({ type: 'action_abandoned', actionId: 'lost', reason: 'unknown result', refund: false });
-    store.append({ type: 'state', state: 'completed' }); releaseActiveLock(store.runId);
+    store.append({ type: 'state', state: 'completed' }); await releaseActiveLock(store.runId);
   } });
   check('主動觸發：放棄未知結果不退款成零用量', lost.status === 'started' && (await invoke()).detail.includes('用量未知'));
-  clear();
+  await clear();
   const corruptRun = await invoke();
   const corruptStore = new RunStore(kernelRunDir(corruptRun.runId));
   appendFileSync(corruptStore.journalPath, '{bad}\n');
   check('主動觸發：用量日誌損毀末行不忽略', (await invoke()).reason === 'trigger_error');
-  clear();
+  await clear();
   const absent = await invoke();
   const absentStore = new RunStore(kernelRunDir(absent.runId));
   renameSync(absentStore.contractPath, absentStore.contractPath + '.test-backup');
   check('主動觸發：已扣名額的 run 缺失不當零用量', (await invoke()).detail.includes('run 缺失'));
   renameSync(absentStore.contractPath + '.test-backup', absentStore.contractPath);
-  clear();
+  await clear();
   await invoke();
   const reservation = ledger().find(row => row.event === 'reserved');
   appendFileSync(ledgerPath, JSON.stringify(reservation) + '\n');
   check('主動觸發：重複名額拒絕而非默默重扣', (await invoke()).detail.includes('重複名額'));
-  clear();
+  await clear();
   await invoke('trigger-audit', { launch: async store => {
     store.append({ type: 'action_intent', action: { ...WORKER_INTENT, actionId: 'unresolved' } });
-    releaseActiveLock(store.runId);
+    await releaseActiveLock(store.runId);
   } });
   check('主動觸發：未結束動作不能當成已知零用量', (await invoke()).detail.includes('用量未知'));
-  clear();
+  await clear();
   const crashed = await invoke('trigger-audit', { launch: async () => { throw new Error('fake launcher failed'); } });
   check('主動觸發：啟動失敗不重試且保留鎖與名額', crashed.reason === 'start_failed' && readActiveRun() === crashed.runId && ledger().filter(row => row.event === 'reserved').length === 1);
   const failedStore = new RunStore(kernelRunDir(crashed.runId));
   check('主動觸發：啟動結果不明的 run 留給人對帳', view(failedStore).state === 'running' && ledger().at(-1).detail.includes('fake launcher failed'));
-  clear();
+  await clear();
   // 有效 JSON 但沒有終止換行：必須由殘行防線擋住，不能靠 JSON.parse 恰巧出錯。
   writeFileSync(ledgerPath, JSON.stringify({ event: 'attempt', mandate: 'trigger-audit', day: day(Date.now()), at: new Date().toISOString(), status: 'skipped', reason: 'test', runId: null, detail: '' }));
   const countBeforeCorrupt = listRunIds().join();
   check('主動觸發：殘行帳本失敗關閉不建立 run', (await invoke()).status === 'failed' && listRunIds().join() === countBeforeCorrupt);
   writeFileSync(ledgerPath, '{}\n');
   check('主動觸發：損毀帳本不當成空白', (await invoke()).status === 'failed');
-  clear();
+  await clear();
   writeFileSync(switchPath, '{}');
   check('主動觸發：損毀開關不啟動且留下原因', (await invoke()).reason === 'trigger_error' && ledger().at(-1).detail.includes('開關損毀'));
-  setEnabled(true); clear();
+  setEnabled(true); await clear();
   mkdirSync(ledgerPath);
   const beforeLedgerFailure = listRunIds().join();
   check('主動觸發：帳本不能寫入就不建立 run', (await invoke()).status === 'failed' && listRunIds().join() === beforeLedgerFailure);
@@ -2327,7 +2327,7 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
     devExecutor = new FakeExecutor(writes('good\n'));
     const workspace = { ...realWorkspace, pushCheckpoint: (spec, commit) => { pushed.push(spec.checkpoint.ref); return realWorkspace.pushCheckpoint(spec, commit); } };
     await runKernelLoop(devDeps(store, contract, devExecutor, { workspace }));
-    releaseActiveLock(store.runId);
+    await releaseActiveLock(store.runId);
   } });
   const devContract = devStore.readContract();
   const delivered = git(repo, 'rev-parse', devContract.develop.branch);
@@ -2335,7 +2335,7 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   check('主動觸發整合：專案 Codex hook 註記寫進 run', view(devStore).notes.some(note => note.includes('.codex/hooks.json')) && devContract.develop.notices.some(note => note.includes('.codex/hooks.json')));
   check('主動觸發整合：只推回復點且不合併主分支', pushed.join() === devContract.develop.checkpoint.ref && git(repo, 'rev-parse', 'HEAD') === originalHead && originalRemote === '' && git(remote, 'for-each-ref', '--format=%(refname)') === `refs/heads/${devContract.develop.checkpoint.ref}`);
   check('主動觸發整合：自動流程不會自己建立放行', !existsSync(join(devStore.dir, 'releases.jsonl')));
-  clear();
+  await clear();
   let badStore, badExecutor, failedPushes = 0;
   await invoke('trigger-dev', { launch: async store => {
     badStore = store; badExecutor = new FakeExecutor(writes('good\n'));
@@ -2343,7 +2343,7 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
     await runKernelLoop(devDeps(store, store.readContract(), badExecutor, { workspace }));
   } });
   check('主動觸發整合：回復點推送失敗不派 worker 不降本地', view(badStore).reason === 'checkpoint_push_failed' && badExecutor.started.length === 0 && failedPushes === 1 && !view(badStore).checkpoint);
-  clear();
+  await clear();
   // 所有 schedule 呼叫明確注入假的 execute，包含預覽、拒絕與 POSIX。
   const scheduled = [];
   const fakeSchedule = { platform: 'win32', nodePath: 'C:\\Program Files\\node.exe', cliPath: 'C:\\tool dir\\ai-cli.js', execute: (file, args) => scheduled.push({ file, args }) };
@@ -2387,7 +2387,7 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   process.env.AI_CLI_KERNEL = 'on';
   for (const tool of ['trigger', 'triggers_on', 'schedule', 'mandate_approve']) check(`主動觸發 MCP：不新增人工寫入工具 ${tool}`, !aiCliKernelToolDefinitions().some(item => item.name === `ai-cli_kernel_${tool}`) && !!await rejecting(aiCliKernelHandleTool(`ai-cli_kernel_${tool}`, { name: 'trigger-audit' })));
   delete process.env.AI_CLI_KERNEL;
-  setEnabled(false); clear();
+  setEnabled(false); await clear();
 }
 
 /* ---- L5 歸檔包：純日誌、介面與記憶/context 整合 ---- */
@@ -2580,7 +2580,7 @@ const { aiCliKernelArchiveList: archiveList, aiCliKernelArchiveShow: archiveShow
   let lockedRunExists = null;
   await trigger({ name: 'recheck' }, { launch, quota: async () => 80, beforeStart: () => { lockedRunExists = existsSync(join(kernelRunDir(readActiveRun()), 'contract.json')); } });
   check('觸發：鎖指向的 run 一定存在，當掉時人才取消得了', lockedRunExists === true, lockedRunExists);
-  releaseActiveLock(readActiveRun()); // launch 是假的，沒有 runner 會釋放它。
+  await releaseActiveLock(readActiveRun()); // launch 是假的，沒有 runner 會釋放它。
   setEnabled(false);
 }
 {
