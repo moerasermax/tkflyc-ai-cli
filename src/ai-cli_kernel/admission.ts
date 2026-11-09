@@ -249,28 +249,54 @@ export function readActiveRuns(): ActiveRun[] {
 function liveSlots(): Slot[] {
   return storedSlots().filter(slot => { const view = liveState(slot.runId); return view && view.state !== 'awaiting_approval'; });
 }
+/** New-format slot files left for terminal/missing runs. They never hold a place (liveSlots, admitRun skip them). */
+function terminalSlotIds(): string[] { return storedSlots().filter(slot => !liveState(slot.runId)).map(slot => slot.runId); }
+/**
+ * I1：名額檔是「標記指向的是新版 run」唯一能持久留下的證據，所以釋放／回收時，已終止 run 的名額檔要等
+ * 標記改指向之後才刪（呼叫端在 finally 呼叫）。原子覆蓋重試耗盡時標記仍指向它，就把它的名額檔留著：
+ * 下一次協調（runner 定期檢查、下一次釋放或 admission）把它放進 released，照樣走原子覆蓋，
+ * 不會因為認不出來而退回 take＋put。標記讀不出來時也全部留著，等下一次協調。
+ * 只留已終止的：活著的 run 的名額檔仍由呼叫端照舊先刪——它若被舊版 launcher 以同一個 runId 接手
+ * （舊版 acquireActiveLock 遇到同 runId 的標記直接成功），必須走 G2c 的 take＋put 記成 legacy。
+ */
+function dropReleasedSlots(released: Iterable<string>): void {
+  let named: string | null | undefined;
+  try { named = readLegacyLock()?.runId ?? null; } catch { named = undefined; }
+  for (const runId of released) {
+    if (liveState(runId) || named === undefined || named === runId) continue;
+    rmSync(slotPath(runId), { force: true });
+  }
+}
 /** Bounded retries (retryProcessMutex). `keep` runs inside the admission mutex, so a
  * runner claiming its slot cannot interleave between the check and the removal. */
 export async function releaseRunSlot(runId: string, deps: Partial<MutexRetryDeps> = {}, keep?: () => boolean | Promise<boolean>): Promise<void> {
   await retryProcessMutex('admission', async () => {
     if (keep && await keep()) return;
-    rmSync(slotPath(runId), { force: true });
     rmSync(legacyRecordPath(runId), { force: true });
+    // I1: a terminal run's slot file is dropped only after the marker moved off it (dropReleasedSlots).
+    if (liveState(runId)) rmSync(slotPath(runId), { force: true });
     const remaining = liveSlots();
+    // Slot files left behind by an earlier failed overwrite are released here too.
+    const released = new Set([runId, ...terminalSlotIds()]);
     // The last release also reclaims a marker naming a terminal/missing run; otherwise old
     // launchers would stay blocked by it until some later admission happened to run.
-    reconcileLegacyMarker(remaining, new Set([runId]));
+    try { reconcileLegacyMarker(remaining, released); }
+    finally { dropReleasedSlots(released); }
   }, deps);
 }
 export type LegacyMarkerCheck = 'ok' | 'repaired' | 'busy' | 'failed';
+/** I3：定期檢查取 admission 互斥的等待上限。只是縮短空窗的輔助，忙碌就跳過，不佔住 runner。 */
+export const LEGACY_MARKER_CHECK_WAIT_MS = 500;
 export interface LegacyMarkerCheckDeps { mutex?: typeof withProcessMutex }
 /**
  * 新舊版共存的補標記檢查（runner 定期呼叫）。舊版釋放是「讀到自己的 runId 就刪」，先讀後刪不是原子的：
  * 它讀完、還沒刪之前，新版若剛把標記改指向新版名額 N，舊版接著就把 N 的標記刪了。這是舊版程式的問題，
  * 新版只能縮短沒有標記的時間。
  *
- * 平常只讀 active.lock 和名額檔、不進互斥；只有「有新版名額，而標記不存在或不是指向新版名額的 run」時，
- * 才進 admission 互斥（不重試），用既有的協調把標記補回。互斥忙碌就回 busy、下次再試。
+ * 平常只讀 active.lock 和名額檔、不進互斥；只有「有新版名額，而標記不存在、不是指向新版名額的 run，
+ * 或指向的名額檔屬於已終止的 run（I1：覆蓋失敗留下的）」時，才進 admission 互斥（不重試），
+ * 用既有的協調把標記補回，留下的名額檔當成 released、照樣原子覆蓋，之後回收。
+ * 互斥最多等 LEGACY_MARKER_CHECK_WAIT_MS（I3），忙碌就回 busy、下次再試，不排隊等 15 秒。
  * 任何錯誤都只記一筆 legacy_marker_check_failed（不是 state 事件），絕不丟出、不改變 run 的狀態。
  */
 export async function ensureLegacyMarker(store?: RunStore, deps: LegacyMarkerCheckDeps = {}): Promise<LegacyMarkerCheck> {
@@ -278,13 +304,15 @@ export async function ensureLegacyMarker(store?: RunStore, deps: LegacyMarkerChe
     const slots = storedSlots();
     if (!slots.length) return 'ok';
     const marker = readLegacyLock();
-    if (marker && slots.some(slot => slot.runId === marker.runId)) return 'ok';
+    if (marker && slots.some(slot => slot.runId === marker.runId) && liveState(marker.runId)) return 'ok';
     return await (deps.mutex ?? withProcessMutex)('admission', (): LegacyMarkerCheck => {
       const targets = liveSlots();
-      if (!targets.length) return 'ok';
-      reconcileLegacyMarker(targets);
+      const released = new Set(terminalSlotIds());
+      if (!targets.length && !released.size) return 'ok';
+      try { reconcileLegacyMarker(targets, released); }
+      finally { dropReleasedSlots(released); }
       return 'repaired';
-    });
+    }, { maxWaitMs: LEGACY_MARKER_CHECK_WAIT_MS });
   } catch (error) {
     if (error instanceof ProcessMutexBusy) return 'busy';
     try { store?.append({ type: 'legacy_marker_check_failed', detail: String((error as Error)?.message ?? error) }); }
@@ -316,6 +344,10 @@ export class AdmissionBlocked extends Error {
     super(`${detail}；佔用 run：${heldBy.join('、')}`);
   }
 }
+/** I5：擋住的是舊版 legacy 紀錄時，只有 cancel 能釋放它，提示寫法和舊版核准中標記的拒絕一致。新版名額不附。 */
+function cancelHint(slots: Slot[]): string {
+  return slots.filter(slot => slot.legacy).map(slot => `；可用 ai-cli kernel cancel ${slot.runId} 釋放`).join('');
+}
 export interface AdmissionDeps { quota?(agent: string): Promise<number | null>; agentFor?(model: string): string }
 const validPercent = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100;
 
@@ -337,7 +369,8 @@ export async function admitRun(store: RunStore, start: () => void, deps: Admissi
       // pre-run crash window only when there are no potentially live child actions.
       const runnerPath = join(kernelRunDir(slot.runId), 'runner.json');
       const abandoned = view && view.state === 'running' && !view.openCheck && !openActions(view).length && !existsSync(runnerPath) && !await identityAlive(slot.owner);
-      if (!view || view.state === 'awaiting_approval' || abandoned) { rmSync(slotPath(slot.runId), { force: true }); reclaimed.add(slot.runId); continue; }
+      // I1: a terminal/missing run's slot file stays until the marker moved off it (dropReleasedSlots below).
+      if (!view || view.state === 'awaiting_approval' || abandoned) { if (view) rmSync(slotPath(slot.runId), { force: true }); reclaimed.add(slot.runId); continue; }
       active.push(slot);
     }
     const candidate: Slot = { runId: store.runId, repo: keys.repo, keys, models: models(contract), codex: usesCodex(contract, deps.agentFor), acquiredAt: active.find(slot => slot.runId === store.runId)?.acquiredAt ?? new Date().toISOString(), owner: await processIdentity() };
@@ -348,7 +381,8 @@ export async function admitRun(store: RunStore, start: () => void, deps: Admissi
       // The candidate is a target, so a marker naming this run while it has no slot file
       // (crash after the marker write, before the slot write) is treated as our own
       // leftover, not as an old launcher approving it.
-      reconcileLegacyMarker([...active, candidate], reclaimed, true);
+      try { reconcileLegacyMarker([...active, candidate], reclaimed, true); }
+      finally { dropReleasedSlots(reclaimed); }
       // Legacy runs are counted from their own records, independent of the marker.
       const occupied = [...active, ...liveLegacyRecords().filter(record => !active.some(slot => slot.runId === record.runId))];
       own = occupied.find(slot => slot.runId === store.runId);
@@ -357,7 +391,7 @@ export async function admitRun(store: RunStore, start: () => void, deps: Admissi
       const others = occupied.filter(slot => slot.runId !== store.runId);
       // A legacy run whose repo could not be determined (keys null) conflicts with every repo.
       const same = others.filter(slot => !slot.keys || slot.keys.common === keys.common || keys.origin && slot.keys.origin === keys.origin);
-      if (same.length) throw new AdmissionBlocked('same_repo', same.map(slot => slot.runId), '同 repo 同時最多一個 run');
+      if (same.length) throw new AdmissionBlocked('same_repo', same.map(slot => slot.runId), `同 repo 同時最多一個 run${cancelHint(same)}`);
       const held = others.map(slot => slot.runId);
       if (!own && others.length >= config.maxRuns) throw new AdmissionBlocked('slots_full', held, `全機名額已滿（上限 ${config.maxRuns}，硬上限 3）`);
       if (!own && others.length && (!validPercent(claude) || claude < config.claudeMinRemainingPercent)) throw new AdmissionBlocked('claude_quota', held, `Claude 週額度${validPercent(claude) ? `剩 ${claude}% < ${config.claudeMinRemainingPercent}%` : '未知'}，全機退回 1 名額`);
@@ -379,7 +413,8 @@ export async function admitRun(store: RunStore, start: () => void, deps: Admissi
       // repointed to one of them and that old run is recorded as a legacy reservation. The G2 rule
       // (with any new-format slot, the marker names one) wins over "leave an awaiting marker alone";
       // the legacy record still counts toward the cap and blocks its repo, so nothing is let through.
-      reconcileLegacyMarker(active, reclaimed);
+      try { reconcileLegacyMarker(active, reclaimed); }
+      finally { dropReleasedSlots(reclaimed); }
       throw error;
     }
   });

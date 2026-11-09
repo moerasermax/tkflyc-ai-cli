@@ -1,7 +1,8 @@
 /**
  * runner 的收尾，從 runner.ts 抽出來才測得到（runner.ts 一載入就執行 main）。
  * 只有 loop 丟出的程式錯誤才寫 failed／kernel_error；釋放名額在 run 的結果之外，
- * 忙碌時 releaseActiveLock 有限重試後只記 slot_release_failed、不丟出，已交付的 run 不會被改寫，runner 照常 exit 0。
+ * 忙碌時 releaseActiveLock 有限重試後只記 slot_release_failed、不丟出；active.lock 覆蓋重試耗盡也一樣（I2）。
+ * 已交付的 run 不會被改寫，runner 照常 exit 0。
  */
 import { releaseActiveLock, type RunStore } from './journal.js';
 import { openActions, replayJournal } from './replay.js';

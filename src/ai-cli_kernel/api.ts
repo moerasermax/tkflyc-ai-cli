@@ -16,7 +16,7 @@ import { FileJobExecutor } from './executor.js';
 import { admitRun, readActiveRuns, type ActiveRun, type AdmissionDeps } from './admission.js';
 import { releaseStoppedTestLock } from './test-lock.js';
 import type { MutexRetryDeps } from './process-mutex.js';
-import { atomicWrite, kernelRunDir, listRunIds, newRunId, recordSlotReleaseFailed, releaseActiveLock, RunStore, SLOT_RELEASE_DEFERRED_NOTE } from './journal.js';
+import { atomicWrite, kernelRunDir, listRunIds, newRunId, recordSlotReleaseFailed, releaseActiveLock, RunStore, SLOT_RELEASE_DEFERRED_NOTE, SLOT_RELEASE_MARKER_NOTE } from './journal.js';
 import { boundaryKey, boundaryStatus, hasProbeEvidenceFormat, probeResultLabel, runBoundaryProbe, type ProbeRecord } from './probe.js';
 import { activeMinutes, nextStep, openActions, replayJournal, unprocessedActions, type RunView } from './replay.js';
 import { agentForModel } from './runtime.js';
@@ -510,8 +510,10 @@ export async function cancelWithoutRunner(store: RunStore, executor: KernelExecu
 /** run 已經寫成終止狀態後，釋放名額忙碌不算取消失敗：照常回報狀態，detail 附上說明。 */
 async function cancelStatus(store: RunStore, sinceSeq: number): Promise<KernelRunStatus> {
   const status = await statusOf(store);
-  if (!store.read().some(event => event.seq > sinceSeq && event.type === 'slot_release_failed')) return status;
-  return { ...status, detail: status.detail ? `${status.detail}；${SLOT_RELEASE_DEFERRED_NOTE}` : SLOT_RELEASE_DEFERRED_NOTE };
+  const failed = store.read().filter(event => event.seq > sinceSeq && event.type === 'slot_release_failed').at(-1);
+  if (failed?.type !== 'slot_release_failed') return status;
+  const note = failed.detail.startsWith(SLOT_RELEASE_MARKER_NOTE) ? SLOT_RELEASE_MARKER_NOTE : SLOT_RELEASE_DEFERRED_NOTE;
+  return { ...status, detail: status.detail ? `${status.detail}；${note}` : note };
 }
 
 /** deps 只供測試注入釋放名額時的協調；MCP／CLI 只傳 input。 */
