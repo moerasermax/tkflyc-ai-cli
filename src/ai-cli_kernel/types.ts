@@ -234,6 +234,8 @@ export type KernelEventBody =
   | { type: 'test_lock_release_deferred'; detail: string }
   /** 名額釋放失敗（admission 忙碌重試耗盡）。不是狀態：replay 不讀它，終止狀態維持原樣。 */
   | { type: 'slot_release_failed'; detail: string }
+  /** runner 定期補 active.lock 時出錯（H2）。不是狀態：replay 不讀它，不影響 run。 */
+  | { type: 'legacy_marker_check_failed'; detail: string }
   | { type: 'verification'; commit: string; passed: boolean; exitCode: number | null; timedOut: boolean; tail: string }
   | { type: 'quota_unknown'; agent: string }
   | { type: 'state'; state: RunState; reason?: string; detail?: string };

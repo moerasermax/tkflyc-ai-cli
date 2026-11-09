@@ -5735,6 +5735,46 @@
     "expect": "G2c repointing never overwrites an old launcher"
   },
   {
+    "name": "kernel H1：新版名額間改指向退回 take＋put（有空窗）",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "    if (marker && want && (ids.has(marker.runId) || released.has(marker.runId))) {",
+    "to": "    if (marker && want && (false as boolean) && (ids.has(marker.runId) || released.has(marker.runId))) {",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "H1 repointing between new-format slots never leaves active.lock missing"
+  },
+  {
+    "name": "kernel H1：覆蓋 active.lock 遇 EPERM 不重試",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "        if (attempt >= MARKER_REPLACE_ATTEMPTS) throw new LegacyMarkerReplaceFailed(attempt, error);",
+    "to": "        if (attempt >= 1) throw new LegacyMarkerReplaceFailed(attempt, error);",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "H1 marker overwrite retries EPERM"
+  },
+  {
+    "name": "kernel H1：覆蓋 active.lock 重試耗盡後不丟可辨識錯誤",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "        if (attempt >= MARKER_REPLACE_ATTEMPTS) throw new LegacyMarkerReplaceFailed(attempt, error);",
+    "to": "        if (attempt >= MARKER_REPLACE_ATTEMPTS) return;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "H1 marker overwrite retries EPERM and raises a recognizable error"
+  },
+  {
+    "name": "kernel H2：定期檢查發現缺標記卻不補",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "      reconcileLegacyMarker(targets);",
+    "to": "      void targets;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "H2 marker check restores a deleted marker"
+  },
+  {
+    "name": "kernel H2：標記正常時也進 admission 互斥",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "    if (marker && slots.some(slot => slot.runId === marker.runId)) return 'ok';",
+    "to": "    void marker;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "H2 healthy marker never enters the admission mutex"
+  },
+  {
     "name": "kernel G4：e2e 沒設 CLAUDE_CLI_NAME，Claude 照預設從 PATH 找",
     "file": "tests/verify-ai-cli_kernel-e2e.mjs",
     "from": "  CLAUDE_CLI_NAME: CLAUDE_STUB,",
