@@ -3,6 +3,9 @@
  * 失敗印 stdout 的 `FAIL <名稱>`，供 tools/mutation-test.mjs 指認對應斷言。
  */
 import '../tools/stubs/catalog-test-env.mjs';
+import { installClaudeQuotaStub } from './helpers/claude-quota-stub.mjs';
+// G4：萬一有路徑走到真的額度查詢，也只會叫到立刻結束的替身，不會啟動真的 Claude CLI。
+installClaudeQuotaStub();
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, appendFileSync, writeFileSync, renameSync, symlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -659,6 +662,8 @@ check('引用範圍正確才算', checkCitations('見 README.md:1-2', WORK, 1).p
 /* ---- 一次一個 ---- */
 {
   const a = 'kr-20260101-000000-aaaa', b = 'kr-20260101-000000-bbbb';
+  // 持鎖的必須是真的 run：最後一個名額釋放時，指向不存在 run 的標記會被回收（G2a）。
+  for (const id of [a, b]) new RunStore(kernelRunDir(id)).create(buildContract({ goal: 'x', workFolder: WORK }));
   check('第一個 run 取得鎖', acquireActiveLock(a).ok);
   const second = acquireActiveLock(b);
   check('第二個 run 被擋下並指出誰佔用', !second.ok && second.heldBy === a);

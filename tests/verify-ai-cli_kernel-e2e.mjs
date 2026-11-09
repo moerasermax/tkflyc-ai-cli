@@ -33,11 +33,37 @@ function check(name, condition, detail = '') {
     else if (detail !== '') console.log(`  ${String(detail).replace(/\s+/g, ' ').slice(0, 800)}`);
   }
 }
+/* ---- G4：核准會查 Claude 額度，真的查法是用 PTY 開一個 claude 互動 session。
+   測試一律換成立刻結束的替身（查詢得到「量不到」）。替身與 PATH 上的誘餌都把呼叫記進
+   CLAUDE_LOG，路徑直接寫進腳本，不靠環境變數傳。 ---- */
+const CLAUDE_DIR = mkdtempSync(join(tmpdir(), 'kernel-e2e-claude-'));
+const CLAUDE_DECOY_DIR = mkdtempSync(join(tmpdir(), 'kernel-e2e-claude-path-'));
+const CLAUDE_LOG = join(CLAUDE_DIR, 'calls.log');
+function claudeScript(dir, name, tag) {
+  const body = `require('node:fs').appendFileSync(${JSON.stringify(CLAUDE_LOG)}, ${JSON.stringify(`${tag}\n`)});\n`;
+  if (process.platform !== 'win32') {
+    const path = join(dir, name);
+    writeFileSync(path, `#!/usr/bin/env node\n${body}`); chmodSync(path, 0o755); return path;
+  }
+  writeFileSync(join(dir, `${name}.cjs`), body);
+  writeFileSync(join(dir, `${name}.cmd`), `@node "%~dp0${name}.cjs" %*\r\n`);
+  return join(dir, `${name}.cmd`);
+}
+const CLAUDE_STUB = claudeScript(CLAUDE_DIR, 'claude-stub', 'stub');
+// 沒設 CLAUDE_CLI_NAME 時照預設從 PATH 解析出絕對路徑，會先找到這個誘餌。攔不到的：
+// ~/.claude/local/claude 存在時預設會先用它；CLAUDE_CLI_NAME 是簡單名稱時交給 PTY 自己找。
+claudeScript(CLAUDE_DECOY_DIR, 'claude', 'path');
+const claudeCalls = tag => existsSync(CLAUDE_LOG) ? readFileSync(CLAUDE_LOG, 'utf8').split('\n').filter(line => line === tag).length : 0;
 const baseEnv = {
   ...process.env, AI_CLI_STATE_DIR: STATE, AI_CLI_CONFIG_DIR: CONFIG, AI_CLI_PROVIDERS_PATH: providers, AI_CLI_AUTO_UPDATE: 'off', AI_CLI_BREAKER_DISABLED: 'true',
   CODEX_CLI_NAME: stub, KERNEL_STUB_LOG: LOG, AI_CLI_KERNEL_QUOTA_TIMEOUT_MS: '500',
+  CLAUDE_CLI_NAME: CLAUDE_STUB,
 };
 delete baseEnv.AI_CLI_WORKER;
+// Windows 的環境變數名稱不分大小寫，展開成物件後可能是 Path；沿用原本的鍵，免得子行程拿到兩份。
+const PATH_KEY = Object.keys(baseEnv).find(key => key.toUpperCase() === 'PATH') ?? 'PATH';
+baseEnv[PATH_KEY] = `${CLAUDE_DECOY_DIR}${process.platform === 'win32' ? ';' : ':'}${baseEnv[PATH_KEY] ?? ''}`;
+const E2E_START = performance.now();
 function cli(args, env = {}) {
   const start = performance.now();
   const result = spawnSync(process.execPath, [CLI, 'kernel', ...args], { encoding: 'utf8', env: { ...baseEnv, ...env }, timeout: 180000, windowsHide: true });
@@ -365,6 +391,11 @@ try {
 } catch (error) {
   check('測試沒有丟例外', false, error.stack);
 }
+// G4 防回歸：核准與 runner 都查過額度，所以替身一定被叫過；PATH 上的誘餌一次都不能被叫到。
+const claudeLog = () => ({ log: existsSync(CLAUDE_LOG) ? readFileSync(CLAUDE_LOG, 'utf8') : null });
+check('額度查詢的 Claude 走測試替身', claudeCalls('stub') >= 1, claudeLog);
+check('沒有從 PATH 啟動 claude', claudeCalls('path') === 0, claudeLog);
+console.log(`e2e 耗時 ${((performance.now() - E2E_START) / 1000).toFixed(1)} 秒；Claude 替身被呼叫 ${claudeCalls('stub')} 次`);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

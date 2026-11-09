@@ -1,4 +1,7 @@
 import '../tools/stubs/catalog-test-env.mjs';
+import { installClaudeQuotaStub } from './helpers/claude-quota-stub.mjs';
+// G4：萬一有路徑走到真的額度查詢，也只會叫到立刻結束的替身，不會啟動真的 Claude CLI。
+installClaudeQuotaStub();
 import assert from 'node:assert/strict';
 import { fork, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -92,6 +95,19 @@ async function race(stores, expected, extra = {}) {
   return results;
 }
 
+/* ---- G2：新舊版共存。舊版只認 active.lock：取得用 wx（acquireActiveLock），
+   釋放是「標記的 runId 等於自己就刪」，下面的 legacyRelease 照抄這個邏輯。 ---- */
+const markerPath = () => join(kernelStateDir(), 'active.lock');
+const markerRun = () => existsSync(markerPath()) ? JSON.parse(readFileSync(markerPath(), 'utf8')).runId : null;
+const legacyRecord = store => join(kernelStateDir(), 'active-runs', `${store.runId}.legacy.json`);
+function legacyRelease(runId) {
+  try { if (JSON.parse(readFileSync(markerPath(), 'utf8')).runId === runId) rmSync(markerPath()); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+}
+/** 舊版 launcher 開一個 run：wx 取得標記後寫入 running。 */
+function legacyStart(store) { assert.equal(acquireActiveLock(store.runId).ok, true); running(store); }
+function legacyEnd(store) { store.append({ type: 'state', state: 'completed' }); legacyRelease(store.runId); }
+
 try {
   await test('F1 new reservations exclude legacy launchers until final release', async () => {
     const a = fresh(), old = fresh(), marker = join(kernelStateDir(), 'active.lock');
@@ -113,7 +129,9 @@ try {
     const old = fresh(), next = fresh(), marker = join(kernelStateDir(), 'active.lock');
     assert.equal(acquireActiveLock(old.runId).ok, true);
     const before = readFileSync(marker, 'utf8');
-    for (const store of [next, old]) {
+    // Approving `old` itself is not covered here: a marker naming the run being admitted, with no
+    // slot file, is treated as that run's own leftover (G2b), not as an old approval window.
+    for (const store of [next]) {
       await assert.rejects(admit(store), e => e.heldBy.includes(old.runId) && e.message.includes('cancel'));
       assert.equal(readFileSync(marker, 'utf8'), before);
       assert.equal(replayJournal(store.read()).state, 'awaiting_approval');
@@ -707,6 +725,94 @@ try {
     assert.ok(existsSync(slotFile(busyStore)));
     const own = await api.aiCliKernelApprove({ runId: busyStore.runId }, { quota, launch: async () => {} });
     assert.equal(own.state, 'running'); await finish(busyStore);
+  });
+  await test('G2 legacy-held marker moves to a new slot so the old release leaves no gap', async () => {
+    const legacy = fresh(), next = fresh(), late = fresh();
+    legacyStart(legacy);
+    await admit(next);
+    assert.equal(markerRun(), next.runId, 'marker must name a new-format slot while one exists');
+    assert.ok(existsSync(legacyRecord(legacy)), 'the legacy run is recorded as its own reservation');
+    assert.deepEqual(readActiveRuns().map(run => run.runId).sort(), [legacy.runId, next.runId].sort());
+    legacyEnd(legacy); // old release: runId differs, so the marker survives
+    assert.equal(markerRun(), next.runId);
+    assert.equal(acquireActiveLock(late.runId).ok, false, 'old launchers stay excluded while a new slot exists');
+    await finish(next);
+    assert.equal(existsSync(legacyRecord(legacy)), false, 'a terminal legacy record is reclaimed');
+    assert.equal(existsSync(markerPath()), false);
+    await finish(late);
+  });
+  await test('G2 legacy record counts toward the cap and same repo, unknown repo blocks every repo', async () => {
+    const dir = repo(), legacy = fresh(dir), a = fresh(), b = fresh();
+    legacyStart(legacy);
+    await admit(a);
+    await assert.rejects(admit(fresh(dir)), e => e.reason === 'same_repo' && e.heldBy.includes(legacy.runId));
+    await admit(b);
+    await assert.rejects(admit(fresh()), e => e.reason === 'slots_full' && e.heldBy.includes(legacy.runId));
+    legacyEnd(legacy);
+    const sameRepo = fresh(dir); await admit(sameRepo); // the repo frees up once the legacy run ends
+    await finish(sameRepo); await finish(a); await finish(b);
+    assert.equal(existsSync(legacyRecord(legacy)), false);
+    // A develop run whose repoRoot is not a git repo: its repo identity cannot be determined.
+    const unknown = fresh(folder(), { develop: { repoRoot: folder() } }), blocked = fresh();
+    legacyStart(unknown);
+    await assert.rejects(admit(blocked), e => e.reason === 'same_repo' && e.heldBy.includes(unknown.runId));
+    assert.equal(markerRun(), unknown.runId, 'without new slots the marker points back at the live legacy run');
+    legacyEnd(unknown);
+    await admit(blocked); await finish(blocked);
+    assert.equal(existsSync(legacyRecord(unknown)), false);
+    assert.equal(existsSync(markerPath()), false);
+  });
+  await test('G2a last release reclaims a marker naming a terminal or missing run', async () => {
+    for (const kind of ['terminal', 'missing']) {
+      // e.g. an old cancel deleted the marker, an old launcher took it and then died without releasing.
+      const holder = fresh(), stale = fresh(), late = fresh();
+      running(stale);
+      await admit(holder);
+      if (kind === 'terminal') stale.append({ type: 'state', state: 'completed' });
+      else rmSync(stale.dir, { recursive: true, force: true });
+      writeFileSync(markerPath(), JSON.stringify({ runId: stale.runId, at: new Date().toISOString() }));
+      await finish(holder);
+      assert.equal(existsSync(markerPath()), false, `${kind} marker must be reclaimed by the last release`);
+      assert.equal(acquireActiveLock(late.runId).ok, true);
+      legacyRelease(late.runId); await finish(late);
+    }
+  });
+  await test('G2b own marker left before the slot write is not mistaken for a legacy approval', async () => {
+    const own = fresh();
+    writeFileSync(markerPath(), JSON.stringify({ runId: own.runId, at: new Date().toISOString() }));
+    await admit(own);
+    assert.equal(markerRun(), own.runId);
+    assert.ok(existsSync(join(kernelStateDir(), 'active-runs', `${own.runId}.json`)));
+    assert.deepEqual(readActiveRuns().map(run => run.runId), [own.runId]);
+    await finish(own);
+    assert.equal(existsSync(markerPath()), false);
+  });
+  await test('G2c repointing never overwrites an old launcher that won wx after the read', async () => {
+    const { default: fs } = await import('node:fs');
+    const { syncBuiltinESMExports } = await import('node:module');
+    const legacy = fresh(), racer = fresh(), next = fresh(), late = fresh();
+    legacyStart(legacy);
+    const original = fs.renameSync;
+    let raced = false;
+    // Between our read (legacy) and our move: the old run ends and releases, an old launcher wins wx.
+    fs.renameSync = (from, to) => {
+      if (!raced && from === markerPath()) { raced = true; legacyEnd(legacy); assert.equal(acquireActiveLock(racer.runId).ok, true); }
+      return original(from, to);
+    };
+    syncBuiltinESMExports();
+    try { await admit(next); }
+    finally { fs.renameSync = original; syncBuiltinESMExports(); }
+    assert.equal(raced, true);
+    assert.equal(markerRun(), next.runId, 'confirmed by re-reading after the write');
+    assert.ok(existsSync(legacyRecord(racer)), 'the displaced old launcher is recorded, not lost');
+    assert.ok(readActiveRuns().some(run => run.runId === racer.runId));
+    running(racer); legacyEnd(racer);
+    assert.equal(markerRun(), next.runId);
+    assert.equal(acquireActiveLock(late.runId).ok, false);
+    await finish(next);
+    assert.equal(existsSync(legacyRecord(racer)), false);
+    assert.equal(existsSync(markerPath()), false);
+    await finish(late);
   });
   await clear();
   assert.ok(count > 0, 'refuse an empty test selection');

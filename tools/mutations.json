@@ -5321,16 +5321,16 @@
   {
     "name": "kernel D：clone 不比對 origin",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "    const same = others.filter(slot => slot.keys.common === keys.common || keys.origin && slot.keys.origin === keys.origin);",
-    "to": "    const same = others.filter(slot => slot.keys.common === keys.common);",
+    "from": "      const same = others.filter(slot => !slot.keys || slot.keys.common === keys.common || keys.origin && slot.keys.origin === keys.origin);",
+    "to": "      const same = others.filter(slot => !slot.keys || slot.keys.common === keys.common);",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "worktrees and credential-free normalized clone origins share repo identity"
   },
   {
     "name": "kernel D：舊 active.lock 不計入名額",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "    if (legacy) active.push(legacy);",
-    "to": "    if (legacy && (false as boolean)) active.push(legacy);",
+    "from": "      const occupied = [...active, ...liveLegacyRecords().filter(record => !active.some(slot => slot.runId === record.runId))];",
+    "to": "      const occupied = [...active];",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "legacy active.lock counts once and stale/missing/terminal reservations recycle"
   },
@@ -5441,16 +5441,16 @@
   {
     "name": "kernel F1F3：新版不建立相容標記",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "const priorMarker = reconcileLegacyMarker([...active, candidate], reclaimed);",
-    "to": "const priorMarker = readLegacyLock();",
+    "from": "      reconcileLegacyMarker([...active, candidate], reclaimed, true);",
+    "to": "      reconcileLegacyMarker(active, reclaimed, true);",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "F1 new reservations exclude legacy launchers until final release"
   },
   {
     "name": "kernel F1F3：忽略舊版尚未核准鎖",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "if (legacy && liveState(legacy.runId)?.state === 'awaiting_approval')",
-    "to": "if ((false as boolean) && legacy && liveState(legacy.runId)?.state === 'awaiting_approval')",
+    "from": "    if (foreign?.state === 'awaiting_approval' && blockAwaiting && !captured) {",
+    "to": "    if ((false as boolean) && foreign?.state === 'awaiting_approval' && blockAwaiting && !captured) {",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "F1 awaiting legacy reservation blocks admission and real cancel releases it"
   },
@@ -5465,24 +5465,24 @@
   {
     "name": "kernel F1F3：釋放後不修復相容標記",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "reconcileLegacyMarker(remaining, new Set([runId]), false);",
-    "to": "void remaining;",
+    "from": "    reconcileLegacyMarker(remaining, new Set([runId]));",
+    "to": "    if (!remaining.length) reconcileLegacyMarker(remaining, new Set([runId]));",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "F1 marker deduplication permits three slots and release repoints it"
   },
   {
     "name": "kernel F1F3：釋放保留舊指向",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "if (legacy && !released.has(legacy.runId) &&",
-    "to": "if (legacy &&",
+    "from": "    if (targets.length) want = marker && ids.has(marker.runId) ? marker : { runId: targets[0].runId, at: targets[0].acquiredAt };",
+    "to": "    if (targets.length) want = marker && (ids.has(marker.runId) || released.has(marker.runId)) ? marker : { runId: targets[0].runId, at: targets[0].acquiredAt };",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "F1 marker deduplication permits three slots and release repoints it"
   },
   {
     "name": "kernel F1F3：start 失敗不回收名額",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "if (!own) { rmSync(slotPath(store.runId), { force: true }); reclaimed.add(store.runId); }",
-    "to": "if (!own) { reclaimed.add(store.runId); }",
+    "from": "      if (!own || own.legacy) rmSync(slotPath(store.runId), { force: true });",
+    "to": "      if ((false as boolean)) rmSync(slotPath(store.runId), { force: true });",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "F1 failed starts restore remaining marker and release the last reservation"
   },
@@ -5513,16 +5513,16 @@
   {
     "name": "kernel F1F3：wx 競爭後忽略舊版持有者",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "} catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }",
-    "to": "} catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; return null; }",
+    "from": "    if (putMarker(want) && readLegacyLock()?.runId === want.runId) return;",
+    "to": "    if (putMarker(want) || true) return;",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "F1 legacy wx winner is preserved when new marker creation races"
   },
   {
     "name": "kernel F1F3：多名額時漏補遺失標記",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "const target = slots[0];",
-    "to": "const target = slots.length === 1 ? slots[0] : undefined;",
+    "from": "    if (targets.length) want = marker && ids.has(marker.runId) ? marker : { runId: targets[0].runId, at: targets[0].acquiredAt };",
+    "to": "    if (targets.length) want = marker && ids.has(marker.runId) ? marker : !marker && targets.length > 1 ? null : { runId: targets[0].runId, at: targets[0].acquiredAt };",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "F1 acquisition rejection and release repair a deleted legacy marker"
   },
@@ -5693,5 +5693,53 @@
     "to": "keep: async () => false",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "G3 failed runner launch releases the slot"
+  },
+  {
+    "name": "kernel G2：舊版 run 持鎖時新版放行仍沿用它的標記",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "    if (targets.length) want = marker && ids.has(marker.runId) ? marker : { runId: targets[0].runId, at: targets[0].acquiredAt };",
+    "to": "    if (targets.length) want = marker && (ids.has(marker.runId) || foreign && recordLegacy(marker)) ? marker : { runId: targets[0].runId, at: targets[0].acquiredAt };",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "G2 legacy-held marker moves to a new slot"
+  },
+  {
+    "name": "kernel G2：repo 判斷不了的舊版 run 不擋同 repo",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "      const same = others.filter(slot => !slot.keys || slot.keys.common",
+    "to": "      const same = others.filter(slot => !slot.keys ? false : slot.keys.common",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "unknown repo blocks every repo"
+  },
+  {
+    "name": "kernel G2a：最後釋放保留指向已終止 run 的標記",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "    else if (foreign) want = marker;",
+    "to": "    else if (marker && !released.has(marker.runId)) want = marker;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "G2a last release reclaims a marker naming a terminal or missing run"
+  },
+  {
+    "name": "kernel G2b：標記指向自己且無名額檔時誤判成舊版核准",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "      reconcileLegacyMarker([...active, candidate], reclaimed, true);",
+    "to": "      if (readLegacyLock()?.runId === store.runId && !own && replayJournal(store.read()).state === 'awaiting_approval') throw new AdmissionBlocked('slots_full', [store.runId], '舊版正在核准');\n      reconcileLegacyMarker([...active, candidate], reclaimed, true);",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "G2b own marker left before the slot write"
+  },
+  {
+    "name": "kernel G2c：讀取後才用 wx 搶到的舊版 launcher 被取出卻沒記錄",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "      if (taken && taken.runId !== want?.runId && !ids.has(taken.runId) && !released.has(taken.runId) && recordLegacy(taken)) captured = true;",
+    "to": "      if (taken && taken.runId === marker.runId && taken.runId !== want?.runId && !ids.has(taken.runId) && !released.has(taken.runId) && recordLegacy(taken)) captured = true;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "G2c repointing never overwrites an old launcher"
+  },
+  {
+    "name": "kernel G4：e2e 沒設 CLAUDE_CLI_NAME，Claude 照預設從 PATH 找",
+    "file": "tests/verify-ai-cli_kernel-e2e.mjs",
+    "from": "  CLAUDE_CLI_NAME: CLAUDE_STUB,",
+    "to": "",
+    "script": "verify-ai-cli_kernel-e2e.mjs",
+    "expect": "額度查詢的 Claude 走測試替身"
   }
 ]
