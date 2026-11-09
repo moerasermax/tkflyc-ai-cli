@@ -24,10 +24,14 @@ const work = mkdtempSync(join(tmpdir(), 'kernel-concurrency-'));
 const children = new Set();
 const commandControls = [];
 let count = 0;
+const suiteStarted = Date.now();
+/** 每組印耗時：npm test 的 runner 只在最後印彙總，kernel 逾時砍掉時看不到卡在哪一組、每組多久。 */
+const elapsed = since => `${((Date.now() - since) / 1000).toFixed(1)}s`;
 async function test(name, fn) {
   if (process.env.KERNEL_CONCURRENCY_TEST_FILTER && !name.includes(process.env.KERNEL_CONCURRENCY_TEST_FILTER)) return;
-  try { await fn(); console.log(`PASS C ${name}`); count++; }
-  catch (error) { console.error(`FAIL C ${name}`); throw error; }
+  const started = Date.now();
+  try { await fn(); console.log(`PASS C ${name} (${elapsed(started)})`); count++; }
+  catch (error) { console.error(`FAIL C ${name} (${elapsed(started)})`); throw error; }
 }
 function git(folder, ...args) {
   const result = spawnSync('git', ['-C', folder, ...args], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
@@ -953,7 +957,8 @@ try {
     const a = fresh();
     let calls = 0;
     const stop = startLegacyMarkerWatch(a, 20, async store => { assert.equal(store, a); calls++; });
-    await new Promise(resolve => setTimeout(resolve, 200));
+    // Poll instead of a fixed sleep: done as soon as two checks ran, bounded so a stuck watch still fails.
+    for (const until = Date.now() + 5000; calls < 2 && Date.now() < until;) await new Promise(resolve => setTimeout(resolve, 10));
     stop();
     const seen = calls;
     assert.ok(seen >= 2, `checked ${seen} times`);
@@ -986,7 +991,7 @@ try {
   });
   await clear();
   assert.ok(count > 0, 'refuse an empty test selection');
-  console.log(`PASS C ${count} groups (real cross-process admission and command overlap checks)`);
+  console.log(`PASS C ${count} groups (real cross-process admission and command overlap checks) in ${elapsed(suiteStarted)}`);
 } catch (error) {
   console.error(error.stack);
   throw error;

@@ -36,6 +36,7 @@
 - H2（8a63 交付後的獨立稽核）：新版 runner 每 20 秒檢查一次 `active.lock`，標記缺失或沒指向新版名額時才進 admission 互斥補回；互斥忙碌就跳過，其他錯誤只記新的 `legacy_marker_check_failed` journal 事件（不是 state，replay 不讀），不影響 run 的狀態。原因是舊版釋放「讀到自己的 runId 就刪」是先讀後刪，可能在新版剛改指向後刪掉新版的標記；這是舊版本身的問題，新版消除不了，只能縮短沒有標記的時間。平常只讀檔、不進互斥，避免每個 run 定期搶 admission。（@moerasermax）
 - H3（8a63 交付後的獨立稽核）：`admitRun` 被拒時的 catch 路徑，會把指向舊版 awaiting_approval run 的標記改指向既有新版名額，並把該舊版 run 記成 legacy 紀錄。這和「指向 awaiting_approval 的舊鎖保留」的字面不同，稽核後決定保留行為、補上測試與文件：G2 主規則（有新版名額時標記一定指向新版名額）優先，否則舊版 run 結束會刪掉標記；而該 run 仍以 legacy 紀錄計入硬上限與同 repo，沒有 run 因此被放行。H1～H3 只用模擬舊版的測試驗證，真的新舊版 MCP server 同時在跑的情境沒有實測。（@moerasermax）
 - H4（使用者 2026-11-09 的決定）：kernel 的 write worker 提示詞加上通用的刪檔規則：刪除檔案若被 hook 或權限擋下，不要換別的方式繞過（改用其他指令、覆寫成空檔、搬移），在回覆列出路徑與確切指令交給人執行，刪除完成前不要在 CHANGELOG 或文件寫成已刪除；decide 的 develop 規則對應加上「刪除被擋不要換方式重派，寫進報告的尚待確認」。原因是有些使用者的 hook 會刻意擋下刪除，上一輪 worker 刪檔被擋下，CHANGELOG 卻寫成已移除。read worker 不能改檔，不加這條。這是提示詞，不是強制機制。（@moerasermax）
+- H1～H4 交付時 kernel 的 npm test 判逾時，查明不是卡住：kernel 的測試指令期限是 `maxActionMinutes`（develop 預設 45 分鐘），這次跑到第 45 分鐘被結束，當時 concurrency 剛過 G2c；上兩輪同一套測試已經要 2278～2523 秒（38～42 分鐘），這輪測試多一支，執行期間同機還有其他 kernel run 的 worker 在跑。照 npm test 的方式單獨跑 concurrency 兩次都全過（338.5 秒、325.2 秒），H1～H3 新增的 7 組合計約 19 秒，主要花在 journal 的 fsync，不是 sleep。concurrency 測試改成每組 PASS／FAIL 行附耗時、結尾附總耗時，下次被砍時看得出卡在哪一組；FAIL 行仍包含斷言名稱，突變 harness 的 expect 比對不受影響。「H2 runner watch」原本固定睡 200 毫秒再算次數，改成看到兩次檢查就停、最多等 5 秒，次數與停止後不再檢查的斷言不變。完整 npm test 會不會超過 45 分鐘，取決於機器負載，這次沒有在 kernel 外重跑完整 npm test。
 
 ### 新增
 
