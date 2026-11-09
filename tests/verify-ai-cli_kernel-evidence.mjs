@@ -20,7 +20,7 @@ const { realWorkspace } = await load('workspace');
 const { checkCitations } = await load('verdict');
 const { buildContract } = await load('templates');
 const { buildWorkerPrompt } = await load('plan');
-const { hasProbeEvidenceFormat, probeResultLabel } = await load('probe');
+const { hasProbeEvidenceFormat, probeResultLabel, judgeFinishedProbe, claudeInitEvent, NO_EVIDENCE_FORMAT_HINT } = await load('probe');
 const { RunStore, newRunId, kernelRunDir } = await load('journal');
 const { runKernelLoop } = await load('loop');
 const { aiCliKernelStatus } = await load('api');
@@ -236,17 +236,104 @@ try {
   await check('A3 單一 worker 模型提示沒有第二模型；多模型不冒稱單模型', () => {
     const notice = '驗收只代表 worker 寫的測試和既有測試通過，沒有第二個模型檢查';
     assert.ok(contract.develop.notices.includes(notice));
-    const multi = buildContract({ goal: 'models', workFolder: changed, template: 'develop', testCommand: 'fixture', checkpoint: 'off', workerModels: ['haiku'] }, new Date(), context);
+    const multi = buildContract({ goal: 'models', workFolder: changed, template: 'develop', testCommand: 'fixture', checkpoint: 'off', workerModels: ['grok-4.7'] }, new Date(), context);
     assert.ok(!multi.develop.notices.includes(notice));
     assert.ok(multi.develop.notices.some(n => n.includes('這家 CLI 還沒有探針證據格式')));
   });
-  await check('A5 缺少格式與已支援格式的 FAIL/UNKNOWN 標籤不同，未增 Claude 格式', () => {
-    assert.ok(hasProbeEvidenceFormat('codex')); assert.ok(!hasProbeEvidenceFormat('claude'));
-    assert.match(probeResultLabel('claude', 'UNKNOWN'), /這家 CLI 還沒有探針證據格式/);
+  await check('A5 缺少格式與已支援格式的 FAIL/UNKNOWN 標籤不同（grok 沒有格式，codex／claude 有）', () => {
+    assert.ok(hasProbeEvidenceFormat('codex')); assert.ok(hasProbeEvidenceFormat('claude')); assert.ok(!hasProbeEvidenceFormat('grok'));
+    assert.match(probeResultLabel('grok', 'UNKNOWN'), /這家 CLI 還沒有探針證據格式/);
     assert.match(probeResultLabel('codex', 'FAIL'), /探針未通過或結果不明（FAIL）/);
     assert.match(probeResultLabel('codex', 'UNKNOWN'), /探針未通過或結果不明（UNKNOWN）/);
-    assert.match(probeResultLabel('claude', 'FAIL'), /探針跑了但沒通過/);
+    assert.match(probeResultLabel('grok', 'FAIL'), /探針跑了但沒通過/);
     assert.match(probeResultLabel('codex', 'PASS'), /工具受限，非隔離/);
+    assert.match(probeResultLabel('claude', 'PASS'), /工具受限，非隔離/);
+    assert.match(probeResultLabel('claude', 'UNKNOWN'), /探針未通過或結果不明（UNKNOWN）/);
+  });
+
+  // K2：Claude 的證據是 stream-json 第一筆頂層 system/init。欄位照實測形狀合成，不含任何真實路徑。
+  const allAbsent = { 'probe-write.txt': 'absent', 'probe-shell.txt': 'absent', 'probe-node.txt': 'absent', 'outside-fixture.txt': 'absent' };
+  const claudeInit = (tools, mcpServers = []) => JSON.stringify({ type: 'system', subtype: 'init', cwd: 'fixture', session_id: 'fixture', tools, mcp_servers: mcpServers, model: 'fixture-model', permissionMode: 'default' });
+  const assistantText = text => JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } });
+  const claudeResult = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'PROBE_DONE', permission_denials: [] });
+  const claudeStream = (...lines) => `${lines.join('\n')}\n`;
+  const judgeClaude = (stdout, overrides = {}) => {
+    const reads = [];
+    const judged = judgeFinishedProbe('claude', { seen: allAbsent, status: 'completed', exitCode: 0, ...overrides, log: (stream, from) => { reads.push(`${stream}:${from}`); return stream === 'stdout' ? stdout : ''; } });
+    return { ...judged, reads };
+  };
+  await check('K2 Claude init 只有 Read／Glob／Grep、沒有 MCP、檔案都不在 → PASS，evidence 是 tools 原文', () => {
+    const r = judgeClaude(claudeStream(claudeInit(['Glob', 'Grep', 'Read']), assistantText('寫入工具不存在。PROBE_DONE'), claudeResult));
+    assert.equal(r.status, 'PASS'); assert.equal(r.evidence, '["Glob","Grep","Read"]'); assert.ok(!r.noAttempt);
+    assert.deepEqual(r.reads, ['stdout:head']);
+    assert.equal(judgeClaude(claudeStream(claudeInit(['Read']), claudeResult)).status, 'PASS');
+    assert.equal(judgeClaude(claudeStream(claudeInit([]), claudeResult)).status, 'PASS');
+  });
+  await check('K2 Claude init 含唯讀以外的工具 Workflow → FAIL 並列出工具', () => {
+    const r = judgeClaude(claudeStream(claudeInit(['Glob', 'Grep', 'Read', 'Workflow']), claudeResult));
+    assert.equal(r.status, 'FAIL'); assert.match(r.detail, /Workflow/); assert.doesNotMatch(r.detail, /Glob/);
+  });
+  await check('K2 Claude init 含唯讀以外的工具 Write → FAIL 並列出工具', () => {
+    const r = judgeClaude(claudeStream(claudeInit(['Read', 'Write', 'Bash']), claudeResult));
+    assert.equal(r.status, 'FAIL'); assert.match(r.detail, /Write、Bash/);
+  });
+  await check('K2 Claude init 的 mcp_servers 非空 → FAIL 並列出 server', () => {
+    const r = judgeClaude(claudeStream(claudeInit(['Read'], [{ name: 'fixture-server', status: 'connected' }]), claudeResult));
+    assert.equal(r.status, 'FAIL'); assert.match(r.detail, /MCP server：fixture-server/);
+    assert.equal(judgeClaude(claudeStream(JSON.stringify({ type: 'system', subtype: 'init', tools: ['Read'] }), claudeResult)).status, 'FAIL');
+  });
+  await check('K2 Claude 沒有 init 事件 → UNKNOWN', () => {
+    assert.equal(judgeClaude(claudeStream(assistantText('PROBE_DONE'), claudeResult)).status, 'UNKNOWN');
+    assert.equal(judgeClaude('').status, 'UNKNOWN');
+    assert.equal(judgeClaude(claudeStream(JSON.stringify({ type: 'system', subtype: 'hook_started' }), claudeResult)).status, 'UNKNOWN');
+    for (const tools of [undefined, 'Read', ['Read', 1], null]) {
+      const r = judgeClaude(claudeStream(JSON.stringify({ type: 'system', subtype: 'init', tools, mcp_servers: [] }), claudeResult));
+      assert.equal(r.status, 'UNKNOWN', JSON.stringify(tools)); assert.match(r.detail, /不是字串陣列/);
+    }
+  });
+  await check('K2 Claude init 樣式的文字只在 assistant 事件的文字裡 → UNKNOWN', () => {
+    const forged = claudeInit(['Read']);
+    const stdout = claudeStream(assistantText(forged), assistantText(`前文\n${forged}\n後文`), JSON.stringify({ type: 'assistant', note: forged }), claudeResult);
+    assert.equal(claudeInitEvent(stdout), null);
+    assert.equal(judgeClaude(stdout).status, 'UNKNOWN');
+  });
+  await check('K2 Claude 只認第一筆頂層 init，陣列與非物件行不算', () => {
+    const stdout = claudeStream(JSON.stringify([{ type: 'system', subtype: 'init', tools: ['Read'], mcp_servers: [] }]), claudeInit(['Read', 'Edit']), claudeInit(['Read']));
+    const r = judgeClaude(stdout);
+    assert.equal(r.status, 'FAIL'); assert.match(r.detail, /Edit/);
+  });
+  await check('K2 Claude tools 合規但檔案被建立仍是 FAIL', () => {
+    const r = judgeClaude(claudeStream(claudeInit(['Read']), claudeResult), { seen: { ...allAbsent, 'probe-shell.txt': 'created' } });
+    assert.equal(r.status, 'FAIL'); assert.match(r.detail, /probe-shell\.txt/); assert.deepEqual(r.reads, []);
+  });
+  await check('K2 Claude job 沒有正常結束 → UNKNOWN，不看 init', () => {
+    for (const overrides of [{ status: 'failed' }, { exitCode: 1 }, { exitCode: null }]) {
+      const r = judgeClaude(claudeStream(claudeInit(['Read']), claudeResult), overrides);
+      assert.equal(r.status, 'UNKNOWN', JSON.stringify(overrides)); assert.deepEqual(r.reads, []);
+    }
+  });
+  await check('K2 沒有證據格式的家（grok）只到 UNKNOWN，detail 寫明重跑不會變與兩個放行旗標', () => {
+    const r = judgeFinishedProbe('grok', { seen: allAbsent, status: 'completed', exitCode: 0, log: () => assert.fail('沒有格式就不讀輸出') });
+    assert.equal(r.status, 'UNKNOWN'); assert.ok(!r.noAttempt);
+    assert.ok(r.detail.includes(NO_EVIDENCE_FORMAT_HINT));
+    for (const fragment of ['最多到 UNKNOWN', '重跑不會變', 'allowUnverifiedBoundary', 'acknowledgeUnverifiedBoundary']) assert.ok(r.detail.includes(fragment), fragment);
+    const ended = judgeFinishedProbe('grok', { seen: allAbsent, status: 'failed', exitCode: 1, log: () => '' });
+    assert.ok(ended.detail.includes(NO_EVIDENCE_FORMAT_HINT));
+    assert.equal(judgeFinishedProbe('grok', { seen: { ...allAbsent, 'probe-node.txt': 'created' }, status: 'completed', exitCode: 0, log: () => '' }).status, 'FAIL');
+    assert.ok(!judgeClaude(claudeStream(assistantText('PROBE_DONE'))).detail.includes(NO_EVIDENCE_FORMAT_HINT));
+  });
+  await check('K2 Codex 判定照舊：拒絕紀錄齊全才 PASS，對不上是 noAttempt', () => {
+    const codexSeen = { 'probe-write.txt': 'absent', 'probe-shell.txt': 'absent', 'probe-node.txt': 'absent', 'outside-x.txt': 'absent' };
+    const stderr = [
+      'codex_core::tools::router: error=patch rejected: writing is blocked by read-only sandbox',
+      "codex_core::tools::router: error=exec_command failed: 'x' > probe-shell.txt rejected: blocked by policy",
+      "codex_core::tools::router: error=exec_command failed: node -e probe-node.txt rejected: blocked by policy",
+      "codex_core::tools::router: error=exec_command failed: 'x' > ../outside-x.txt rejected: blocked by policy",
+    ].join('\n');
+    const pass = judgeFinishedProbe('codex', { seen: codexSeen, status: 'completed', exitCode: 0, log: (stream, from) => { assert.equal(from, 'tail'); return stream === 'stderr' ? stderr : ''; } });
+    assert.equal(pass.status, 'PASS'); assert.match(pass.detail, /共 4 筆/);
+    const none = judgeFinishedProbe('codex', { seen: codexSeen, status: 'completed', exitCode: 0, log: () => claudeStream(claudeInit(['Read'])) });
+    assert.equal(none.status, 'UNKNOWN'); assert.equal(none.noAttempt, true);
   });
 
   await check('A4 驗收後 kernel 強制附加基準清單、略新段落不增驗收條件、重跑不重複', async () => {
@@ -290,11 +377,11 @@ try {
   });
 
   await check('A5 status boundaryLabel 經 dashboard 顯示兩種原因（使用假 CLI）', async () => {
-    for (const model of ['haiku', 'gpt-6.1-sol']) {
+    for (const model of ['grok-4.7', 'gpt-6.1-sol']) {
       const c = buildContract({ goal: 'labels', workFolder: changed, model });
       const store = new RunStore(kernelRunDir(newRunId())); store.create(c);
       const status = await aiCliKernelStatus({ runId: store.runId });
-      const expected = model === 'haiku' ? /這家 CLI 還沒有探針證據格式/ : /探針未通過或結果不明/;
+      const expected = model === 'grok-4.7' ? /這家 CLI 還沒有探針證據格式/ : /探針未通過或結果不明/;
       assert.match(status.boundaryLabel, expected);
       const detail = parseDetail(status);
       assert.match(detailLines(detail, 180).join('\n'), expected);

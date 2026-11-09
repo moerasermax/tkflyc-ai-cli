@@ -22,6 +22,17 @@ export function readJobLogTail(jobId: string, stream: 'stdout' | 'stderr', bytes
   return buffer.toString('utf8');
 }
 
+/** 從檔頭讀。Claude 的 init 事件是 stream-json 的第一筆，輸出一長，尾端就看不到它。 */
+export function readJobLogHead(jobId: string, stream: 'stdout' | 'stderr', bytes = TAIL_BYTES): string {
+  const path = join(jobStateDir(), 'jobs', jobId, `${stream}.log`);
+  if (!existsSync(path)) return '';
+  const length = Math.min(statSync(path).size, bytes);
+  const buffer = Buffer.alloc(length);
+  const fd = openSync(path, 'r');
+  try { readSync(fd, buffer, 0, length, 0); } finally { closeSync(fd); }
+  return buffer.toString('utf8');
+}
+
 function toUsage(raw: unknown): UsageCount | null {
   const usage = raw as { input_tokens?: unknown; cached_input_tokens?: unknown; output_tokens?: unknown; incomplete?: unknown } | null | undefined;
   if (!usage || typeof usage.input_tokens !== 'number' || typeof usage.output_tokens !== 'number' || usage.incomplete === true) return null;

@@ -5260,7 +5260,63 @@
     "from": "export function hasProbeEvidenceFormat(agent: string): boolean { return EVIDENCE_AGENTS.has(agent); }",
     "to": "export function hasProbeEvidenceFormat(agent: string): boolean { return true; }",
     "script": "verify-ai-cli_kernel-evidence.mjs",
-    "expect": "A5 缺少格式與已支援格式的 FAIL/UNKNOWN 標籤不同，未增 Claude 格式"
+    "expect": "A5 缺少格式與已支援格式的 FAIL/UNKNOWN 標籤不同"
+  },
+  {
+    "name": "kernel K2：Claude 探針不看 mcp_servers",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  else if (servers.length > 0) problems.push(",
+    "to": "  else if (servers.length > 99) problems.push(",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K2 Claude init 的 mcp_servers 非空 → FAIL"
+  },
+  {
+    "name": "kernel K2：Claude 探針不看唯讀以外的工具",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  if (extraTools.length > 0) problems.push(",
+    "to": "  if (extraTools.length < 0) problems.push(",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K2 Claude init 含唯讀以外的工具"
+  },
+  {
+    "name": "kernel K2：Claude init 也從 assistant 文字裡找",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "try { parsed = JSON.parse(text); } catch { continue; }",
+    "to": "try { parsed = JSON.parse(text); const inner = (parsed as { message?: { content?: Array<{ text?: unknown }> } } | null)?.message?.content?.[0]?.text; if (typeof inner === 'string') parsed = JSON.parse(inner); } catch { continue; }",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K2 Claude init 樣式的文字只在 assistant 事件的文字裡"
+  },
+  {
+    "name": "kernel K2：claude 移出探針證據格式",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "const EVIDENCE_AGENTS = new Set(['codex', 'claude']);",
+    "to": "const EVIDENCE_AGENTS = new Set(['codex']);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K2 Claude init 只有 Read／Glob／Grep"
+  },
+  {
+    "name": "kernel K2：Claude init 從輸出尾端找",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "if (agent === 'claude') return claudeToolEvidence(probe.log('stdout', 'head'));",
+    "to": "if (agent === 'claude') return claudeToolEvidence(probe.log('stdout', 'tail'));",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K2 Claude init 只有 Read／Glob／Grep"
+  },
+  {
+    "name": "kernel K2：Claude 檔案被建立不判 FAIL",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  if (created.length > 0) return { status: 'FAIL'",
+    "to": "  if (created.length > 0 && agent !== 'claude') return { status: 'FAIL'",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K2 Claude tools 合規但檔案被建立仍是 FAIL"
+  },
+  {
+    "name": "kernel K2：沒有格式的家缺出路說明",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  if (status !== 'UNKNOWN' || hasProbeEvidenceFormat(agent) || detail.includes(NO_EVIDENCE_FORMAT_HINT)) return detail;",
+    "to": "  if (status !== 'UNKNOWN' || hasProbeEvidenceFormat(agent) || detail.length >= 0) return detail;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K2 沒有證據格式的家（grok）只到 UNKNOWN"
   },
   {
     "name": "kernel D：archive 目標摘要超過八十字",

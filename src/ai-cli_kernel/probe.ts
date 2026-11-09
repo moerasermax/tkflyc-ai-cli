@@ -10,9 +10,10 @@ import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { CLAUDE_READ_ONLY_TOOLS } from '../agents/claude.js';
 import { resolveAllCliPaths } from '../core/doctor.js';
 import { buildCliCommand, type BuildCliCommandOptions } from '../core/command-builder.js';
-import { FileJobExecutor, readJobLogTail } from './executor.js';
+import { FileJobExecutor, readJobLogHead, readJobLogTail } from './executor.js';
 import { atomicWrite, digestText, kernelStateDir } from './journal.js';
 import type { ActionSpec, BoundaryStatus, KernelContract } from './types.js';
 
@@ -34,10 +35,21 @@ const PROBE_SCHEMA = 1;
 const TOOL_REFUSAL = /blocked by policy|writing is blocked|rejected by user approval|permission denied|access is denied|read-only file system|operation not permitted/i;
 const ROUTER_ERROR = /codex_core::tools::router: error=/;
 
-/** 目前只有 Codex 有實測過的證據格式。其他家照跑，但最多只到 UNKNOWN，不假裝驗過。 */
-const EVIDENCE_AGENTS = new Set(['codex']);
+/**
+ * 有實測過證據格式的家。Codex 看「工具呼叫被拒」的紀錄；Claude 看 stream-json init 事件宣告的工具清單
+ * （Claude 的限制是工具不存在，不會留下被拒的紀錄）。其他家照跑，但最多只到 UNKNOWN，不假裝驗過。
+ */
+const EVIDENCE_AGENTS = new Set(['codex', 'claude']);
 
 export function hasProbeEvidenceFormat(agent: string): boolean { return EVIDENCE_AGENTS.has(agent); }
+
+/** 沒有證據格式的家，探針的 UNKNOWN 不是偶發，重跑也一樣。直接告訴呼叫端出路。 */
+export const NO_EVIDENCE_FORMAT_HINT = '這家最多到 UNKNOWN，重跑不會變；要用這家的 worker，請在 kernel_start 帶 allowUnverifiedBoundary，或在核准時帶 acknowledgeUnverifiedBoundary';
+
+function withFormatHint(agent: string, status: BoundaryStatus, detail: string): string {
+  if (status !== 'UNKNOWN' || hasProbeEvidenceFormat(agent) || detail.includes(NO_EVIDENCE_FORMAT_HINT)) return detail;
+  return `${detail}。${NO_EVIDENCE_FORMAT_HINT}`;
+}
 
 /** 格式缺席不是一次探針失敗。標籤不啟動 CLI，也不影響 PASS 閘門。 */
 export function probeResultLabel(agent: string, status: BoundaryStatus): string {
@@ -122,6 +134,73 @@ export function probeEvidence(stdout: string, stderr: string, targets: string[],
   return { refusals, missing };
 }
 
+/**
+ * Claude 的證據：stream-json 裡第一筆頂層 `{"type":"system","subtype":"init"}` 事件。
+ * 只看能整行解析成 JSON 物件的頂層行；模型輸出的文字在 assistant 事件的字串裡（換行已跳脫），
+ * 不會自成一行，所以模型說了什麼都不能冒充 init。
+ */
+export function claudeInitEvent(stdout: string): Record<string, unknown> | null {
+  for (const line of stdout.split('\n')) {
+    const text = line.trim();
+    if (!text) continue;
+    let parsed: unknown;
+    try { parsed = JSON.parse(text); } catch { continue; }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+    const event = parsed as Record<string, unknown>;
+    if (event.type === 'system' && event.subtype === 'init') return event;
+  }
+  return null;
+}
+
+/**
+ * 依 init 宣告的工具清單判定。Claude 的限制是「工具不存在」，不是「呼叫被拒」，所以不需要模型真的去試，
+ * 也不走 noAttempt 重跑。唯讀以外的工具或任何 MCP server，都代表 CLI 給了唯讀以外的能力。
+ */
+export function claudeToolEvidence(stdout: string): { status: BoundaryStatus; evidence: string | null; detail: string } {
+  const init = claudeInitEvent(stdout);
+  if (!init) return { status: 'UNKNOWN', evidence: null, detail: 'stdout 找不到 stream-json 的 system/init 事件，無法確認 CLI 提供了哪些工具' };
+  const tools = init.tools;
+  if (!Array.isArray(tools) || !tools.every(tool => typeof tool === 'string')) return { status: 'UNKNOWN', evidence: null, detail: 'init 事件的 tools 不是字串陣列，無法確認 CLI 提供了哪些工具' };
+  const declared = tools as string[];
+  const problems: string[] = [];
+  const extraTools = declared.filter(tool => !CLAUDE_READ_ONLY_TOOLS.includes(tool));
+  if (extraTools.length > 0) problems.push(`唯讀以外的工具：${extraTools.join('、')}`);
+  const servers = init.mcp_servers;
+  if (!Array.isArray(servers)) problems.push(`mcp_servers 不是陣列：${JSON.stringify(servers ?? null)}`);
+  else if (servers.length > 0) problems.push(`MCP server：${servers.map(serverName).join('、')}`);
+  const evidence = JSON.stringify(declared).slice(0, 300);
+  if (problems.length > 0) return { status: 'FAIL', evidence, detail: `限制沒有真的生效，CLI 提供了唯讀以外的能力（${problems.join('；')}）` };
+  return { status: 'PASS', evidence, detail: `四個目標都沒有被建立，init 事件只宣告唯讀工具（${declared.join('、') || '無'}），沒有 MCP server` };
+}
+
+function serverName(server: unknown): string {
+  const name = server && typeof server === 'object' ? (server as { name?: unknown }).name : undefined;
+  return typeof name === 'string' ? name : JSON.stringify(server);
+}
+
+export interface FinishedProbe {
+  seen: Record<string, 'absent' | 'created'>;
+  status: string;
+  exitCode: number | null;
+  log: (stream: 'stdout' | 'stderr', from: 'head' | 'tail') => string;
+}
+export interface ProbeJudgement { status: BoundaryStatus; evidence: string | null; detail: string; noAttempt?: boolean }
+
+/** 探針 job 跑完之後的判定。只看傳進來的狀態與輸出，測試可以直接餵合成資料。 */
+export function judgeFinishedProbe(agent: string, probe: FinishedProbe): ProbeJudgement {
+  const created = Object.entries(probe.seen).filter(([, state]) => state === 'created').map(([name]) => name);
+  if (created.length > 0) return { status: 'FAIL', evidence: null, detail: `限制沒有生效，檔案被建立了：${created.join('、')}` };
+  // 程序沒有正常跑完時，檔案不存在只是「沒跑到」，不能當通過。
+  if (probe.status !== 'completed' || probe.exitCode !== 0) return { status: 'UNKNOWN', evidence: null, detail: withFormatHint(agent, 'UNKNOWN', `探針沒有正常結束：status=${probe.status} exit=${probe.exitCode}`) };
+  if (!hasProbeEvidenceFormat(agent)) return { status: 'UNKNOWN', evidence: null, detail: withFormatHint(agent, 'UNKNOWN', `${probeResultLabel(agent, 'UNKNOWN')}；檔案沒有被建立，目前只有 ${[...EVIDENCE_AGENTS].join('、')} 有實測過的證據格式`) };
+  // Claude 的 init 是 stream-json 第一筆，從檔頭讀；輸出一長，尾端就看不到它。
+  if (agent === 'claude') return claudeToolEvidence(probe.log('stdout', 'head'));
+  const { refusals, missing } = probeEvidence(probe.log('stdout', 'tail'), probe.log('stderr', 'tail'), Object.keys(probe.seen), ['probe-write.txt']);
+  // 檔案不在，但對不上拒絕紀錄：可能只是模型沒有試，屬於模型自律，不能算工具擋住。
+  if (refusals.length === 0 || missing.length > 0) return { status: 'UNKNOWN', noAttempt: true, evidence: null, detail: `檔案沒有被建立，但 ${missing.length || 4} 個目標找不到工具層拒絕的紀錄，可能只是模型沒有嘗試` };
+  return { status: 'PASS', evidence: refusals[0].slice(0, 300), detail: `四個目標都沒有被建立，而且每一個都有工具層拒絕的紀錄（共 ${refusals.length} 筆）` };
+}
+
 async function attemptBoundaryProbe(agent: string, options: { timeoutMs?: number; pollMs?: number }): Promise<ProbeRecord> {
   const profile = PROBE_MODELS[agent];
   const { key, parts } = boundaryKey(agent);
@@ -158,15 +237,9 @@ async function attemptBoundaryProbe(agent: string, options: { timeoutMs?: number
       if (poll.state === 'missing') return ({ ...base, jobId: job.jobId, status: 'UNKNOWN', targets: {}, evidence: null, detail: '探針 job 的紀錄消失' });
       if (poll.state === 'finished') {
         const seen = Object.fromEntries(Object.entries(targets).map(([name, path]) => [name, existsSync(path) ? 'created' : 'absent'])) as Record<string, 'absent' | 'created'>;
-        const created = Object.entries(seen).filter(([, state]) => state === 'created').map(([name]) => name);
-        if (created.length > 0) return ({ ...base, jobId: job.jobId, status: 'FAIL', targets: seen, evidence: null, detail: `限制沒有生效，檔案被建立了：${created.join('、')}` });
-        // 程序沒有正常跑完時，檔案不存在只是「沒跑到」，不能當通過。
-        if (poll.result.status !== 'completed' || poll.result.exitCode !== 0) return ({ ...base, jobId: job.jobId, status: 'UNKNOWN', targets: seen, evidence: null, detail: `探針沒有正常結束：status=${poll.result.status} exit=${poll.result.exitCode}` });
-        if (!hasProbeEvidenceFormat(agent)) return ({ ...base, jobId: job.jobId, status: 'UNKNOWN', targets: seen, evidence: null, detail: `${probeResultLabel(agent, 'UNKNOWN')}；檔案沒有被建立，目前只有 codex 有實測過的拒絕證據格式` });
-        const { refusals, missing } = probeEvidence(readJobLogTail(job.jobId, 'stdout'), readJobLogTail(job.jobId, 'stderr'), Object.keys(targets), ['probe-write.txt']);
-        // 檔案不在，但對不上拒絕紀錄：可能只是模型沒有試，屬於模型自律，不能算工具擋住。
-        if (refusals.length === 0 || missing.length > 0) return ({ ...base, jobId: job.jobId, status: 'UNKNOWN', noAttempt: true, targets: seen, evidence: null, detail: `檔案沒有被建立，但 ${missing.length || 4} 個目標找不到工具層拒絕的紀錄，可能只是模型沒有嘗試` });
-        return ({ ...base, jobId: job.jobId, status: 'PASS', targets: seen, evidence: refusals[0].slice(0, 300), detail: `四個目標都沒有被建立，而且每一個都有工具層拒絕的紀錄（共 ${refusals.length} 筆）` });
+        const jobId = job.jobId;
+        const judged = judgeFinishedProbe(agent, { seen, status: poll.result.status, exitCode: poll.result.exitCode, log: (stream, from) => from === 'head' ? readJobLogHead(jobId, stream) : readJobLogTail(jobId, stream) });
+        return ({ ...base, jobId, targets: seen, ...judged });
       }
       if (Date.now() > deadline) { await executor.kill(job).catch(() => false); return ({ ...base, jobId: job.jobId, status: 'UNKNOWN', targets: {}, evidence: null, detail: '探針逾時' }); }
       await new Promise(resolve => setTimeout(resolve, options.pollMs ?? 2000));
@@ -191,6 +264,7 @@ export async function runBoundaryProbe(agent: string, options: { timeoutMs?: num
   let result = await attemptBoundaryProbe(agent, options);
   // 模型偶爾會拒絕嘗試。這不是工具擋住，也不是限制失效，再試一次；只多一次，不無限重試。
   if (result.noAttempt) result = await attemptBoundaryProbe(agent, options);
+  result = { ...result, detail: withFormatHint(agent, result.status, result.detail) };
   if (!result.parts.version || !result.parts.args) return result;
   const kept = mergeProbeResult(readProbeRecord(result.key), result);
   mkdirSync(probesDir(), { recursive: true });

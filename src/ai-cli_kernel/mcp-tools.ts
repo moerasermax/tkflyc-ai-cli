@@ -96,7 +96,7 @@ const TOOLS = [
   },
   {
     name: 'ai-cli_kernel_probe',
-    description: 'Run the permission boundary probe for an agent: asks a real model to try writing files and checks the result. Consumes a small amount of quota and blocks until done. Required once per CLI version before approving a run.',
+    description: 'Run the permission boundary probe for an agent: asks a real model to try writing files and checks the result. Consumes a small amount of quota and blocks until done. Required once per CLI version before approving a run. Only codex (tool-refusal records) and claude (the tools/mcp_servers declared in the stream-json init event) have an evidence format and can reach PASS; agents without one (currently grok) top out at UNKNOWN and re-running will not change that — to use such a worker, pass allowUnverifiedBoundary to kernel_start or acknowledgeUnverifiedBoundary when approving. PASS means tool-limited, not isolated.',
     inputSchema: {
       type: 'object',
       properties: { agent: { type: 'string', enum: ['codex', 'claude', 'grok'] } },
