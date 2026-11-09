@@ -3,6 +3,9 @@
  * 失敗印 stdout 的 `FAIL <名稱>`，供 tools/mutation-test.mjs 指認對應斷言。
  */
 import '../tools/stubs/catalog-test-env.mjs';
+import { installClaudeQuotaStub } from './helpers/claude-quota-stub.mjs';
+// G4：萬一有路徑走到真的額度查詢，也只會叫到立刻結束的替身，不會啟動真的 Claude CLI。
+installClaudeQuotaStub();
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, appendFileSync, writeFileSync, renameSync, symlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -659,6 +662,8 @@ check('引用範圍正確才算', checkCitations('見 README.md:1-2', WORK, 1).p
 /* ---- 一次一個 ---- */
 {
   const a = 'kr-20260101-000000-aaaa', b = 'kr-20260101-000000-bbbb';
+  // 持鎖的必須是真的 run：最後一個名額釋放時，指向不存在 run 的標記會被回收（G2a）。
+  for (const id of [a, b]) new RunStore(kernelRunDir(id)).create(buildContract({ goal: 'x', workFolder: WORK }));
   check('第一個 run 取得鎖', acquireActiveLock(a).ok);
   const second = acquireActiveLock(b);
   check('第二個 run 被擋下並指出誰佔用', !second.ok && second.heldBy === a);
@@ -2292,10 +2297,20 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   } });
   check('主動觸發：未結束動作不能當成已知零用量', (await invoke()).detail.includes('用量未知'));
   await clear();
-  const crashed = await invoke('trigger-audit', { launch: async () => { throw new Error('fake launcher failed'); } });
+  // launcher 回報失敗時 runner 其實已經認領（runner.json 指向活著的行程）：名額可能還在用，必須保留。
+  const { processIdentity } = await load('process-mutex');
+  const crashed = await invoke('trigger-audit', { launch: async store => {
+    writeFileSync(store.runnerPath, JSON.stringify(await processIdentity())); throw new Error('fake launcher failed');
+  } });
   check('主動觸發：啟動失敗不重試且保留鎖與名額', crashed.reason === 'start_failed' && readActiveRun() === crashed.runId && ledger().filter(row => row.event === 'reserved').length === 1);
   const failedStore = new RunStore(kernelRunDir(crashed.runId));
   check('主動觸發：啟動結果不明的 run 留給人對帳', view(failedStore).state === 'running' && ledger().at(-1).detail.includes('fake launcher failed'));
+  rmSync(failedStore.runnerPath, { force: true });
+  await clear();
+  // runner 沒有起來：釋放並行名額（G3），觸發名額照扣、不重試；run 停在 running＝interrupted，可再 approve 接回。
+  const notStarted = await invoke('trigger-audit', { launch: async () => { throw new Error('fake launcher failed'); } });
+  check('主動觸發：runner 沒起來就釋放並行名額且不重試', notStarted.reason === 'start_failed' && readActiveRun() === null
+    && ledger().filter(row => row.event === 'reserved').length === 1 && view(new RunStore(kernelRunDir(notStarted.runId))).state === 'running', JSON.stringify({ notStarted, active: readActiveRun() }));
   await clear();
   // 有效 JSON 但沒有終止換行：必須由殘行防線擋住，不能靠 JSON.parse 恰巧出錯。
   writeFileSync(ledgerPath, JSON.stringify({ event: 'attempt', mandate: 'trigger-audit', day: day(Date.now()), at: new Date().toISOString(), status: 'skipped', reason: 'test', runId: null, detail: '' }));

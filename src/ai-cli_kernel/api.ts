@@ -15,7 +15,8 @@ import { assertCanStartJob } from '../core/worker-env.js';
 import { FileJobExecutor } from './executor.js';
 import { admitRun, readActiveRuns, type ActiveRun, type AdmissionDeps } from './admission.js';
 import { releaseStoppedTestLock } from './test-lock.js';
-import { atomicWrite, kernelRunDir, listRunIds, newRunId, releaseActiveLock, RunStore } from './journal.js';
+import type { MutexRetryDeps } from './process-mutex.js';
+import { atomicWrite, kernelRunDir, listRunIds, newRunId, recordSlotReleaseFailed, releaseActiveLock, RunStore, SLOT_RELEASE_DEFERRED_NOTE } from './journal.js';
 import { boundaryKey, boundaryStatus, hasProbeEvidenceFormat, probeResultLabel, runBoundaryProbe, type ProbeRecord } from './probe.js';
 import { activeMinutes, nextStep, openActions, replayJournal, unprocessedActions, type RunView } from './replay.js';
 import { agentForModel } from './runtime.js';
@@ -296,7 +297,7 @@ export function aiCliKernelRollback(input: { runId: string; apply?: boolean }): 
 
 export interface KernelApproveInput { runId: string; note?: string; reconcile?: string; acknowledgeUnisolated?: boolean }
 
-export async function aiCliKernelApprove(input: KernelApproveInput, deps: AdmissionDeps & { launch?: (store: RunStore) => Promise<void>; beforeStart?: () => void } = {}): Promise<KernelRunStatus> {
+export async function aiCliKernelApprove(input: KernelApproveInput, deps: AdmissionDeps & { launch?: (store: RunStore) => Promise<void>; beforeStart?: () => void; release?: Partial<MutexRetryDeps> } = {}): Promise<KernelRunStatus> {
   assertCanStartJob();
   const store = storeFor(input.runId);
   const contract = store.readContract();
@@ -333,7 +334,16 @@ export async function aiCliKernelApprove(input: KernelApproveInput, deps: Admiss
     store.append({ type: 'approved', contractDigest: digest, kind: view.state === 'awaiting_approval' ? 'contract' : 'continue', ...(input.note ? { note: input.note } : {}), ...(overrides.length ? { overrides } : {}) });
     store.append({ type: 'state', state: 'running' });
   }, deps);
-  await (deps.launch ?? spawnRunner)(store);
+  try { await (deps.launch ?? spawnRunner)(store); }
+  catch (error) {
+    // runner 沒起來時名額的 owner 是仍活著的這個行程，不會被當成 abandoned 回收，只能等人 cancel。
+    // 先釋放：run 停在 running 又沒有 runner，就是 interrupted，可以再 approve 接回。
+    // keep 在 admission 互斥區內判斷：晚到的 runner 已經認領就保留它的名額；之後才到的由 claimRunnerSlot 擋下。
+    // 釋放出錯只記錄，不能蓋掉原本的啟動錯誤。
+    await releaseActiveLock(store.runId, { deps: deps.release, keep: async () => await aiCliKernelRunnerAlive(store) !== false })
+      .catch(releaseError => recordSlotReleaseFailed(store.runId, `runner 啟動失敗後釋放名額出錯：${(releaseError as Error).message}`));
+    throw error;
+  }
   return statusOf(store);
 }
 
@@ -439,7 +449,7 @@ export async function aiCliKernelWait(input: { runId: string; timeoutSec?: numbe
 const cancelledOutcome: ActionOutcome = { ok: false, failureClass: 'cancelled', detail: '使用者取消', jobStatus: null, exitCode: null, messageFile: null, messageChars: 0, messagePreview: '', usage: null };
 
 /** runner 不在時由這裡收尾。回報 terminated 不算數，要確認程序真的消失。 */
-export async function cancelWithoutRunner(store: RunStore, executor: KernelExecutor, confirmMs = 20000, stopCheck: typeof realWorkspace.stopOrphanCheck = realWorkspace.stopOrphanCheck): Promise<void> {
+export async function cancelWithoutRunner(store: RunStore, executor: KernelExecutor, confirmMs = 20000, stopCheck: typeof realWorkspace.stopOrphanCheck = realWorkspace.stopOrphanCheck, releaseDeps: Partial<MutexRetryDeps> = {}): Promise<void> {
   const before = replayJournal(store.read());
   if (before.openCheck) {
     if (!await stopCheck(before.openCheck).catch(() => false)) {
@@ -485,7 +495,7 @@ export async function cancelWithoutRunner(store: RunStore, executor: KernelExecu
         const job = found === 'unknown' ? null : found;
         if (job) {
           store.append({ type: 'action_started', actionId: action.spec.actionId, job });
-          return cancelWithoutRunner(store, executor, confirmMs, stopCheck);
+          return cancelWithoutRunner(store, executor, confirmMs, stopCheck, releaseDeps);
         }
         store.append({ type: 'state', state: 'stop_pending', reason: 'cannot_verify_start', detail: `查不了動作 ${action.spec.actionId} 是否啟動過` });
         return;
@@ -494,26 +504,34 @@ export async function cancelWithoutRunner(store: RunStore, executor: KernelExecu
     }
   }
   store.append({ type: 'state', state: 'cancelled', reason: 'user_cancelled' });
-  await releaseActiveLock(store.runId);
+  await releaseActiveLock(store.runId, { deps: releaseDeps });
 }
 
-export async function aiCliKernelCancel(input: { runId: string; timeoutSec?: number }): Promise<KernelRunStatus> {
+/** run 已經寫成終止狀態後，釋放名額忙碌不算取消失敗：照常回報狀態，detail 附上說明。 */
+async function cancelStatus(store: RunStore, sinceSeq: number): Promise<KernelRunStatus> {
+  const status = await statusOf(store);
+  if (!store.read().some(event => event.seq > sinceSeq && event.type === 'slot_release_failed')) return status;
+  return { ...status, detail: status.detail ? `${status.detail}；${SLOT_RELEASE_DEFERRED_NOTE}` : SLOT_RELEASE_DEFERRED_NOTE };
+}
+
+/** deps 只供測試注入釋放名額時的協調；MCP／CLI 只傳 input。 */
+export async function aiCliKernelCancel(input: { runId: string; timeoutSec?: number }, deps: { release?: Partial<MutexRetryDeps> } = {}): Promise<KernelRunStatus> {
   const store = storeFor(input.runId);
   const view = replayJournal(store.read());
-  if (isTerminalState(view.state)) { await releaseActiveLock(input.runId); return statusOf(store); }
+  if (isTerminalState(view.state)) { await releaseActiveLock(input.runId, { deps: deps.release }); return cancelStatus(store, view.lastSeq); }
   store.requestCancel();
   if (view.state === 'running' && await aiCliKernelRunnerAlive(store) !== false) {
     // runner 活著就交給它：只有一個程序寫日誌，比較不會打架。
     const deadline = Date.now() + (input.timeoutSec ?? 45) * 1000;
     while (Date.now() < deadline) {
       const now = replayJournal(store.read());
-      if (now.state !== 'running') { if (isTerminalState(now.state)) await releaseActiveLock(input.runId); return statusOf(store); }
+      if (now.state !== 'running') { if (isTerminalState(now.state)) await releaseActiveLock(input.runId, { deps: deps.release }); return cancelStatus(store, view.lastSeq); }
       await new Promise(resolve => setTimeout(resolve, 500));
     }
     return statusOf(store);
   }
-  await cancelWithoutRunner(store, new FileJobExecutor());
-  return statusOf(store);
+  await cancelWithoutRunner(store, new FileJobExecutor(), undefined, undefined, deps.release);
+  return cancelStatus(store, view.lastSeq);
 }
 
 export async function aiCliKernelResult(input: { runId: string }): Promise<{ runId: string; state: RunState; report: string | null; verdict: unknown; nextAction: string; detail: string | null; reportPath: string | null; context: RunView['context'] }> {
