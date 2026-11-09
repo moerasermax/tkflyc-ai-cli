@@ -1,24 +1,20 @@
 /** D targeted mutations, using an unmodified copy of tools/mutation-test.mjs.
  * Run: node tests/helpers/kernel-d-mutations.mjs [--name substring]
- * All builds happen in a disposable snapshot under docs, never the live dist.
+ * Logs live in os.tmpdir(). The unmodified harness requires a Git parent for snapshots;
+ * the disposable in-repo snapshot is removed in finally, including failures.
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const args = process.argv.slice(2);
-assert.ok(args.length === 0 || args.length === 1 && args[0] === '--remaining' || args.length === 2 && args[0] === '--name' && args[1], 'usage: [--remaining | --name substring]');
-const logPath = join(ROOT, 'docs/ai-cli_kernel/d-mutations.txt');
-const prior = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
-const verified = new Set(prior.split('\n').filter(line => line.startsWith('{"script":')).flatMap(line => {
-  const group = JSON.parse(line); return group.valid ? group.mutations : [];
-}));
+assert.ok(args.length === 0 || args.length === 2 && args[0] === '--name' && args[1], 'usage: [--name substring]');
 const mutations = JSON.parse(readFileSync(join(ROOT, 'tools/mutations.json'), 'utf8'))
-  .filter(m => m.name.startsWith('kernel D：'))
-  .filter(m => args[0] === '--remaining' ? !verified.has(m.name) : !args.length || m.name.includes(args[1]));
+  .filter(m => args.length ? /^kernel (?:D|F1F3|F2F4)：/.test(m.name) && m.name.includes(args[1]) : m.name.startsWith('kernel D：'));
 assert.ok(mutations.length, 'refuse an empty selection');
 const groups = new Map();
 for (const mutation of mutations) {
@@ -27,16 +23,21 @@ for (const mutation of mutations) {
   if (!groups.has(key)) groups.set(key, []);
   groups.get(key).push(mutation);
 }
-const stage = mkdtempSync(join(ROOT, 'docs/ai-cli_kernel/.d-mut-'));
-const snapshot = join(stage, 'snapshot'), link = join(snapshot, 'node_modules');
+const stage = mkdtempSync(join(tmpdir(), 'kernel-mutations-'));
+const logPath = join(stage, 'mutations.log');
+console.log(`Mutation evidence: ${logPath}`);
+// Verified limitation: mutation-test.mjs rejects a snapshot outside a Git repo
+// at its final status.code check, even with all expected kills. Keep only this
+// disposable snapshot under the repo; logs and test fixtures stay in os.tmpdir().
+const snapshotRoot = mkdtempSync(join(ROOT, 'docs/ai-cli_kernel/.d-mut-'));
+const snapshot = join(snapshotRoot, 'snapshot'), link = join(snapshot, 'node_modules');
 const results = [];
-let log = (prior ? prior + '\n' : '')
-  + `D targeted mutations: isolated snapshot; unmodified existing harness; selection ${JSON.stringify(args)}.\n`;
+let log = `D targeted mutations: isolated snapshot; unmodified existing harness; selection ${JSON.stringify(args)}.\n`;
 const distStamp = () => existsSync(join(ROOT, 'dist/ai-cli_kernel'))
   ? readdirSync(join(ROOT, 'dist/ai-cli_kernel')).map(name => { const s = statSync(join(ROOT, 'dist/ai-cli_kernel', name)); return `${name}:${s.size}:${s.mtimeMs}`; }).sort().join('\n') : 'missing';
 const before = distStamp();
 const sanitize = text => {
-  for (const [path, label] of [[stage, '<validation>'], [ROOT, '<workspace>']]) {
+  for (const [path, label] of [[stage, '<evidence>'], [snapshotRoot, '<validation>'], [ROOT, '<workspace>']]) {
     for (const spelling of [path, path.replace(/\\/g, '/'), path.replace(/\\/g, '\\\\')]) text = text.split(spelling).join(label);
   }
   // The existing harness prints only the last 800 characters on baseline errors;
@@ -56,8 +57,7 @@ try {
     console.log(`Checking ${script}${filter ? ` / ${filter}` : ''}: ${selected.length} mutations`);
     const r = spawnSync(process.execPath, [join(snapshot, 'tools/mutation-test.mjs'), snapshot, '--script', script], {
       cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 900000, maxBuffer: 8 * 1024 * 1024,
-      // Non-git fixtures inside the workspace must not discover its parent repo.
-      // The snapshot is a sibling of temp, so the harness's own git status still works.
+      // Non-git fixtures must not discover a parent repo. The snapshot is a sibling of temp.
       env: { ...process.env, TEMP: temp, TMP: temp, TMPDIR: temp, GIT_CEILING_DIRECTORIES: temp, KERNEL_CONCURRENCY_TEST_FILTER: filter, KERNEL_EVIDENCE_TEST_FILTER: filter, KERNEL_BASE_ARCHIVE_TEST_FILTER: filter },
     });
     const output = sanitize(`${r.stdout ?? ''}${r.stderr ?? ''}`);
@@ -78,11 +78,11 @@ try {
     unlinkSync(link);
   }
   assert.ok(existsSync(join(ROOT, 'node_modules/typescript/package.json')), 'shared dependencies intact');
-  const rel = relative(join(ROOT, 'docs/ai-cli_kernel'), resolve(stage));
-  assert.ok(rel && !rel.startsWith('..') && !rel.includes('/') && !rel.includes('\\'), 'cleanup stays in validation root');
-  rmSync(stage, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  const rel = relative(resolve(ROOT, 'docs/ai-cli_kernel'), resolve(snapshotRoot));
+  assert.ok(rel && !rel.startsWith('..') && !isAbsolute(rel) && !rel.includes('/') && !rel.includes('\\'), 'cleanup stays in validation root');
+  rmSync(snapshotRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   const distUnchanged = distStamp() === before;
-  log += `\nLive dist unchanged: ${distUnchanged}; snapshot removed; shared dependencies intact.\n`;
+  log += `\nLive dist unchanged: ${distUnchanged}; snapshot removed; shared dependencies intact; log retained in os.tmpdir().\n`;
   writeFileSync(logPath, log);
   assert.ok(distUnchanged, 'live dist must remain unchanged');
 }

@@ -231,6 +231,7 @@ export type KernelEventBody =
   | { type: 'check_finished'; pid: number }
   | { type: 'test_lock_wait'; heldBy: string }
   | { type: 'test_lock_acquired' }
+  | { type: 'test_lock_release_deferred'; detail: string }
   | { type: 'verification'; commit: string; passed: boolean; exitCode: number | null; timedOut: boolean; tail: string }
   | { type: 'quota_unknown'; agent: string }
   | { type: 'state'; state: RunState; reason?: string; detail?: string };

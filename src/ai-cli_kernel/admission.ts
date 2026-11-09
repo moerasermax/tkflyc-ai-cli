@@ -7,7 +7,7 @@ import { atomicWrite, digestText, kernelRunDir, kernelStateDir, RunStore } from 
 import { openActions, replayJournal } from './replay.js';
 import { isTerminalState, type KernelContract } from './types.js';
 import { agentForModel, readQuota } from './runtime.js';
-import { identityAlive, processIdentity, withProcessMutex } from './process-mutex.js';
+import { identityAlive, processIdentity, withProcessMutex, retryProcessMutex, type MutexRetryDeps } from './process-mutex.js';
 import type { ProcessIdentity } from '../core/live-jobs.js';
 
 export interface ConcurrencyConfig { maxRuns: number; claudeMinRemainingPercent: number; codexMinRemainingPercent: number }
@@ -134,11 +134,11 @@ export async function releaseRunSlot(runId: string): Promise<void> {
 }
 /** A launcher can outlive its approving process. Fence a delayed runner against
  * reclamation before it creates runner.json; keep the per-run lock unchanged. */
-export async function claimRunnerSlot(store: RunStore, claim: () => Promise<boolean>): Promise<boolean> {
-  return withProcessMutex('admission', async () => {
+export async function claimRunnerSlot(store: RunStore, claim: () => Promise<boolean>, deps: Partial<MutexRetryDeps> = {}): Promise<boolean> {
+  return retryProcessMutex('admission', async () => {
     if (!readActiveRuns().some(slot => slot.runId === store.runId)) return false;
     return claim();
-  });
+  }, deps);
 }
 export class AdmissionBlocked extends Error {
   constructor(readonly reason: 'same_repo' | 'slots_full' | 'claude_quota' | 'codex_quota', readonly heldBy: string[], detail: string) {

@@ -62,7 +62,7 @@ export function testSummary(tail: string | undefined): string {
   const clean = (tail ?? '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').trimEnd();
   const runner = clean.match(/(?:^|\n)共 (\d+) 支：PASS (\d+)、FAIL (\d+)，總耗時 [\d.]+s$/);
   const simple = clean.match(/(?:^|\n)(\d+) passed, (\d+) failed$/);
-  const tap = clean.match(/(?:^|\n)# tests (\d+)\r?\n# suites \d+\r?\n# pass (\d+)\r?\n# fail (\d+)(?:\r?\n# (?:cancelled|skipped|todo) \d+)*\r?\n# duration_ms [\d.]+$/);
+  const tap = clean.match(/(?:^|\n)# tests (\d+)\r?\n# suites \d+\r?\n# pass (\d+)\r?\n# fail (\d+)(?:\r?\n# cancelled \d+)?(?:\r?\n# skipped \d+)?(?:\r?\n# todo \d+)?\r?\n# duration_ms [\d.]+$/);
   const tapOther = tap ? [...tap[0].matchAll(/^# (?:cancelled|skipped|todo) (\d+)\r?$/gm)].reduce((sum, match) => sum + Number(match[1]), 0) : 0;
   let counts: { passed: number; failed: number; unit: string } | null = null;
   if (runner && Number(runner[1]) === Number(runner[2]) + Number(runner[3])) counts = { passed: Number(runner[2]), failed: Number(runner[3]), unit: '測試腳本' };

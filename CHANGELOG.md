@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+- F2／F4／F5（5579 交付後獨立稽核）：測試鎖將協調忙碌改成可辨識型別，等鎖可繼續及停止；command／runner claim 有限重試，release 耗盡記 journal 退讓，避免 finally 把通過測試改成失敗。租約改每秒 kill(0)，同 token／命令完整身分查詢每 30 秒一次，換人立即重查，降低 Windows PowerShell 查詢負擔。TAP 的 cancelled／skipped／todo 各最多一次且順序固定，防止重複或亂序的矛盾統計被接受。移除已提交的原始突變執行紀錄，改留既有與本次分組摘要；新 log 留系統暫存，因原 harness 最後必須成功讀 Git status，snapshot 仍暫置 repo 並於成功／失敗清理。
+
 - F1／F3（5579 交付後獨立稽核）：新版名額維持舊格式 active.lock 相容標記，取得／釋放／回收／start 回滾均在 admission 臨界區協調，釋放改指向與遺失標記補回；避免尚未重啟的舊 MCP server 看不到新版名額而超額。舊版 awaiting_approval 鎖保留並提示 cancel，標記按 runId 去重；程序身分只快取 started 非空的成功結果，暫時查詢失敗下次重試。
 
 - A 段（#17、#18、#19、#20、#21、#22 整合議題）：read／report 注入有獨立上限的 Git stat、完整狀態清單與可解析的測試結尾統計，大 diff 優先測試並逐檔標示省略；Git index basename 引用退路保留邊界／行號檢查；報告要求說明既有斷言改動，驗收後另附 kernel 基準測試清單，避免單憑模型自述。單 worker 模型顯示無第二模型檢查；探針區分格式未支援與 FAIL／UNKNOWN。

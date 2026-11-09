@@ -92,6 +92,21 @@ try {
     ]) assert.match(testSummary(tail), /^未解析/, tail);
     assert.match(testSummary('# tests 5\r\n# suites 1\r\n# pass 1\r\n# fail 1\r\n# cancelled 1\r\n# skipped 1\r\n# todo 1\r\n# duration_ms 9.1'), /通過 1、失敗 1/);
   });
+  await check('F4 TAP optional counters appear once in Node order', () => {
+    const prefix = '# tests 5\n# suites 1\n# pass 2\n# fail 1';
+    const summary = counters => testSummary(`${prefix}${counters}\n# duration_ms 9.1`);
+    for (const counters of ['\n# cancelled 1\n# skipped 1\n# todo 0', '\n# cancelled 2', '\n# skipped 2', '\n# todo 2', '\n# cancelled 1\n# todo 1']) {
+      assert.match(summary(counters), /^通過 2、失敗 1/);
+      assert.match(testSummary(`${prefix}${counters}\n# duration_ms 9.1`.replaceAll('\n', '\r\n')), /^通過 2、失敗 1/);
+    }
+    // All malformed examples still sum to tests=5; counting alone cannot reject them.
+    for (const counters of [
+      '\n# cancelled 1\n# cancelled 1', '\n# skipped 1\n# skipped 1', '\n# todo 1\n# todo 1',
+      '\n# skipped 1\n# cancelled 1', '\n# todo 1\n# skipped 1', '\n# todo 1\n# cancelled 1',
+      '\n# cancelled 0\n# skipped 1\n# todo 1\n# todo 0',
+    ]) assert.match(summary(counters), /^未解析/, counters);
+    assert.match(testSummary('# tests 3\n# suites 1\n# pass 2\n# fail 1\n# duration_ms 9.1'), /^通過 2、失敗 1/);
+  });
   await check('A4 測試規則、來源 rename、排除新增與非測試', () => {
     for (const path of ['test/a.ts', 'a/tests/b.ts', '__tests__/a.ts', 'spec/c.ts', 'a.test.js', 'a.spec.ts', 'test_x.py', 'x_test.go']) assert.ok(isTestPath(path), path);
     for (const path of ['src/contest/a.ts', 'tests.ts', 'specimen/a.ts', 'test_x.ts', 'latest.js']) assert.ok(!isTestPath(path), path);

@@ -13,7 +13,8 @@ const { admitRun, readActiveRuns, validateConcurrencyConfig, normalizedOrigin, c
 const { buildContract } = await load('templates');
 const { remainingPercentFromUsage } = await load('runtime');
 const { replayJournal, activeMinutes } = await load('replay');
-const { waitForTestLock } = await load('test-lock');
+const { waitForTestLock, releaseStoppedTestLock } = await load('test-lock');
+const { ProcessMutexBusy, withProcessMutex, processIdentity } = await load('process-mutex');
 const api = await load('api');
 const { runKernelCli } = await load('cli');
 const work = mkdtempSync(join(tmpdir(), 'kernel-concurrency-'));
@@ -400,6 +401,131 @@ try {
     // Real cancellation, no fake runner/worker involved.
     for (const store of stores) assert.equal((await api.aiCliKernelCancel({ runId: store.runId })).state, 'cancelled');
     assert.equal((await api.aiCliKernelStatus()).active, null);
+  });
+  await test('F2 mutex timeout is typed and cleans its own tickets', async () => {
+    const dir = join(kernelStateDir(), 'f2-timeout.tickets'); mkdirSync(dir, { recursive: true });
+    const owner = await processIdentity();
+    writeFileSync(join(dir, 'holder.json'), JSON.stringify({ id: 'holder', owner, number: 0 }));
+    let clock = 0;
+    try {
+      await assert.rejects(withProcessMutex('f2-timeout', () => assert.fail('must not enter'), {
+        now: () => clock, sleep: async () => { clock += 15000; },
+      }), error => error instanceof ProcessMutexBusy && error.mutex === 'f2-timeout');
+      assert.deepEqual(readdirSync(dir), ['holder.json']);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  await test('F2 busy wait retries, observes stop and propagates other errors', async () => {
+    const store = fresh(); let calls = 0, stopped = false, waits = 0;
+    const mutex = async (_name, work) => { if (++calls <= 2) throw new ProcessMutexBusy('test-lease'); return work(); };
+    const sleep = async ms => { assert.equal(ms, 1000); waits++; };
+    const lease = await waitForTestLock(store, () => false, () => {}, { mutex, sleep });
+    assert.ok(lease); assert.equal(calls, 3); assert.equal(waits, 2); await lease.release();
+    calls = 0;
+    assert.equal(await waitForTestLock(store, () => stopped, () => {}, {
+      mutex: async () => { calls++; throw new ProcessMutexBusy('test-lease'); },
+      sleep: async ms => { assert.equal(ms, 1000); stopped = true; },
+    }), null);
+    assert.equal(calls, 1); assert.ok(!existsSync(join(kernelStateDir(), 'test.lock')));
+    const other = new Error('disk unavailable');
+    await assert.rejects(waitForTestLock(store, () => false, () => {}, { mutex: async () => { throw other; } }), error => error === other);
+    // Cancellation that arrives while the critical section is executing leaves no owned lease.
+    stopped = false;
+    assert.equal(await waitForTestLock(store, () => stopped, () => {}, {
+      mutex: async (_name, work) => { const result = await work(); stopped = true; return result; },
+    }), null);
+    assert.ok(!existsSync(join(kernelStateDir(), 'test.lock')));
+  });
+  await test('F2 release busy defers in journal without failing a passed check', async () => {
+    const store = fresh(); let busy = false, calls = 0, sleeps = 0;
+    const deps = { mutex: async (_name, work) => { calls++; if (busy) throw new ProcessMutexBusy('test-lease'); return work(); }, sleep: async ms => { assert.equal(ms, 1000); sleeps++; } };
+    const lease = await waitForTestLock(store, () => false, () => {}, deps);
+    await lease.command({ pid: 99999999, started: 'ended', name: 'node' });
+    busy = true; calls = 0;
+    async function passedCheck() { try { return { passed: true }; } finally { await lease.release(); } }
+    assert.deepEqual(await passedCheck(), { passed: true }); assert.equal(calls, 3); assert.equal(sleeps, 2);
+    assert.equal(store.read().filter(e => e.type === 'test_lock_release_deferred').length, 1);
+    assert.ok(existsSync(join(kernelStateDir(), 'test.lock')));
+    // The stopped command identity permits the next contender to reclaim immediately.
+    const successor = await waitForTestLock(fresh(), () => false, () => {}, { mayBeAlive: () => false });
+    assert.ok(successor); await successor.release();
+    calls = 0; await releaseStoppedTestLock(store.runId, deps); assert.equal(calls, 3);
+    const error = new Error('release disk error');
+    busy = false;
+    const releaseError = await waitForTestLock(store, () => false, () => {}, { mutex: async (_name, work) => { if (busy) throw error; return work(); } });
+    busy = true; await assert.rejects(releaseError.release(), e => e === error);
+    busy = false; await releaseError.release();
+  });
+  await test('F2 command retries are bounded and preserve successor ownership', async () => {
+    const store = fresh(); let busyLeft = 0, calls = 0, sleeps = 0;
+    const deps = { mutex: async (_name, work) => { calls++; if (busyLeft-- > 0) throw new ProcessMutexBusy('test-lease'); return work(); }, sleep: async ms => { assert.equal(ms, 1000); sleeps++; } };
+    const lease = await waitForTestLock(store, () => false, () => {}, deps);
+    const identity = { pid: 99999999, started: 'command', name: 'node' };
+    busyLeft = 2; calls = 0; await lease.command(identity); assert.equal(calls, 3); assert.equal(sleeps, 2);
+    assert.deepEqual(JSON.parse(readFileSync(join(kernelStateDir(), 'test.lock'), 'utf8')).command, identity);
+    busyLeft = 10; calls = 0; sleeps = 0;
+    await assert.rejects(lease.command(identity), ProcessMutexBusy); assert.equal(calls, 3); assert.equal(sleeps, 2);
+    busyLeft = 0;
+    const successor = { runId: 'successor', token: 'successor', owner: identity };
+    writeFileSync(join(kernelStateDir(), 'test.lock'), JSON.stringify(successor));
+    await lease.command(identity); await lease.release();
+    assert.deepEqual(JSON.parse(readFileSync(join(kernelStateDir(), 'test.lock'), 'utf8')), successor);
+    rmSync(join(kernelStateDir(), 'test.lock'));
+    const unregistered = await waitForTestLock(store, () => false, () => {}, deps);
+    writeFileSync(join(kernelStateDir(), 'test.lock'), JSON.stringify(successor));
+    await assert.rejects(unregistered.command(identity), /測試鎖所有權已變動/);
+    await unregistered.release(); assert.deepEqual(JSON.parse(readFileSync(join(kernelStateDir(), 'test.lock'), 'utf8')), successor);
+    rmSync(join(kernelStateDir(), 'test.lock'));
+    let ioError = false; const error = new Error('command disk error');
+    const broken = await waitForTestLock(store, () => false, () => {}, { mutex: async (_name, work) => { if (ioError) throw error; return work(); } });
+    ioError = true; await assert.rejects(broken.command(identity), e => e === error);
+    ioError = false; await broken.release();
+  });
+  await test('F2 runner claim retries are bounded and keep the slot fence', async () => {
+    await clear(); const store = fresh(); await admit(store);
+    let busyLeft = 2, calls = 0, claims = 0, sleeps = 0;
+    const deps = { mutex: async (_name, work) => { calls++; if (busyLeft-- > 0) throw new ProcessMutexBusy('admission'); return work(); }, sleep: async ms => { assert.equal(ms, 1000); sleeps++; } };
+    assert.equal(await claimRunnerSlot(store, async () => { claims++; return true; }, deps), true);
+    assert.equal(calls, 3); assert.equal(claims, 1); assert.equal(sleeps, 2);
+    calls = 0; sleeps = 0; busyLeft = 9;
+    await assert.rejects(claimRunnerSlot(store, async () => { claims++; return true; }, deps), ProcessMutexBusy);
+    assert.equal(calls, 3); assert.equal(sleeps, 2); assert.equal(claims, 1);
+    busyLeft = 1; await finish(store);
+    assert.equal(await claimRunnerSlot(store, async () => assert.fail('reclaimed slot must fence runner'), deps), false);
+    const other = new Error('admission disk error'); calls = 0;
+    await assert.rejects(claimRunnerSlot(store, async () => true, { mutex: async () => { calls++; throw other; } }), e => e === other);
+    assert.equal(calls, 1);
+  });
+  await test('F2 lease identity checks throttle, detect death, token changes and PID reuse', async () => {
+    const path = join(kernelStateDir(), 'test.lock'); mkdirSync(kernelStateDir(), { recursive: true });
+    const held = { runId: 'holder', token: 'holder-1', owner: { pid: 12345, started: 'owner', name: 'node' } };
+    const put = () => writeFileSync(path, JSON.stringify(held));
+    let now = 0, full = 0, cheap = 0, sleeps = 0;
+    put();
+    assert.equal(await waitForTestLock(fresh(), () => sleeps >= 61, () => {}, {
+      now: () => now, mayBeAlive: () => { cheap++; return true; }, identityAlive: async () => { full++; return true; },
+      sleep: async ms => { assert.equal(ms, 1000); now += ms; sleeps++; },
+    }), null);
+    assert.equal(full, 3); assert.equal(cheap, 61);
+    // kill(0) detects death at the next 1s poll without another full lookup.
+    now = 0; full = 0; put();
+    const dead = await waitForTestLock(fresh(), () => false, () => {}, {
+      now: () => now, mayBeAlive: () => now === 0, identityAlive: async () => { full++; return true; }, sleep: async ms => { now += ms; assert.ok(now <= 1000, 'death must be detected next poll'); },
+    });
+    assert.ok(dead); assert.equal(now, 1000); assert.equal(full, 1); await dead.release();
+    now = 0; full = 0; put();
+    const reused = await waitForTestLock(fresh(), () => false, () => {}, {
+      now: () => now, mayBeAlive: () => true, identityAlive: async () => { full++; return now < 30000; },
+      sleep: async ms => { now += ms; assert.ok(now <= 30000, 'PID reuse must be caught at 30s'); },
+    });
+    assert.ok(reused); assert.equal(now, 30000); assert.equal(full, 2); await reused.release();
+    for (const change of ['token', 'command']) {
+      now = 0; full = 0; delete held.command; put();
+      const changed = await waitForTestLock(fresh(), () => false, () => {}, {
+        now: () => now, mayBeAlive: () => true, identityAlive: async () => { full++; return now === 0; },
+        sleep: async ms => { now += ms; assert.equal(now, 1000); if (change === 'token') held.token += '-next'; else held.command = { pid: 23456, started: 'command', name: 'node' }; put(); },
+      });
+      assert.ok(changed); assert.equal(full, 2); await changed.release();
+    }
   });
   await test('setup/test child processes exclude each other, cancellation while waiting is harmless', async () => {
     const control = folder(), a = fresh(), b = fresh();

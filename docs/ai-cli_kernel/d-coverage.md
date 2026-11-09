@@ -23,52 +23,108 @@
 | D2 文件 | 技術手冊、教學手冊、CHANGELOG 人工核對 | 更新舊單名額敘述；列出不重建 dist、安裝副本交接與摘要加 show 流程；並行標使用者決定日期，未捏造 issue |
 | D3 突變／登記 | verify-mutation-manifest.mjs；verify-run-tests.mjs | 所有新 verify 腳本已登記；每個 from 唯一且存在。定向實測另見下節，不將清單健康檢查當成殺死突變 |
 
-## 本步修正
+## 既有證據（不是此次重跑）
 
-TAP 摘要原先只驗總數大於等於通過加失敗，會接受缺少項目或矛盾的 skipped／cancelled／todo 數。現在驗證所有終結計數合計相等且總數為安全整數；矛盾或不完整仍輸出「未解析」。新增 CRLF、缺項、超額及不安全總數回歸。這只修正顯示統計，不改固定測試命令或 exit-code 驗收。
+5579 的 D 段交付（cbff66e）記錄：TypeScript --noEmit、A 15 passed／0 failed、B 12 passed／0 failed、C 完整 17 組及後續定向回歸、政策校驗、worker 防護 41 passed／0 failed、runner 15 個斷言、當時 682 筆突變清單健康檢查。這些是原交付紀錄，不冒稱本次實測。
 
-定向突變也揭露 C8 的原等待預算斷言過寬：斷言採用後續其他案例執行完的 Date.now，額外耗時會掩蓋被誤算的等待。現在直接用該 run 的 runner_started、wait／acquired 與停止事件計算精確預期 active 時間，誤差小於 1ms；不再用其他案例的耗時作容許值。
+從刪除前的原始執行紀錄逐筆讀取 JSON 分組，按目前 manifest 的突變名稱去重，只採 valid=true 且由指定 FAIL 捕獲、成功編譯的結果：
+
+| 既有 D 分組（script） | 不同突變總數 | KILLED | SURVIVED | ERROR |
+| --- | ---: | ---: | ---: | ---: |
+| verify-ai-cli_kernel-evidence.mjs | 11 | 11 | 0 | 0 |
+| verify-ai-cli_kernel-base-archive.mjs | 7 | 7 | 0 | 0 |
+| verify-ai-cli_kernel-concurrency.mjs | 14 | 14 | 0 | 0 |
+| verify-run-tests.mjs | 1 | 1 | 0 | 0 |
+| 合計 | 33 | 33 | 0 | 0 |
+
+原始紀錄共有 41 次 JSON 分組，其中 27 次 valid=true。最終可信名稱集合覆蓋全部 33 筆現行 kernel D 突變；已退役的亂碼名稱不計入。初次基準失敗、母 repo 狀態改變、fixture 誤認 repo、語法錯誤、狀態目錄缺少，以及早先 wall-clock 突變存活都不採計；後者加強精確 active 計時斷言後的指定 KILLED 才採計。表中是最終去重可信結果，不是歷次嘗試累加。
+
+可追溯來源為 Git 中 cbff66e 的原始執行紀錄 blob（本次依明確授權刪除），刪除前工作區 bytes 的 SHA-256：`86137d4bae53da0fdab7e7936ead15e86cf5b0dc33202e7175910100e489f17c`。原始 log 不再提交或以文件連結發布，歷史仍可供唯讀核對。
+
+F1/F3 前一步 01816dc 的紀錄：11 筆 kernel F1F3 與兩筆已調整的 D 突變可信 KILLED；concurrency source 完整 24 組、wx 競態另以定向組通過、既有 kernel source 762 passed／0 failed。這些突變此次只核對片段存在且唯一，不全面重跑；本次 concurrency 完整回歸仍涵蓋 F1/F3。
+
+## F2、F4、F5 修正與驗證
+
+- F2：ProcessMutexBusy 型別；等鎖忙碌可繼續、仍可停止且不吞其他錯誤。command／runner claim 最多三次嘗試；release 耗盡記 journal，避免覆蓋成功結果，保留可依已停止命令身分回收的租約。每秒 kill(0)、同 token／命令身分完整查詢每 30 秒一次，更換時立即查；死亡下一輪回收、PID 重用最晚下一次完整查詢識別。
+- F4：cancelled、skipped、todo 各最多一次且依 Node 順序，重複／亂序即使總數相符仍未解析；安全整數、合計及完整結尾限制保留。測試包含 LF、CRLF、合法可選欄位及各種重複／亂序。
+- F5：原始執行紀錄改為本頁摘要。新 log 寫入 os.tmpdir() 下每次新建的 kernel-mutations-* 目錄；不把不同來源測試或未重跑突變算成本次結果。
+
+本次來源驗證（Windows／Node v24.15.0）：TypeScript --noEmit exit 0；concurrency 完整 31 組通過；evidence 16 passed／0 failed；目前 709 筆 manifest 的 8 個健康檢查通過。原 D「測試鎖忽略存活命令」隨實作改為 leaseAlive，片段已同步，測試意圖不變。
+
+本次新增 16 筆 kernel F2F4 突變，指定 FAIL 分組如下；只採基準成功、突變編譯成功、指定斷言捕獲且 harness 最後狀態校驗成功的分組。下表採其餘六組與 identity 定向重測的可信結果，不採先前無效輪。
+
+| 本次分組（expect 子字串） | 總數 | KILLED | SURVIVED | ERROR |
+| --- | ---: | ---: | ---: | ---: |
+| F2 mutex timeout is typed | 1 | 1 | 0 | 0 |
+| F2 busy wait retries | 1 | 1 | 0 | 0 |
+| F2 release busy defers | 1 | 1 | 0 | 0 |
+| F2 command retries are bounded | 4 | 4 | 0 | 0 |
+| F2 runner claim retries are bounded | 2 | 2 | 0 | 0 |
+| F2 lease identity checks throttle | 4 | 4 | 0 | 0 |
+| F4 TAP optional counters appear once | 3 | 3 | 0 | 0 |
+| 本次新增合計 | 16 | 16 | 0 | 0 |
+
+### snapshot 位置限制與不採計的嘗試
+
+已實跑確認原 harness 的限制：完全放在 os.tmpdir() 的 snapshot 能先通過基準、編譯並由指定斷言捕獲三筆 TAP 突變，但 tools/mutation-test.mjs 最後將 status.code !== 0 判為 dirty，Git 回 128（not a git repository），整輪因此不可信。停止此方案，未修改原 harness、未建立 repo／分支或更改 Git 設定。
+
+依此限制，只有 snapshot 暫置 docs/ai-cli_kernel/.d-mut-*；log 與 fixture 仍在 os.tmpdir() 獨立新目錄。helper 成功／失敗都走 finally：先只 unlink node_modules junction，確認共享依賴、驗證 snapshotRoot 的絕對目標在指定文件目錄下，再移除 snapshotRoot，檢查 live dist 大小／mtime 未改；log 留在系統暫存供核對。系統暫存方案失敗後 snapshot 也已清理。此 helper 不屬固定 npm test。
+
+另一次 repo 內定向輪的 identity 分組雖有四筆指定 KILLED，但 worker 同時更新文件，使原 harness 的前後 Git status 清單不同。該分組不採計，停止並改為全部文件更新後只重跑該分組；其餘六個可信分組毋須全面重跑。後續驗證期間不再修改 repo 檔案。
 
 ## 可重跑命令
 
 ```text
 node node_modules/typescript/bin/tsc --noEmit
-node --import tsx tests/verify-ai-cli_kernel-evidence.mjs --source
-node --import tsx tests/verify-ai-cli_kernel-base-archive.mjs --source
 node --import tsx tests/verify-ai-cli_kernel-concurrency.mjs --source
-node tests/verify-ai-cli_kernel-policy.mjs
-node tests/verify-worker-guards.mjs
-node tests/verify-run-tests.mjs
+node --import tsx tests/verify-ai-cli_kernel-evidence.mjs --source
 node tests/verify-mutation-manifest.mjs
-node tests/helpers/kernel-d-mutations.mjs
-# 只重跑尚未有可信指定斷言結果的項目（保留既有證據）
-node tests/helpers/kernel-d-mutations.mjs --remaining
+node tests/helpers/kernel-d-mutations.mjs --name 'kernel F2F4：'
+node tests/helpers/kernel-d-mutations.mjs --name 租約
+node tests/helpers/kernel-d-mutations.mjs --name 測試鎖忽略存活命令
 ```
 
-定向 helper 使用現有 `tools/mutation-test.mjs` 的未修改副本，在工作目錄內建立一次性 snapshot；每個測試分組先通過基準，再逐筆突變、編譯並核對指定 FAIL 名稱。A／B／C 的環境篩選只用於突變定位，空選擇會拒絕；正式 runner 清空這三個篩選，固定 npm test 仍跑完整清單。fixture 使用 GIT_CEILING_DIRECTORIES，避免置於 repo 內的非 Git 目錄誤認母 repo；harness 所在 snapshot 是其兄弟目錄，仍可檢查還原狀態。helper 最後解除 node_modules junction，確認依賴完整與 live dist 的大小／mtime 未改，才移除 snapshot。輸出路徑已去識別化，見 [d-mutations.txt](d-mutations.txt)。該 helper 不屬於固定 npm test，不能把手動抽驗當全量突變結果。
-
-## 本步實測結果（Windows，Node v24.15.0）
-
-| 證據 | 結果 |
-| --- | --- |
-| TypeScript `--noEmit` | exit 0；未重建 live dist |
-| A 原始碼回歸 | 15 passed，0 failed |
-| B 原始碼回歸 | 12 passed，0 failed |
-| C 原始碼完整回歸 | 17 groups 通過；其後 C4 的獨立 fixture 與 C8 的精確計時斷言再以原始碼定位回歸及隔離突變重測通過 |
-| 政策精確校驗 | 通過；另以備份實際位元組比對，ctx 前綴及 WORKER_CONTEXT 到檔尾均不變 |
-| 既有 worker 防護 | 41 passed，0 failed（使用既有 vendor stub） |
-| 正式測試 runner | 15 個斷言通過，含清除定向篩選；新 policy verify 已登記 |
-| 突變清單健康 | 682 筆，8 個檢查通過，全部片段存在且唯一 |
-| 新增 D 定向突變 | 33 個不同的現行突變，最終全部由指定 FAIL 名稱抓到；每個可信分組均先通過基準並成功編譯突變 |
-| 固定 npm test | 本步未執行，留給 kernel 固定驗收；上述來源測試不能代替該驗收 |
-
-完整日誌保留了不採計的初次結果：新增交付檔造成母 repo 狀態清單變動、repo 內非 Git fixture 誤認母 repo、加強 C8 斷言時變數重名造成一輪基準語法錯誤，以及獨立執行 C4 時缺少狀態目錄。修正後逐組重測；原先存活的 wall-clock 突變也已由精確計時斷言殺死。不能將早先基準失敗視為殺死突變。每輪結束均確認 live dist 未改、snapshot 已移除、共用 node_modules 完整。
-
-本步只實跑上述 33 個新增突變；其餘 649 個既有突變未重新全量實跑。對本機假 CLI／fixture 範圍的結論信心高；真 provider 與其他平台仍未確認。
+帶空白的 --name 值在 PowerShell 請用單引號包住，例如 `--name 'kernel F2F4：'`。不帶參數仍重跑全部 kernel D；新 helper 不再從 repo 原始 log 讀取 --remaining。每組以 expect 定向選取且拒絕空跑；正式 runner 清空定向篩選，固定 npm test 仍完整驗收。執行定向 helper 時不要同時修改 repo 或執行 npm test。
 
 ## 未完成及適用範圍
 
-- #17 第 2 點：第二模型可執行驗證涉及權限邊界，本次未做。
-- #22 Claude 證據格式：需要真 CLI 實測，本次未做；#8 不在範圍。
-- 本步僅 Windows／Node 現環境與假 CLI；不宣稱真 provider、其他平台、斷電與多主機共享檔案系統已驗證。
-- 主 session 須逐檔檢查完整 diff，完成獨立稽核及固定 npm test 的最後驗收。政策安裝副本仍需主 session 重新同步；歸檔程序改用 list 摘要後逐筆 show。重建 dist 前等其他 run 全部停止，避免 version_drift。
+- 固定 npm test 尚未由本 worker 執行，交由 kernel 另行驗收；來源回歸和定向突變不能取代它。
+- 未重建 live dist，未全面重跑其他既有突變，未改政策 hook、測試 runner、依賴或權限／額度／ref 閘門。
+- #17 第 2 點、#22 Claude 真 CLI 證據格式及 #8 不在本段範圍。
+- 本機假 CLI／fixture 範圍的結果可信；真 provider、其他平台、斷電／磁碟損毀與多主機共享檔案系統尚未驗證。
+- 主 session 仍須檢查完整 diff、獨立稽核及 kernel 固定驗收。政策安裝副本與重建 dist 的交接條件仍依既有說明。
+
+## 本次外部證據索引
+
+原始 log 位於系統暫存 kernel-mutations-* 目錄（不在 repo），以下 SHA-256 對應其完整 bytes：
+
+- F2/F4 其餘六組：`kernel-mutations-dEjbcF/mutations.log`；SHA-256 `c87aaac67afffe140dcbf6d156142f4cec722710f68c7e8bd05e85e8392a8125`。
+- F2 identity 重測：`kernel-mutations-amDtXl/mutations.log`；SHA-256 `53c0c5c2154fa9454fa748dd18d12058633ed54c4ff950e2aa8222e87af41d91`。
+
+第一份 log 的 identity 組因狀態清單變更標 valid=false，不採其整輪總結；只採六組 valid=true 的 12 筆。第二份 log 一組 4/4 valid=true，合計新增 16 筆全部可信 KILLED，SURVIVED 0、ERROR 0。helper 的成功與先前失敗路徑均記 snapshot removed、Live dist unchanged: true、共享依賴完整。
+
+既有 D 片段適配抽驗：`kernel D：測試鎖忽略存活命令`，1/1 可信 KILLED，SURVIVED 0、ERROR 0。證據 `kernel-mutations-iBtBhF/mutations.log`；SHA-256 `a272146ed12314b001c0dd9328bc7bbc241385365d3d5c2a3d1f24b5fc73afc2`。本次不同突變合計 17 筆（新增 16、既有適配 1）；沒有將歷史 F1/F3 或其他 D 組算成本次實跑。
+
+## 本次突變與實際斷言對照
+
+下列每筆都編譯成功並由具名斷言捕獲。行號指本段交付來源；manifest 的 expect 是實際名稱的子字串。
+
+| 突變名稱 | 實際斷言名稱 | 來源位置 |
+| --- | --- | --- |
+| kernel D：測試鎖忽略存活命令 | dead runner retains lease while real command lives, then reclaims dead identities | `src/ai-cli_kernel/test-lock.ts:67` |
+| kernel F2F4：mutex 忙碌失去錯誤型別 | F2 mutex timeout is typed and cleans its own tickets | `src/ai-cli_kernel/process-mutex.ts:110` |
+| kernel F2F4：等測試鎖將忙碌當失敗 | F2 busy wait retries, observes stop and propagates other errors | `src/ai-cli_kernel/test-lock.ts:74` |
+| kernel F2F4：釋放忙碌覆蓋通過結果 | F2 release busy defers in journal without failing a passed check | `src/ai-cli_kernel/test-lock.ts:32` |
+| kernel F2F4：command 不重試忙碌 | F2 command retries are bounded and preserve successor ownership | `src/ai-cli_kernel/test-lock.ts:90` |
+| kernel F2F4：runner claim 不重試忙碌 | F2 runner claim retries are bounded and keep the slot fence | `src/ai-cli_kernel/admission.ts:138` |
+| kernel F2F4：重試超過三次 | F2 command retries are bounded and preserve successor ownership | `src/ai-cli_kernel/process-mutex.ts:31` |
+| kernel F2F4：runner claim 略過名額 fence | F2 runner claim retries are bounded and keep the slot fence | `src/ai-cli_kernel/admission.ts:139` |
+| kernel F2F4：完整租約查詢每秒執行 | F2 lease identity checks throttle, detect death, token changes and PID reuse | `src/ai-cli_kernel/test-lock.ts:55` |
+| kernel F2F4：租約忽略快速死亡檢查 | F2 lease identity checks throttle, detect death, token changes and PID reuse | `src/ai-cli_kernel/test-lock.ts:53` |
+| kernel F2F4：租約快取忽略 token 更換 | F2 lease identity checks throttle, detect death, token changes and PID reuse | `src/ai-cli_kernel/test-lock.ts:54` |
+| kernel F2F4：租約不再完整確認 PID 重用 | F2 lease identity checks throttle, detect death, token changes and PID reuse | `src/ai-cli_kernel/test-lock.ts:55` |
+| kernel F2F4：command 覆寫後來持有者 | F2 command retries are bounded and preserve successor ownership | `src/ai-cli_kernel/test-lock.ts:91` |
+| kernel F2F4：release 刪除後來持有者 | F2 command retries are bounded and preserve successor ownership | `src/ai-cli_kernel/test-lock.ts:83` |
+| kernel F2F4：TAP 接受重複或亂序欄位 | F4 TAP optional counters appear once in Node order | `src/ai-cli_kernel/evidence.ts:65` |
+| kernel F2F4：TAP 允許重複 skipped | F4 TAP optional counters appear once in Node order | `src/ai-cli_kernel/evidence.ts:65` |
+| kernel F2F4：TAP 將 todo 置於 skipped 前 | F4 TAP optional counters appear once in Node order | `src/ai-cli_kernel/evidence.ts:65` |

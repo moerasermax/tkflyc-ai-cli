@@ -28,6 +28,10 @@ CLI 核准、接回與觸發開工共用跨行程 admission。預設全機三個
 
 所有 setupCommand、testCommand 共用全機 `test.lock`，contextCommand 不受這道測試互斥限制。等待期間日誌記錄 `test_lock_wait`／`test_lock_acquired`，status 顯示「等測試鎖（被 <runId> 佔用）」；等待時間不列入命令或 active wall-clock 預算。等待仍可取消。鎖保存 runner 與命令監督程序的 PID／建立時間；runner 死掉而監督程序仍活著時仍保留鎖，確認命令停止後才釋放／回收。PID 存在但身分查不到時保守保留。監督程序先等 runner 將 PID 寫入鎖與日誌才執行命令，開工信號不作為命令 stdin。Windows 監督程序使用 detached console，避免父 runner 退出後監督程序跟著消失而實際命令仍活著。命令身分更新與釋放同樣經過跨行程臨界區，延遲的身分查詢不能覆寫後來持有者的鎖。
 
+F2（5579 交付後獨立稽核）將 15 秒協調忙碌逾時改為 `ProcessMutexBusy`，以型別識別，不比對文字。測試鎖等待遇忙碌仍視為等待，每輪檢查取消／fencing，其他錯誤照常上拋。租約輪詢間隔為 1 秒；同 token／同命令身分先用既有 `mayBeAlive`（kill(0)）確認存活，完整身分查詢最多每 30 秒一次。token 或命令身分變更立即完整查詢；死亡下一輪即可回收，PID 重用最晚下一次完整查詢識別。
+
+`command()`、`release()`／停止後清理及 runner 的 `claimRunnerSlot()`，對協調忙碌最多嘗試三次，每次 mutex 協調等待上限 15 秒、重試間隔 1 秒；不重試其他錯誤。command 與 claim 耗盡後上拋，claim 每次仍在 admission 臨界區檢查名額 fence。release 耗盡則寫 `test_lock_release_deferred` journal，避免 finally 的忙碌覆蓋已通過測試；租約的 command 身分屬於已停止的測試命令，其他 run 可確認死亡後回收。所有權已變動的既有檢查保持：延遲 command 不能覆寫後來持有者，release 也不能刪除他人的 token。短臨界區內 bakery ticket 的輕量輪詢維持既有行為，1 秒間隔適用於測試租約等待與協調重試。
+
 `status.active` 維持 `string|null`，代表排序最前的佔名額 run。新增 `activeRuns`，每筆含 `runId`、`repo`、`models`（decide、worker、allowedWorkers）與 `acquiredAt`。dashboard 顯示全部佔用者；`actions --json` 保留陣列及原操作欄位，每個操作額外附 `activeRuns`。
 
 驗證入口：`node --import tsx tests/verify-ai-cli_kernel-concurrency.mjs --source`；已登記於固定 npm test 清單，正式驗收讀 dist。測試以 IPC／檔案屏障同步多個真實 Node 子行程，使用本機命令與假 workspace，不啟動 vendor CLI。未覆蓋斷電、磁碟損毀、網路檔案系統及多主機共享 state dir；協調設計的適用範圍是同一台機器的本機檔案系統。
@@ -42,7 +46,10 @@ CLI 核准、接回與觸發開工共用跨行程 admission。預設全機三個
 | C9 | status.active 型別、activeRuns、dashboard 畫面與 actions CLI JSON 的既有欄位及全部持有者 |
 | F1 | 以 journal.acquireActiveLock 模擬舊版；新版標記阻擋舊版、最後釋放後可取得；舊 awaiting_approval 保留與真 cancel；wx 競爭保留舊贏家；三名額去重、釋放改指向、標記補回、釋放等待 admission 臨界區、start 失敗回滾 |
 | F3 | 可控查詢第一次缺失／空 started／reject、第二次成功、第三次命中成功快取；不透過環境變數變更正式行為 |
+| F2 | 注入型別化忙碌／時鐘／身分查詢：等鎖持續及停止、release 不覆蓋通過結果且記 journal、command 與 runner claim 三次上限、不吞其他錯誤、所有權保護；61 秒等待只完整查詢三次、每輪 kill(0)、死亡下一輪回收、token／命令身分換人即查、PID 重用最晚 30 秒查出 |
 
-F1／F3 本段驗證：`tsc --noEmit` 通過；concurrency source 完整 24 組通過，最後新增的 wx 競態組另以定向選取通過；既有 kernel source 測試為 762 passed、0 failed。`tools/mutations.json` 新增的 11 筆 `kernel F1F3：` 與調整片段後的兩筆既有 D 段突變（舊鎖計數、死亡核准程序回收），均在 repo 外隔離快照編譯成功並由對應 expect 斷言抓到；原始 log 不進 repo。本段未重建工作區 dist、未執行正式 npm test，最終驗收交由 kernel。
+F1／F3 既有驗證（01816dc，非此次重跑）：`tsc --noEmit` 通過；concurrency source 完整 24 組通過，最後新增的 wx 競態組另以定向選取通過；既有 kernel source 測試為 762 passed、0 failed。`tools/mutations.json` 新增的 11 筆 `kernel F1F3：` 與調整片段後的兩筆既有 D 段突變（舊鎖計數、死亡核准程序回收），均在 repo 外隔離快照編譯成功並由對應 expect 斷言抓到；原始 log 不進 repo。本段未重建工作區 dist、未執行正式 npm test，最終驗收交由 kernel。
 
 上述程序生命週期實測環境是 Windows／Node 24；其他平台、支援範圍內較舊 Node、強制只殺監督程序而留下其子行程，以及斷電後的磁碟持久性尚待驗證。source 測試不等於 kernel 重建後執行固定 `npm test` 的最終驗收。
+
+F2 本次來源驗證：TypeScript `--noEmit` 通過，concurrency 完整 31 組通過（含既有 F1/F3 與真子程序死亡回收）。F2/F4 定向突變與 helper 限制、既有／此次結果區分見 [d-coverage.md](d-coverage.md)。未重建 live dist；固定 npm test 留由 kernel 驗收。

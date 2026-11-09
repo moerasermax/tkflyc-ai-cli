@@ -10,6 +10,29 @@ import { lookupIdentities, type ProcessIdentity } from '../core/live-jobs.js';
 import { atomicWrite, kernelStateDir } from './journal.js';
 
 interface Ticket { owner: ProcessIdentity; number: number; id: string }
+/** Coordination contention is recoverable; filesystem/work errors are not. */
+export class ProcessMutexBusy extends Error {
+  constructor(readonly mutex: string) {
+    super(`${mutex} 協調忙碌，請重試（不會將 run 排入佇列）`);
+    this.name = 'ProcessMutexBusy';
+  }
+}
+export interface MutexRetryDeps {
+  mutex: typeof withProcessMutex;
+  sleep(ms: number): Promise<void>;
+}
+/** Three bounded 15s mutex attempts, separated by 1s; never retry other errors. */
+export async function retryProcessMutex<T>(name: string, work: () => T | Promise<T>, deps: Partial<MutexRetryDeps> = {}): Promise<T> {
+  const mutex = deps.mutex ?? withProcessMutex;
+  const sleep = deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  for (let attempt = 0; ; attempt++) {
+    try { return await mutex(name, work); }
+    catch (error) {
+      if (!(error instanceof ProcessMutexBusy) || attempt >= 2) throw error;
+      await sleep(1000);
+    }
+  }
+}
 /** Internal factory permits deterministic identity lookup tests without changing process-wide behavior. */
 export function createProcessIdentityReader(lookup: typeof lookupIdentities): () => Promise<ProcessIdentity> {
   let self: ProcessIdentity | undefined;
@@ -28,7 +51,9 @@ export async function identityAlive(owner: ProcessIdentity): Promise<boolean> {
   return live ? !owner.started || sameIdentity(owner, live) : mayBeAlive(owner.pid);
 }
 
-export async function withProcessMutex<T>(name: string, work: () => T | Promise<T>): Promise<T> {
+export async function withProcessMutex<T>(name: string, work: () => T | Promise<T>, deps: { now?: () => number; sleep?: (ms: number) => Promise<void> } = {}): Promise<T> {
+  const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
   const directory = join(kernelStateDir(), `${name}.tickets`);
   mkdirSync(directory, { recursive: true });
   const mine: Ticket = { owner: await processIdentity(), number: 0, id: `${process.pid}-${randomBytes(12).toString('hex')}` };
@@ -70,7 +95,7 @@ export async function withProcessMutex<T>(name: string, work: () => T | Promise<
     for (const ticket of others) if (ticket.id !== mine.id && !await stale(ticket)) maximum = Math.max(maximum, ticket.number);
     mine.number = maximum + 1;
     atomicWrite(path, JSON.stringify(mine));
-    const deadline = Date.now() + 15000;
+    const deadline = now() + 15000;
     for (;;) {
       let blocked = false;
       for (const ticket of read()) {
@@ -82,8 +107,8 @@ export async function withProcessMutex<T>(name: string, work: () => T | Promise<
         break;
       }
       if (!blocked) return await work();
-      if (Date.now() >= deadline) throw new Error(`${name} 協調忙碌，請重試（不會將 run 排入佇列）`);
-      await new Promise(resolve => setTimeout(resolve, 10));
+      if (now() >= deadline) throw new ProcessMutexBusy(name);
+      await sleep(10);
     }
   } finally {
     rmSync(path, { force: true });

@@ -5393,8 +5393,8 @@
   {
     "name": "kernel D：測試鎖忽略存活命令",
     "file": "src/ai-cli_kernel/test-lock.ts",
-    "from": "      if (held && await identityAlive(held.command ?? held.owner)) return { heldBy: held.runId };",
-    "to": "      if (held && await identityAlive(held.owner)) return { heldBy: held.runId };",
+    "from": "if (held && await leaseAlive(held)) return { heldBy: held.runId };",
+    "to": "if ((false as boolean) && held && await leaseAlive(held)) return { heldBy: held.runId };",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "dead runner retains lease while real command lives, then reclaims dead identities"
   },
@@ -5525,5 +5525,133 @@
     "to": "const target = slots.length === 1 ? slots[0] : undefined;",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "F1 acquisition rejection and release repair a deleted legacy marker"
+  },
+  {
+    "name": "kernel F2F4：mutex 忙碌失去錯誤型別",
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "from": "throw new ProcessMutexBusy(name);",
+    "to": "throw new Error(name);",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F2 mutex timeout is typed"
+  },
+  {
+    "name": "kernel F2F4：等測試鎖將忙碌當失敗",
+    "file": "src/ai-cli_kernel/test-lock.ts",
+    "from": "if (!(error instanceof ProcessMutexBusy)) throw error;\n      // Mutex timeout",
+    "to": "throw error;\n      // Mutex timeout",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F2 busy wait retries"
+  },
+  {
+    "name": "kernel F2F4：釋放忙碌覆蓋通過結果",
+    "file": "src/ai-cli_kernel/test-lock.ts",
+    "from": "store.append({ type: 'test_lock_release_deferred', detail: 'test-lease 協調忙碌；釋放重試耗盡，保留租約供身分回收' });",
+    "to": "throw error;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F2 release busy defers"
+  },
+  {
+    "name": "kernel F2F4：command 不重試忙碌",
+    "file": "src/ai-cli_kernel/test-lock.ts",
+    "from": "await retryProcessMutex('test-lease', () => {",
+    "to": "await (deps.mutex ?? withProcessMutex)('test-lease', () => {",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F2 command retries are bounded"
+  },
+  {
+    "name": "kernel F2F4：runner claim 不重試忙碌",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "return retryProcessMutex('admission', async () => {",
+    "to": "return (deps.mutex ?? withProcessMutex)('admission', async () => {",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F2 runner claim retries are bounded"
+  },
+  {
+    "name": "kernel F2F4：重試超過三次",
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "from": "|| attempt >= 2",
+    "to": "|| attempt >= 4",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F2 command retries are bounded"
+  },
+  {
+    "name": "kernel F2F4：runner claim 略過名額 fence",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "if (!readActiveRuns().some(slot => slot.runId === store.runId)) return false;",
+    "to": "if (false) return false;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F2 runner claim retries are bounded"
+  },
+  {
+    "name": "kernel F2F4：完整租約查詢每秒執行",
+    "file": "src/ai-cli_kernel/test-lock.ts",
+    "from": "now() - checked.at >= 30000",
+    "to": "now() - checked.at >= 1000",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F2 lease identity checks throttle"
+  },
+  {
+    "name": "kernel F2F4：租約忽略快速死亡檢查",
+    "file": "src/ai-cli_kernel/test-lock.ts",
+    "from": "if (!cheapAlive(identity.pid)) return false;",
+    "to": "if (false) return false;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F2 lease identity checks throttle"
+  },
+  {
+    "name": "kernel F2F4：租約快取忽略 token 更換",
+    "file": "src/ai-cli_kernel/test-lock.ts",
+    "from": "[held.token, identity.pid, identity.started, identity.name]",
+    "to": "[identity.pid, identity.started, identity.name]",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F2 lease identity checks throttle"
+  },
+  {
+    "name": "kernel F2F4：租約不再完整確認 PID 重用",
+    "file": "src/ai-cli_kernel/test-lock.ts",
+    "from": "|| now() - checked.at >= 30000",
+    "to": "|| false",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F2 lease identity checks throttle"
+  },
+  {
+    "name": "kernel F2F4：command 覆寫後來持有者",
+    "file": "src/ai-cli_kernel/test-lock.ts",
+    "from": "if (read()?.token !== lease.token) {",
+    "to": "if (false) {",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F2 command retries are bounded"
+  },
+  {
+    "name": "kernel F2F4：release 刪除後來持有者",
+    "file": "src/ai-cli_kernel/test-lock.ts",
+    "from": "if (read()?.token === lease.token) rmSync(path(), { force: true });",
+    "to": "if (true) rmSync(path(), { force: true });",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "F2 command retries are bounded"
+  },
+  {
+    "name": "kernel F2F4：TAP 接受重複或亂序欄位",
+    "file": "src/ai-cli_kernel/evidence.ts",
+    "from": "(?:\\r?\\n# cancelled \\d+)?(?:\\r?\\n# skipped \\d+)?(?:\\r?\\n# todo \\d+)?",
+    "to": "(?:\\r?\\n# (?:cancelled|skipped|todo) \\d+)*",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "F4 TAP optional counters appear once"
+  },
+  {
+    "name": "kernel F2F4：TAP 允許重複 skipped",
+    "file": "src/ai-cli_kernel/evidence.ts",
+    "from": "(?:\\r?\\n# skipped \\d+)?",
+    "to": "(?:\\r?\\n# skipped \\d+)*",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "F4 TAP optional counters appear once"
+  },
+  {
+    "name": "kernel F2F4：TAP 將 todo 置於 skipped 前",
+    "file": "src/ai-cli_kernel/evidence.ts",
+    "from": "(?:\\r?\\n# skipped \\d+)?(?:\\r?\\n# todo \\d+)?",
+    "to": "(?:\\r?\\n# todo \\d+)?(?:\\r?\\n# skipped \\d+)?",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "F4 TAP optional counters appear once"
   }
 ]
