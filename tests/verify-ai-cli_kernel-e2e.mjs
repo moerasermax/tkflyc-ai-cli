@@ -8,6 +8,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { commandResult, jsonResult, approvalDiagnostic } from './helpers/kernel-e2e-diagnostics.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CLI = join(ROOT, 'dist', 'bin', 'ai-cli.js');
@@ -26,7 +27,11 @@ let passed = 0, failed = 0;
 function check(name, condition, detail = '') {
   console.log(`${condition ? 'PASS' : 'FAIL'} ${name}`);
   if (condition) passed++;
-  else { failed++; if (detail !== '') console.log(`  ${String(detail).replace(/\s+/g, ' ').slice(0, 800)}`); }
+  else {
+    failed++;
+    if (typeof detail === 'function') console.log(JSON.stringify(detail(), null, 2));
+    else if (detail !== '') console.log(`  ${String(detail).replace(/\s+/g, ' ').slice(0, 800)}`);
+  }
 }
 const baseEnv = {
   ...process.env, AI_CLI_STATE_DIR: STATE, AI_CLI_CONFIG_DIR: CONFIG, AI_CLI_PROVIDERS_PATH: providers, AI_CLI_AUTO_UPDATE: 'off', AI_CLI_BREAKER_DISABLED: 'true',
@@ -34,12 +39,13 @@ const baseEnv = {
 };
 delete baseEnv.AI_CLI_WORKER;
 function cli(args, env = {}) {
+  const start = performance.now();
   const result = spawnSync(process.execPath, [CLI, 'kernel', ...args], { encoding: 'utf8', env: { ...baseEnv, ...env }, timeout: 180000, windowsHide: true });
-  return { code: result.status, out: result.stdout ?? '', err: result.stderr ?? '' };
+  return commandResult(result, performance.now() - start);
 }
 function json(args, env) {
   const result = cli([...args, '--json'], env);
-  try { return { ...result, data: JSON.parse(result.out) }; } catch { return { ...result, data: null }; }
+  return jsonResult(result);
 }
 const logCount = kind => existsSync(LOG) ? readFileSync(LOG, 'utf8').split('\n').filter(line => line === kind).length : 0;
 const START = ['start', '--goal', '檢查 README', '--cwd', WORK, '--max-steps', '3', '--max-decides', '3'];
@@ -96,7 +102,7 @@ try {
 
   /* ---- 正常流程 ---- */
   const approved = json(['approve', runId]);
-  check('核准後開始執行', approved.code === 0 && ['running', 'completed'].includes(approved.data?.state), approved.out + approved.err);
+  check('核准後開始執行', approved.code === 0 && ['running', 'completed'].includes(approved.data?.state), () => approvalDiagnostic(approved, runId, STATE, baseEnv));
   const done = json(['wait', runId, '--timeout', '120']);
   check('走到 completed', done.data?.state === 'completed', done.out + done.err);
   const result = json(['result', runId]);

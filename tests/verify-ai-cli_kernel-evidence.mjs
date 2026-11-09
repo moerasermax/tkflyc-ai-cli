@@ -6,6 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { commandResult, jsonResult, approvalDiagnostic } from './helpers/kernel-e2e-diagnostics.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 // --source 配合 node --import tsx，讓 worker 不必重建 dist 也能驗證相同測試。
@@ -48,6 +49,40 @@ function repo(name) {
   return folder;
 }
 try {
+  await check('E2E approval diagnostics preserve process and parse failures with bounded redacted state evidence', () => {
+    const runId = 'kr-20261109-000000-abcd';
+    const folder = join(temp, 'diagnostics');
+    const run = join(folder, 'kernel', 'runs', runId);
+    mkdirSync(run, { recursive: true });
+    writeFileSync(join(run, 'runner.json'), JSON.stringify({ pid: 123, started: 'fixture', token: 'private-runner-token' }));
+    writeFileSync(join(run, 'journal.jsonl'), `${JSON.stringify({ seq: 1, type: 'state', state: 'running', detail: 'private-prompt' })}\n{`);
+    const secret = 'fixture-sensitive-value';
+    const result = jsonResult(commandResult({ status: null, signal: 'SIGTERM', error: Object.assign(new Error(`spawn failed API_KEY=${secret}`), { code: 'ETIMEDOUT', syscall: 'spawnSync' }),
+      stdout: `{"context":"private-context","state":"running"} trailing ${secret}`, stderr: `Bearer ${secret}\npassword=unconfigured-password\n${'x'.repeat(20000)}\nlast-line` }, 180001.4));
+    const diagnostic = approvalDiagnostic(result, runId, folder, { TEST_API_KEY: secret });
+    assert.equal(diagnostic.code, null); assert.equal(diagnostic.signal, 'SIGTERM'); assert.equal(diagnostic.elapsedMs, 180001);
+    assert.equal(diagnostic.spawnError.code, 'ETIMEDOUT'); assert.equal(diagnostic.parseError.name, 'SyntaxError');
+    assert.equal(diagnostic.runId, runId); assert.equal(diagnostic.snapshot['runner.json'].pid, 123);
+    assert.equal(diagnostic.snapshot['launcher.json'].readError.code, 'ENOENT');
+    assert.equal(diagnostic.snapshot.journal.events[0].state, 'running');
+    assert.equal(diagnostic.snapshot.journal.events[1].parseError.name, 'SyntaxError');
+    assert.equal(diagnostic.stderr.truncated, true); assert.ok(diagnostic.stderr.text.length < 2100); assert.match(diagnostic.stderr.text, /last-line$/);
+    const rendered = JSON.stringify(diagnostic);
+    for (const hidden of [secret, 'unconfigured-password', 'private-context', 'private-prompt', 'private-runner-token']) assert.ok(!rendered.includes(hidden), hidden);
+    assert.ok(rendered.length < 12000);
+    const valid = jsonResult(commandResult({ status: 1, stdout: JSON.stringify({ state: 'running', context: 'private-context' }), stderr: '' }, 12));
+    const observed = approvalDiagnostic(valid, runId, folder, {});
+    assert.equal(observed.code, 1); assert.equal(observed.parseError, null); assert.equal(observed.returnedStatus.state, 'running');
+    assert.ok(!JSON.stringify(observed).includes('private-context')); // Later state never changes the original code.
+    assert.equal(approvalDiagnostic(valid, '../escape', folder, {}).snapshot.readError, 'missing or invalid runId');
+    writeFileSync(join(run, 'journal.jsonl'), `${'{}\n'.repeat(6000)}${JSON.stringify({ seq: 2, type: 'state', state: 'completed' })}\n`);
+    const tail = approvalDiagnostic(valid, runId, folder, {}).snapshot.journal;
+    assert.equal(tail.truncated, true); assert.equal(tail.events.length, 12); assert.equal(tail.events.at(-1).state, 'completed');
+    assert.equal(valid.code, 1); assert.equal(valid.data.state, 'running');
+    const malformed = jsonResult(commandResult({ status: 0, stdout: 'private-unquoted-payload', stderr: '' }, 1));
+    const malformedView = approvalDiagnostic(malformed, runId, folder, {});
+    assert.ok(!JSON.stringify(malformedView.parseError).includes('private-unquoted-payload'));
+  });
   await check('A1 NUL 清單保留 rename、空白、tab 與換行', () => {
     assert.deepEqual(parseNameStatusZ('A\0space name.ts\0R095\0tests/old\tname.ts\0tests/new\nname.ts\0D\0gone.ts\0M\0:(glob)*.ts\0'), [
       { status: 'A', path: 'space name.ts' }, { status: 'R095', oldPath: 'tests/old\tname.ts', path: 'tests/new\nname.ts' },
