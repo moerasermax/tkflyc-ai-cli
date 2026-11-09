@@ -171,7 +171,11 @@ const MARKER_REPLACE_ATTEMPTS = 20;
 const MARKER_REPLACE_RETRYABLE = new Set(['EPERM', 'EBUSY', 'EACCES']);
 /** Atomic overwrite (temp in the same directory, then rename over active.lock), like journal.ts atomicWrite.
  * Only for a marker naming a new-format slot: the old launcher cannot win wx while the file
- * exists, and its release only deletes a marker naming its own run, so nothing old is lost. */
+ * exists, so active.lock never goes missing during this step. That does not mean nothing old
+ * can be lost: the old release is read-then-delete outside our mutex, so it may delete the
+ * marker after we read it and before the rename; a second old launcher can then win wx and
+ * have its fresh lock overwritten by this rename. Residual risk, untested, needs two old runs
+ * colliding at once; see docs/ai-cli_kernel/concurrency.md (剩餘風險). */
 function replaceMarker(marker: Marker): void {
   const temp = `${legacyPath()}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   try {

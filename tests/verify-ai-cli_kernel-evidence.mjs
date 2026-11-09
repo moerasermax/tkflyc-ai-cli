@@ -20,10 +20,13 @@ const { realWorkspace } = await load('workspace');
 const { checkCitations } = await load('verdict');
 const { buildContract } = await load('templates');
 const { buildWorkerPrompt } = await load('plan');
-const { hasProbeEvidenceFormat, probeResultLabel, judgeFinishedProbe, claudeInitEvent, NO_EVIDENCE_FORMAT_HINT } = await load('probe');
-const { RunStore, newRunId, kernelRunDir } = await load('journal');
+const { hasProbeEvidenceFormat, probeResultLabel, judgeFinishedProbe, claudeInitEvent, NO_EVIDENCE_FORMAT_HINT, boundaryKey } = await load('probe');
+const { RunStore, newRunId, kernelRunDir, kernelStateDir, releaseActiveLock } = await load('journal');
 const { runKernelLoop } = await load('loop');
-const { aiCliKernelStatus } = await load('api');
+const { aiCliKernelStatus, aiCliKernelApprove } = await load('api');
+const { aiCliKernelHandleTool } = await load('mcp-tools');
+const { runKernelCli } = await load('cli');
+const { replayJournal } = await load('replay');
 const { parseDetail } = await load('dashboard-rules');
 const { detailLines } = await load('dashboard-view');
 
@@ -386,6 +389,141 @@ try {
       const detail = parseDetail(status);
       assert.match(detailLines(detail, 180).join('\n'), expected);
     }
+  });
+
+  // K3：核准時的 acknowledgeUnverifiedBoundary。只放行 UNKNOWN（沒有證據），FAIL 一律擋；沒傳旗標時行為不變。
+  // 探針結果直接寫進隔離的狀態目錄，codex 指向假 CLI；approve 的 launch 與額度都用替身，不會啟動 runner 或模型。
+  const k3Folder = repo('k3-boundary');
+  const k3Quota = async () => 80;
+  const k3ProbeFile = () => join(kernelStateDir(), 'probes', `${boundaryKey('codex').key}.json`);
+  const k3SetProbe = status => {
+    mkdirSync(join(kernelStateDir(), 'probes'), { recursive: true });
+    if (status) writeFileSync(k3ProbeFile(), JSON.stringify({ key: boundaryKey('codex').key, status, at: new Date().toISOString() }));
+    else rmSync(k3ProbeFile(), { force: true });
+  };
+  const k3Awaiting = () => { const store = new RunStore(kernelRunDir(newRunId())); store.create(buildContract({ goal: 'K3 approve', workFolder: k3Folder })); return store; };
+  const k3Approvals = store => store.read().filter(event => event.type === 'approved');
+  const k3Done = async store => { store.append({ type: 'state', state: 'cancelled' }); await releaseActiveLock(store.runId); };
+  const k3NoLaunch = async () => assert.fail('不該啟動 runner');
+  await check('K3 UNKNOWN 不帶旗標：核准照舊被拒；PASS 不帶旗標照常開工、不記同意', async () => {
+    k3SetProbe(null);
+    const store = k3Awaiting();
+    await assert.rejects(aiCliKernelApprove({ runId: store.runId }, { quota: k3Quota, launch: k3NoLaunch }), /探針結果是 UNKNOWN/);
+    assert.equal(k3Approvals(store).length, 0);
+    k3SetProbe('PASS');
+    const pass = k3Awaiting(); let launches = 0;
+    try {
+      const status = await aiCliKernelApprove({ runId: pass.runId }, { quota: k3Quota, launch: async () => { launches++; } });
+      assert.equal(launches, 1); assert.equal(status.state, 'running');
+      assert.equal(k3Approvals(pass)[0].overrides, undefined);
+      assert.doesNotMatch(status.boundaryLabel, /使用者核准時明確同意/);
+    } finally { await k3Done(pass); k3SetProbe(null); }
+  });
+  await check('K3 UNKNOWN 加旗標：可以開工，approved 記 boundary_unverified，委任書 digest 不變', async () => {
+    k3SetProbe(null);
+    const store = k3Awaiting(); const digest = store.contractDigest(); let launches = 0;
+    try {
+      const status = await aiCliKernelApprove({ runId: store.runId, acknowledgeUnverifiedBoundary: true }, { quota: k3Quota, launch: async () => { launches++; } });
+      assert.equal(launches, 1); assert.equal(status.state, 'running');
+      const approved = k3Approvals(store);
+      assert.equal(approved.length, 1); assert.deepEqual(approved[0].overrides, ['boundary_unverified']);
+      assert.equal(approved[0].contractDigest, digest); assert.equal(store.contractDigest(), digest);
+      assert.ok(replayJournal(store.read()).overrides.has('boundary_unverified'));
+      assert.match(status.boundaryLabel, /未驗證（使用者核准時明確同意）/);
+    } finally { await k3Done(store); }
+  });
+  // 斷言名稱不放「FAIL 」（FAIL 加空白）：突變 harness 會把含這段字的 PASS 行也當成失敗行，判不出是誰抓到的。
+  await check('K3 探針結果FAIL＋旗標：核准委任書與接回停下的 run 都被拒，不記核准', async () => {
+    k3SetProbe('FAIL');
+    try {
+      const store = k3Awaiting();
+      await assert.rejects(aiCliKernelApprove({ runId: store.runId, acknowledgeUnverifiedBoundary: true }, { quota: k3Quota, launch: k3NoLaunch }), /不放行 FAIL/);
+      assert.equal(k3Approvals(store).length, 0);
+      const paused = k3Awaiting();
+      paused.append({ type: 'approved', contractDigest: paused.contractDigest(), kind: 'contract' });
+      paused.append({ type: 'state', state: 'waiting_human', reason: 'boundary_unverified', detail: 'fixture' });
+      await assert.rejects(aiCliKernelApprove({ runId: paused.runId, acknowledgeUnverifiedBoundary: true }, { quota: k3Quota, launch: k3NoLaunch }), /不放行 FAIL/);
+      assert.equal(k3Approvals(paused).length, 1);
+    } finally { k3SetProbe(null); }
+  });
+  await check('K3 CLI 與 MCP 都把核准旗標傳進 approve；MCP schema 只多這個布林參數', async () => {
+    k3SetProbe('FAIL');
+    const previous = process.env.AI_CLI_KERNEL;
+    try {
+      const store = k3Awaiting();
+      let err = '';
+      const io = { stdout: () => {}, stderr: text => { err += text; } };
+      assert.equal(await runKernelCli(['approve', store.runId, '--acknowledge-unverified-boundary'], io), 1);
+      assert.match(err, /不放行 FAIL/);
+      err = '';
+      assert.equal(await runKernelCli(['approve', store.runId], io), 1);
+      assert.match(err, /探針結果是 FAIL。請先執行/); assert.doesNotMatch(err, /不放行 FAIL/);
+      process.env.AI_CLI_KERNEL = 'on';
+      await assert.rejects(aiCliKernelHandleTool('ai-cli_kernel_approve', { runId: store.runId, acknowledgeUnverifiedBoundary: true }), /不放行 FAIL/);
+      assert.equal(k3Approvals(store).length, 0);
+      const { aiCliKernelToolDefinitions } = await load('mcp-tools');
+      const props = aiCliKernelToolDefinitions().find(tool => tool.name === 'ai-cli_kernel_approve').inputSchema.properties;
+      assert.deepEqual(Object.keys(props).sort(), ['acknowledgeUnisolated', 'acknowledgeUnverifiedBoundary', 'note', 'reconcile', 'runId']);
+      assert.equal(props.acknowledgeUnverifiedBoundary.type, 'boolean');
+      assert.match(props.acknowledgeUnverifiedBoundary.description, /FAIL/);
+    } finally {
+      if (previous === undefined) delete process.env.AI_CLI_KERNEL; else process.env.AI_CLI_KERNEL = previous;
+      k3SetProbe(null);
+    }
+  });
+  await check('K3 worker（AI_CLI_WORKER=1）帶核准旗標呼叫 approve 照舊被拒', async () => {
+    k3SetProbe(null);
+    const store = k3Awaiting();
+    const previous = process.env.AI_CLI_WORKER;
+    process.env.AI_CLI_WORKER = '1';
+    try {
+      await assert.rejects(aiCliKernelApprove({ runId: store.runId, acknowledgeUnverifiedBoundary: true }, { quota: k3Quota, launch: k3NoLaunch }), /AI_CLI_NESTED_DISPATCH_BLOCKED/);
+    } finally { if (previous === undefined) delete process.env.AI_CLI_WORKER; else process.env.AI_CLI_WORKER = previous; }
+    assert.equal(k3Approvals(store).length, 0);
+  });
+
+  // loop 派工前的邊界閘：approved 事件帶 boundary_unverified 時只放行 UNKNOWN。
+  const K3_PLAN = JSON.stringify({ action: 'plan', steps: [{ id: 's1', title: '讀 README', prompt: '讀 README' }], report_step: 's1' });
+  const K3_REPORT = '## 結論\n這是一份足夠長的報告內容，用來通過長度檢查，還要再多寫幾個字才夠八十個字元的最低要求，所以這裡繼續補上一些說明文字，確保長度足夠。\n\n## 發現\n- 第一行：README.md:1\n\n## 尚待確認\n無\n';
+  const k3Executor = () => {
+    const started = [], jobs = new Map();
+    return {
+      started,
+      async start(action) { started.push(action); const job = { jobId: `k3-${started.length}`, pid: 91000 + started.length }; jobs.set(job.jobId, action); return job; },
+      async poll(job) {
+        assert.ok(started.length <= 6, 'fake run must finish');
+        const action = jobs.get(job.jobId);
+        return { state: 'finished', result: { status: 'completed', exitCode: 0, message: action.kind === 'decide' ? K3_PLAN : K3_REPORT, rawTail: '', usage: { input: 10, cached: 0, output: 5 } } };
+      },
+      async find() { return null; }, async kill() { return true; }, async isGone() { return true; },
+    };
+  };
+  const k3LoopRun = overrides => {
+    const contract = buildContract({ goal: 'K3 gate', workFolder: k3Folder });
+    const store = new RunStore(kernelRunDir(newRunId())); const digest = store.create(contract);
+    store.append({ type: 'approved', contractDigest: digest, kind: 'contract', ...(overrides ? { overrides } : {}) });
+    store.append({ type: 'state', state: 'running' });
+    return { store, contract };
+  };
+  const k3LoopDeps = (store, contract, executor, boundary) => ({ store, contract, executor, workspace: realWorkspace, boundary: async () => boundary, quota: async () => 80, agentFor: () => 'codex', versionId: () => 'fixture', snapshot: () => null, now: Date.now, sleep: () => new Promise(r => setImmediate(r)), pollMs: 1, killConfirmMs: 20, pid: process.pid });
+  await check('K3 loop：核准時同意未驗證 → 探針 UNKNOWN 照派，裁決標籤 unverified_acknowledged_at_approval', async () => {
+    const { store, contract } = k3LoopRun(['boundary_unverified']); const executor = k3Executor();
+    assert.equal(await runKernelLoop(k3LoopDeps(store, contract, executor, 'UNKNOWN')), 'completed');
+    assert.ok(executor.started.length >= 2);
+    assert.equal(JSON.parse(readFileSync(store.verdictPath, 'utf8')).boundaryLabel, 'unverified_acknowledged_at_approval');
+  });
+  await check('K3 loop：核准時同意未驗證，探針結果FAIL仍停在 boundary_unverified、不派工', async () => {
+    const { store, contract } = k3LoopRun(['boundary_unverified']); const executor = k3Executor();
+    assert.equal(await runKernelLoop(k3LoopDeps(store, contract, executor, 'FAIL')), 'waiting_human');
+    const view = replayJournal(store.read());
+    assert.equal(view.reason, 'boundary_unverified'); assert.match(view.detail, /不包含 FAIL/);
+    assert.equal(executor.started.length, 0);
+  });
+  await check('K3 loop：沒有核准同意時探針 UNKNOWN 照舊停下、不派工', async () => {
+    const { store, contract } = k3LoopRun(); const executor = k3Executor();
+    assert.equal(await runKernelLoop(k3LoopDeps(store, contract, executor, 'UNKNOWN')), 'waiting_human');
+    assert.equal(replayJournal(store.read()).reason, 'boundary_unverified');
+    assert.equal(executor.started.length, 0);
   });
 } finally { rmSync(temp, { recursive: true, force: true }); }
 assert.ok(passed + failed > 0, 'refuse an empty test selection');

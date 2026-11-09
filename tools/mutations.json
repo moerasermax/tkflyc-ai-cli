@@ -3090,7 +3090,7 @@
     "name": "kernel：探針沒過也派工",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/loop.ts",
-    "from": "if (boundary !== 'PASS') {",
+    "from": "if (boundary !== 'PASS' && !acknowledged) {",
     "to": "if (false) {",
     "expect": "探針結果不是 PASS 就不派工"
   },
@@ -5973,5 +5973,77 @@
     "from": "'--disallowedTools',\n    DENIED_WHEN_STRICT.join(','),",
     "to": "",
     "expect": "claude strict 保留 --disallowedTools 第二層"
+  },
+  {
+    "name": "kernel K3：loop 把核准時的同意也套到 FAIL",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "const acknowledged = boundary === 'UNKNOWN' && view.overrides.has('boundary_unverified');",
+    "to": "const acknowledged = view.overrides.has('boundary_unverified');",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 loop：核准時同意未驗證，探針結果FAIL仍停在 boundary_unverified"
+  },
+  {
+    "name": "kernel K3：loop 忽略核准時的同意",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "const acknowledged = boundary === 'UNKNOWN' && view.overrides.has('boundary_unverified');",
+    "to": "const acknowledged = boundary === 'UNKNOWN' && false;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 loop：核准時同意未驗證 → 探針 UNKNOWN 照派"
+  },
+  {
+    "name": "kernel K3：裁決標籤不寫核准時同意",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "view.overrides.has('boundary_unverified') ? 'unverified_acknowledged_at_approval'",
+    "to": "false ? 'unverified_acknowledged_at_approval'",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 loop：核准時同意未驗證 → 探針 UNKNOWN 照派"
+  },
+  {
+    "name": "kernel K3：approve 帶旗標時放行 FAIL",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "if (status === 'FAIL') throw",
+    "to": "if (status === 'FAIL' && !ackBoundary) throw",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 探針結果FAIL＋旗標"
+  },
+  {
+    "name": "kernel K3：approve 收到旗標但不記進 approved 事件",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "    if (ackBoundary) overrides.push('boundary_unverified');",
+    "to": "",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 UNKNOWN 加旗標"
+  },
+  {
+    "name": "kernel K3：approve 等待核准時忽略旗標",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "(status === 'UNKNOWN' && ackBoundary)",
+    "to": "(status === 'UNKNOWN' && false)",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 UNKNOWN 加旗標"
+  },
+  {
+    "name": "kernel K3：status 標籤不寫核准時同意",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "view.overrides.has('boundary_unverified') ? '未驗證（使用者核准時明確同意）；' : ''",
+    "to": "''",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 UNKNOWN 加旗標"
+  },
+  {
+    "name": "kernel K3：MCP 忽略 acknowledgeUnverifiedBoundary",
+    "file": "src/ai-cli_kernel/mcp-tools.ts",
+    "from": ", acknowledgeUnverifiedBoundary: args.acknowledgeUnverifiedBoundary === true });",
+    "to": " });",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 CLI 與 MCP 都把核准旗標傳進 approve"
+  },
+  {
+    "name": "kernel K3：CLI 忽略 --acknowledge-unverified-boundary",
+    "file": "src/ai-cli_kernel/cli.ts",
+    "from": "acknowledgeUnverifiedBoundary: flags.get('acknowledge-unverified-boundary') === true",
+    "to": "acknowledgeUnverifiedBoundary: false",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 CLI 與 MCP 都把核准旗標傳進 approve"
   }
 ]

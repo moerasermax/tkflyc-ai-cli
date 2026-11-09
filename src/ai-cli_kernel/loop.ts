@@ -636,7 +636,8 @@ ${stat}
         refsChanged: movedRefs,
         develop: { branch: develop.branch, baseCommit: develop.baseCommit, headCommit: delivered.head, changedFiles: delivered.changed, testCommand: develop.testCommand, testPassedOn: view.verification?.commit ?? null, testFailures: view.testFailures, worktree: develop.worktree },
       } : { readOnly }),
-      boundaryLabel: develop ? 'declared-not-isolated' : contract.allowUnverifiedBoundary ? 'unverified_allowed_by_caller' : 'tool-limited-not-isolated',
+      boundaryLabel: develop ? 'declared-not-isolated' : contract.allowUnverifiedBoundary ? 'unverified_allowed_by_caller'
+        : view.overrides.has('boundary_unverified') ? 'unverified_acknowledged_at_approval' : 'tool-limited-not-isolated',
       usage: view.counters,
       context: view.context,
       finishedAt: new Date(deps.now()).toISOString(),
@@ -662,8 +663,11 @@ ${stat}
     // develop 已經明示未隔離：探針證明的「工具受限」在這裡本來就不成立，不用拿來擋。
     if (!develop && !contract.allowUnverifiedBoundary) {
       const boundary = await deps.boundary(agent).catch((): BoundaryStatus => 'UNKNOWN');
-      if (boundary !== 'PASS') {
-        setState('waiting_human', 'boundary_unverified', `${agent} 的權限邊界探針結果是 ${boundary}。可能是 CLI 更新過，請先跑 probe。`);
+      // 使用者核准時明確同意未驗證（approved 事件的 boundary_unverified）只放行 UNKNOWN：沒有證據。
+      // FAIL 是探針證明限制沒生效，同意也不放行。
+      const acknowledged = boundary === 'UNKNOWN' && view.overrides.has('boundary_unverified');
+      if (boundary !== 'PASS' && !acknowledged) {
+        setState('waiting_human', 'boundary_unverified', `${agent} 的權限邊界探針結果是 ${boundary}。${boundary === 'FAIL' && view.overrides.has('boundary_unverified') ? '核准時同意的是未驗證（UNKNOWN），不包含 FAIL。' : ''}可能是 CLI 更新過，請先跑 probe。`);
         return false;
       }
     }
