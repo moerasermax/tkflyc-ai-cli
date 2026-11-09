@@ -6,6 +6,11 @@
   },
   "plugins": [
     {
+      "name": "ai-cli_kernel_panel",
+      "source": "./plugins/ai-cli_kernel_panel",
+      "description": "Open the ai-cli kernel dashboard in a new Terminal tab with /kernel, or an embedded session pane with /kernel side."
+    },
+    {
       "name": "ai-cli-jobs",
       "source": "./plugins/ai-cli-jobs",
       "description": "Show this Claude Code session's ai-cli jobs above the prompt and a one-line summary below it, polling MCP every 3 seconds without model tokens."

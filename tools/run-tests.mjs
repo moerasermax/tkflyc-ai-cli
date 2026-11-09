@@ -73,6 +73,7 @@ const TESTS = [
   'verify-ai-cli_kernel-concurrency.mjs',
   'verify-ai-cli_kernel-e2e.mjs',
   'verify-ai-cli_kernel-dashboard.mjs',
+  'verify-ai-cli_kernel-panel.mjs',
   'verify-run-tests.mjs',
   'verify-mutation-manifest.mjs',
 ];

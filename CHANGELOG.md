@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+- 新增正式 Claude Code plugin `ai-cli_kernel_panel` 0.1.0：`/kernel` 開 Terminal 新分頁、`/kernel side` 開 session 側邊面板，未知參數回用法；操作改讀 CLI actions JSON、確認時重查 commit 與操作內容，支援多 run 及完整失敗輸出，並將無 Claude CLI 的核心回歸納入 npm test。（@moerasermax）
+
 - kernel e2e 核准斷言失敗時保留退出碼、signal、spawn／JSON 解析錯誤與耗時，輸出有界且遮蔽敏感值的串流及唯讀 runner／journal 摘要；保留原斷言與逾時設定，補診斷回歸檢查，不據最後完成狀態推定原斷言成功。
 
 - F2／F4／F5（5579 交付後獨立稽核）：測試鎖將協調忙碌改成可辨識型別，等鎖可繼續及停止；command／runner claim 有限重試，release 耗盡記 journal 退讓，避免 finally 把通過測試改成失敗。租約改每秒 kill(0)，同 token／命令完整身分查詢每 30 秒一次，換人立即重查，降低 Windows PowerShell 查詢負擔。TAP 的 cancelled／skipped／todo 各最多一次且順序固定，防止重複或亂序的矛盾統計被接受。移除已提交的原始突變執行紀錄，改留既有與本次分組摘要；新 log 留系統暫存，因原 harness 最後必須成功讀 Git status，snapshot 仍暫置 repo 並於成功／失敗清理。
