@@ -774,6 +774,12 @@ const rejecting = async promise => { try { await promise; return null; } catch (
   check('唯讀範本的步驟沒寫 mode 就是 read', parseDecision(JSON.stringify({ action: 'plan', steps: [{ id: 's1', title: 't', prompt: 'p' }] }), readOnly, 1).steps[0].mode === 'read');
   check('唯讀範本的 worker 提示不提改檔權限', buildWorkerPrompt(readOnly, { id: 's', title: 't', prompt: 'p', mode: 'read' }, 'K', false).includes('唯讀工作者'));
   check('開發工作者被告知不能 push', buildWorkerPrompt(developContract, { id: 's', title: 't', prompt: 'p', mode: 'write' }, 'K', false).includes('不要 push'));
+  const writePrompt = buildWorkerPrompt(developContract, { id: 's', title: 't', prompt: 'p', mode: 'write' }, 'K', false);
+  check('開發工作者被告知刪檔被擋不要繞過、交給人', ['刪除檔案若被 hook 或權限擋下', '不要換別的方式繞過', '交給人執行', '不要在 CHANGELOG 或文件寫成已刪除'].every(part => writePrompt.includes(part)), writePrompt);
+  const readPrompt = buildWorkerPrompt(developContract, { id: 's', title: 't', prompt: 'p', mode: 'read' }, 'K', false);
+  check('唯讀工作者的提示不含刪檔規則', readPrompt.includes('唯讀工作者') && !readPrompt.includes('刪除檔案若被'), readPrompt);
+  const developDecide = buildDecidePrompt(developContract, replayJournal([]), 'K', Date.now());
+  check('決策者被告知刪除被擋不要換方式重派、寫進尚待確認', /刪除檔案被 hook 或權限擋下時，不要換方式重派[^\n]*「尚待確認」/.test(developDecide), developDecide);
 
   const executor = new FileJobExecutor();
   const write = { actionId: 'a1', kind: 'worker', stepId: 's', model: 'gpt-6.1-sol', prompt: 'p', marker: 'K', mode: 'write' };

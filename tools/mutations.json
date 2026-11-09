@@ -5781,5 +5781,21 @@
     "to": "",
     "script": "verify-ai-cli_kernel-e2e.mjs",
     "expect": "額度查詢的 Claude 走測試替身"
+  },
+  {
+    "name": "kernel prompt：開發工作者沒被告知刪檔被擋要交給人",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "刪除檔案若被 hook 或權限擋下，不要換別的方式繞過（例如改用其他指令、覆寫成空檔、搬移），在回覆列出要刪的路徑與確切指令，交給人執行；刪除完成前，不要在 CHANGELOG 或文件寫成已刪除。",
+    "to": "",
+    "expect": "刪檔被擋不要繞過"
+  },
+  {
+    "name": "kernel prompt：決策者沒被告知刪除被擋不要重派",
+    "script": "verify-ai-cli_kernel.mjs",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "- worker 回報刪除檔案被 hook 或權限擋下時，不要換方式重派，也不要叫 worker 繞過；把要刪的路徑與確切指令寫進最終報告的「尚待確認」，交給人執行。",
+    "to": "",
+    "expect": "不要換方式重派"
   }
 ]
