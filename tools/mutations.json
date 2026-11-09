@@ -5861,5 +5861,61 @@
     "to": "  return slots.map(",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "I5 same_repo refusal names cancel for a legacy run only"
+  },
+  {
+    "name": "Claude strict 拿掉 --restricted",
+    "file": "src/agents/claude.ts",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "'--restricted',",
+    "to": "",
+    "expect": "claude strict 帶 --restricted"
+  },
+  {
+    "name": "Claude strict 唯讀白名單放寬（多給 shell 工具）",
+    "file": "src/agents/claude.ts",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "Object.freeze(['Read', 'Glob', 'Grep'])",
+    "to": "Object.freeze(['Read', 'Glob', 'Grep', 'Bash'])",
+    "expect": "claude strict 的 --tools 白名單剛好是唯讀三件"
+  },
+  {
+    "name": "Claude strict 拿掉 --tools 白名單（只剩黑名單）",
+    "file": "src/agents/claude.ts",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "...(tools.length > 0 ? ['--tools', tools.join(',')] : ['--tools=']),",
+    "to": "",
+    "expect": "claude strict 的 --tools 白名單剛好是唯讀三件"
+  },
+  {
+    "name": "Claude strict 的 --tools 拆成多個位置值",
+    "file": "src/agents/claude.ts",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "['--tools', tools.join(',')]",
+    "to": "['--tools', ...tools]",
+    "expect": "claude strict 的 --tools 值後面緊接另一個旗標"
+  },
+  {
+    "name": "Claude strict 零工具時 --tools 帶空字串值",
+    "file": "src/agents/claude.ts",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "['--tools=']",
+    "to": "['--tools', '']",
+    "expect": "claude strict 零工具時沒有空字串參數"
+  },
+  {
+    "name": "Claude strict 零工具時仍帶空的 --allowedTools",
+    "file": "src/agents/claude.ts",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "...(tools.length > 0 ? ['--allowedTools', tools.join(',')] : []),",
+    "to": "'--allowedTools', tools.join(','),",
+    "expect": "claude strict 零工具時沒有空字串參數"
+  },
+  {
+    "name": "Claude strict 拿掉 --disallowedTools 第二層",
+    "file": "src/agents/claude.ts",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "'--disallowedTools',\n    DENIED_WHEN_STRICT.join(','),",
+    "to": "",
+    "expect": "claude strict 保留 --disallowedTools 第二層"
   }
 ]
