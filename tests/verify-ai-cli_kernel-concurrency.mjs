@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url))), source = process.argv.includes('--source');
 const load = name => import(pathToFileURL(join(ROOT, source ? 'src' : 'dist', 'ai-cli_kernel', `${name}.${source ? 'ts' : 'js'}`)).href);
 const { RunStore, kernelRunDir, kernelStateDir, newRunId, acquireActiveLock, releaseActiveLock } = await load('journal');
-const { admitRun, readActiveRuns, validateConcurrencyConfig, normalizedOrigin, claimRunnerSlot, ensureLegacyMarker, startLegacyMarkerWatch, LegacyMarkerReplaceFailed } = await load('admission');
+const { admitRun, readActiveRuns, validateConcurrencyConfig, normalizedOrigin, claimRunnerSlot, ensureLegacyMarker, startLegacyMarkerWatch, LegacyMarkerReplaceFailed, releaseRunSlot } = await load('admission');
 const { buildContract } = await load('templates');
 const { remainingPercentFromUsage } = await load('runtime');
 const { replayJournal, activeMinutes } = await load('replay');
@@ -896,7 +896,8 @@ try {
     b.append({ type: 'state', state: 'cancelled' });
     calls = failing(Infinity);
     let caught;
-    try { await releaseActiveLock(b.runId); } catch (error) { caught = error; } finally { restore(); }
+    // releaseRunSlot itself raises it; releaseActiveLock only journals it (I2).
+    try { await releaseRunSlot(b.runId); } catch (error) { caught = error; } finally { restore(); }
     assert.ok(caught instanceof LegacyMarkerReplaceFailed, `expected LegacyMarkerReplaceFailed, got ${caught}`);
     assert.equal(caught.code, 'KERNEL_LEGACY_MARKER_REPLACE_FAILED');
     assert.ok(calls() > 1 && caught.attempts === calls(), `bounded retries: ${calls()}`);
@@ -966,6 +967,170 @@ try {
     assert.equal(calls, seen, 'no check after stop');
   });
 
+  /* ---- I1～I5：3a1a 稽核修正。 ---- */
+  const slotFile = store => join(kernelStateDir(), 'active-runs', `${store.runId}.json`);
+  /** 原子覆蓋（rename 到 active.lock）持續 EPERM；takeMarker 從 active.lock 移出的 rename 不受影響。 */
+  async function withMarkerEperm(work) {
+    const { default: fs } = await import('node:fs');
+    const { syncBuiltinESMExports } = await import('node:module');
+    const original = fs.renameSync;
+    let failures = 0;
+    fs.renameSync = (from, to) => {
+      if (to === markerPath()) { failures++; throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' }); }
+      return original(from, to);
+    };
+    syncBuiltinESMExports();
+    try { const result = await work(); return { result, failures }; }
+    finally { fs.renameSync = original; syncBuiltinESMExports(); }
+  }
+  await test('I2 a failed marker overwrite never fails a delivered run', async () => {
+    const { settleRunnerRun } = await load('runner-settle');
+    const noKill = { kill: async () => assert.fail('no open action to kill') };
+    const a = fresh(), b = fresh();
+    await admit(a); await admit(b);
+    assert.equal(markerRun(), a.runId);
+    const before = a.read().length;
+    const settled = await withMarkerEperm(() => settleRunnerRun(a, noKill, async () => { a.append({ type: 'state', state: 'completed' }); return 'completed'; }));
+    assert.equal(settled.result, 'completed', 'settleRunnerRun returns the terminal state');
+    assert.ok(settled.failures > 1, `the overwrite was attempted: ${settled.failures}`);
+    const events = a.read().slice(before);
+    assert.equal(replayJournal(a.read()).state, 'completed', 'the terminal state is not rewritten');
+    assert.ok(!events.some(e => e.type === 'state' && e.state !== 'completed'), 'no kernel_error / failed state');
+    const failed = events.filter(e => e.type === 'slot_release_failed');
+    assert.equal(failed.length, 1); assert.match(failed[0].detail, /active\.lock 原子覆蓋失敗/);
+    assert.equal(markerRun(), a.runId);
+    // releaseActiveLock reports false instead of throwing; cancel of the terminal run reports it too.
+    assert.equal((await withMarkerEperm(() => releaseActiveLock(a.runId))).result, false);
+    const status = (await withMarkerEperm(() => api.aiCliKernelCancel({ runId: a.runId }))).result;
+    assert.equal(status.state, 'completed'); assert.match(status.detail, /改指向重試耗盡/);
+    assert.equal(replayJournal(a.read()).state, 'completed');
+    // Other release errors still propagate.
+    await assert.rejects(releaseActiveLock(a.runId, { deps: { mutex: async () => { throw new Error('slot disk error'); } } }), /slot disk error/);
+    // The next coordination (here the last release) moves the marker off A and reclaims what was left.
+    await finish(b);
+    assert.ok(!existsSync(slotFile(a)), 'nothing is left behind for good');
+    assert.equal(existsSync(markerPath()), false);
+  });
+  await test('I1 release failure is recovered by the marker check without take+put', async () => {
+    const a = fresh(), b = fresh(), racer = fresh();
+    await admit(a); await admit(b);
+    assert.equal(markerRun(), a.runId);
+    a.append({ type: 'state', state: 'cancelled' });
+    let released;
+    const failing = await withMarkerEperm(() => withLegacyProbe(racer, async () => { released = await releaseActiveLock(a.runId); }));
+    assert.equal(released, false);
+    assert.deepEqual(failing.result.leaks, [], 'no wx window while the overwrite fails');
+    assert.equal(markerRun(), a.runId, 'the marker still names A');
+    assert.ok(existsSync(slotFile(a)), "A's slot file stays as proof that A is a new-format run");
+    assert.deepEqual(readActiveRuns().map(run => run.runId), [b.runId], 'the kept slot of a terminal run holds no place');
+    // Recovery while B is alive: the periodic check overwrites atomically instead of take+put.
+    assert.equal(acquireActiveLock(racer.runId).ok, false);
+    let check;
+    const recovery = await withLegacyProbe(racer, async () => { check = await ensureLegacyMarker(b); });
+    assert.equal(check, 'repaired');
+    assert.deepEqual(recovery.leaks, [], 'an old launcher never wins wx while the marker moves off the kept slot');
+    assert.ok(recovery.overwrites >= 1, JSON.stringify(recovery));
+    assert.equal(markerRun(), b.runId, 'the marker names the live new-format slot');
+    assert.ok(!existsSync(slotFile(a)), 'the kept slot is reclaimed once the marker moved');
+    assert.equal(await ensureLegacyMarker(b), 'ok');
+    assert.equal(acquireActiveLock(racer.runId).ok, false);
+    await finish(b);
+    assert.equal(existsSync(markerPath()), false);
+    await finish(racer);
+  });
+  await test('I1 release failure is recovered by the next admission; the kept slot never counts', async () => {
+    const dir = repo(), a = fresh(dir), b = fresh(), c = fresh(dir), racer = fresh();
+    await admit(a); await admit(b);
+    a.append({ type: 'state', state: 'completed' });
+    let released;
+    const failing = await withMarkerEperm(() => withLegacyProbe(racer, async () => { released = await releaseActiveLock(a.runId); }));
+    assert.equal(released, false); assert.deepEqual(failing.result.leaks, []);
+    assert.equal(markerRun(), a.runId); assert.ok(existsSync(slotFile(a)));
+    // maxRuns 2 and C in A's repo: counting the kept slot would refuse C (slots_full or same_repo).
+    writeFileSync(join(kernelStateDir(), 'concurrency.json'), JSON.stringify({ maxRuns: 2 }));
+    try {
+      const recovery = await withLegacyProbe(racer, () => admit(c));
+      assert.deepEqual(recovery.leaks, [], 'an old launcher never wins wx while admission moves the marker off the kept slot');
+      assert.ok(recovery.overwrites >= 1, JSON.stringify(recovery));
+    } finally { rmSync(join(kernelStateDir(), 'concurrency.json'), { force: true }); }
+    assert.equal(markerRun(), b.runId, 'the marker names a live new-format slot');
+    assert.ok(!existsSync(slotFile(a)), 'admission reclaims the kept slot');
+    assert.deepEqual(readActiveRuns().map(run => run.runId).sort(), [b.runId, c.runId].sort());
+    await finish(b); await finish(c);
+    assert.equal(existsSync(markerPath()), false);
+    await finish(racer);
+  });
+  await test('I1 admission reclaim failure keeps the slot for the next coordination', async () => {
+    const a = fresh(), b = fresh(), c = fresh(), racer = fresh();
+    await admit(a); await admit(b);
+    a.append({ type: 'state', state: 'completed' }); // its release never ran (runner died)
+    let error;
+    const failing = await withMarkerEperm(() => withLegacyProbe(racer, async () => { try { await admit(c); } catch (caught) { error = caught; } }));
+    assert.ok(error instanceof LegacyMarkerReplaceFailed, `expected LegacyMarkerReplaceFailed, got ${error}`);
+    assert.deepEqual(failing.result.leaks, []);
+    assert.equal(markerRun(), a.runId);
+    assert.ok(existsSync(slotFile(a)), 'the reclaimed slot stays while the marker still names it');
+    assert.ok(!existsSync(slotFile(c))); assert.equal(replayJournal(c.read()).state, 'awaiting_approval');
+    assert.deepEqual(readActiveRuns().map(run => run.runId), [b.runId]);
+    let check;
+    const recovery = await withLegacyProbe(racer, async () => { check = await ensureLegacyMarker(b); });
+    assert.equal(check, 'repaired');
+    assert.deepEqual(recovery.leaks, [], 'an old launcher never wins wx during recovery');
+    assert.ok(recovery.overwrites >= 1, JSON.stringify(recovery));
+    assert.equal(markerRun(), b.runId);
+    assert.ok(!existsSync(slotFile(a)));
+    await admit(c);
+    assert.equal(markerRun(), b.runId);
+    await finish(b); await finish(c);
+    assert.equal(existsSync(markerPath()), false);
+    await finish(racer);
+  });
+  await test('I3 marker check gives up within a second while another holder has the admission mutex', async () => {
+    const a = fresh();
+    await admit(a);
+    rmSync(markerPath()); // only a missing marker sends the check into the mutex
+    const tickets = join(kernelStateDir(), 'admission.tickets');
+    let entered, release;
+    const inside = new Promise(resolve => { entered = resolve; });
+    const held = new Promise(resolve => { release = resolve; });
+    // A real holder: another live ticket in the same bakery, inside its critical section.
+    const holder = withProcessMutex('admission', async () => { entered(); await held; });
+    await inside;
+    const snapshot = readdirSync(tickets).sort();
+    const before = a.read().length;
+    let result, took, after;
+    try {
+      const started = Date.now();
+      result = await ensureLegacyMarker(a);
+      took = Date.now() - started;
+      after = readdirSync(tickets).sort();
+    } finally { release(); await holder; }
+    assert.equal(result, 'busy');
+    assert.ok(took < 1000, `gave up after ${took}ms`);
+    assert.deepEqual(after, snapshot, 'the check leaves no ticket behind');
+    assert.equal(a.read().length, before, 'busy is skipped silently');
+    assert.equal(replayJournal(a.read()).state, 'running');
+    assert.equal(existsSync(markerPath()), false);
+    assert.equal(await ensureLegacyMarker(a), 'repaired');
+    assert.equal(markerRun(), a.runId);
+    await finish(a);
+  });
+  await test('I5 same_repo refusal names cancel for a legacy run only', async () => {
+    const oldRepo = repo(), legacy = fresh(oldRepo), x = fresh(oldRepo);
+    legacyStart(legacy); // an old launcher runs L in this repo
+    await assert.rejects(admit(x), e => e.reason === 'same_repo' && e.heldBy.includes(legacy.runId) && e.message.includes(`可用 ai-cli kernel cancel ${legacy.runId} 釋放`));
+    assert.ok(existsSync(legacyRecord(legacy)));
+    legacyEnd(legacy);
+    const newRepo = repo(), n = fresh(newRepo), y = fresh(newRepo);
+    await admit(n);
+    let blocked;
+    await assert.rejects(admit(y), e => { blocked = e; return e.reason === 'same_repo' && e.heldBy.includes(n.runId); });
+    assert.ok(blocked.message.includes(n.runId), blocked.message);
+    assert.ok(!blocked.message.includes('cancel'), `a new-format slot gets no cancel hint: ${blocked.message}`);
+    await finish(n); await finish(x); await finish(y);
+    assert.equal(existsSync(legacyRecord(legacy)), false);
+    assert.equal(existsSync(markerPath()), false);
+  });
   /* ---- H3：catch 路徑把舊版 awaiting_approval 標記改指向新版名額（行為不改，只驗證取捨）。 ---- */
   await test('H3 refused approval behind an awaiting legacy marker keeps the legacy run counted', async () => {
     const dir = repo(), b = fresh(), legacy = fresh(dir), x = fresh(), sameRepo = fresh(dir);
@@ -979,8 +1144,8 @@ try {
     assert.equal(markerRun(), b.runId, 'G2 rule: with a new-format slot the marker names it');
     let blocked;
     await assert.rejects(admit(sameRepo), e => { blocked = e; return e.reason === 'same_repo' && e.heldBy.includes(legacy.runId) && e.message.includes(legacy.runId); });
-    // Observed: same_repo carries L's runId but no cancel hint (only the awaiting-marker refusal does).
-    console.log(`H3 same_repo message: ${blocked.message}`);
+    // I5: a legacy run blocking the repo can only be released by cancel, so the refusal says how.
+    assert.ok(blocked.message.includes(`可用 ai-cli kernel cancel ${legacy.runId} 釋放`), blocked.message);
     assert.equal(markerRun(), b.runId);
     assert.ok(readActiveRuns().some(run => run.runId === legacy.runId));
     assert.equal((await api.aiCliKernelCancel({ runId: legacy.runId })).state, 'cancelled');

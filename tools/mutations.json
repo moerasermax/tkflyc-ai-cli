@@ -5313,8 +5313,8 @@
   {
     "name": "kernel D：同 repo 不互斥",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "    if (same.length) throw new AdmissionBlocked('same_repo', same.map(slot => slot.runId), '同 repo 同時最多一個 run');",
-    "to": "    if (false) throw new AdmissionBlocked('same_repo', same.map(slot => slot.runId), '同 repo 同時最多一個 run');",
+    "from": "      if (same.length) throw new AdmissionBlocked('same_repo', same.map(slot => slot.runId), `同 repo 同時最多一個 run${cancelHint(same)}`);",
+    "to": "    if (false) throw new AdmissionBlocked('same_repo', same.map(slot => slot.runId), `同 repo 同時最多一個 run${cancelHint(same)}`);",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "five real processes contend for one common git repo"
   },
@@ -5337,8 +5337,8 @@
   {
     "name": "kernel D：死亡核准程序名額不回收",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "      if (!view || view.state === 'awaiting_approval' || abandoned) { rmSync(slotPath(slot.runId), { force: true }); reclaimed.add(slot.runId); continue; }",
-    "to": "      if (!view || view.state === 'awaiting_approval') { rmSync(slotPath(slot.runId), { force: true }); reclaimed.add(slot.runId); continue; }",
+    "from": "      if (!view || view.state === 'awaiting_approval' || abandoned) { if (view) rmSync(slotPath(slot.runId), { force: true }); reclaimed.add(slot.runId); continue; }",
+    "to": "      if (!view || view.state === 'awaiting_approval') { if (view) rmSync(slotPath(slot.runId), { force: true }); reclaimed.add(slot.runId); continue; }",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "real dead admission owner and dead mutex ticket are reclaimed"
   },
@@ -5441,8 +5441,8 @@
   {
     "name": "kernel F1F3：新版不建立相容標記",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "      reconcileLegacyMarker([...active, candidate], reclaimed, true);",
-    "to": "      reconcileLegacyMarker(active, reclaimed, true);",
+    "from": "      try { reconcileLegacyMarker([...active, candidate], reclaimed, true); }",
+    "to": "      try { reconcileLegacyMarker(active, reclaimed, true); }",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "F1 new reservations exclude legacy launchers until final release"
   },
@@ -5465,8 +5465,8 @@
   {
     "name": "kernel F1F3：釋放後不修復相容標記",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "    reconcileLegacyMarker(remaining, new Set([runId]));",
-    "to": "    if (!remaining.length) reconcileLegacyMarker(remaining, new Set([runId]));",
+    "from": "    try { reconcileLegacyMarker(remaining, released); }",
+    "to": "    try { if (!remaining.length) reconcileLegacyMarker(remaining, released); }",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "F1 marker deduplication permits three slots and release repoints it"
   },
@@ -5721,8 +5721,8 @@
   {
     "name": "kernel G2b：標記指向自己且無名額檔時誤判成舊版核准",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "      reconcileLegacyMarker([...active, candidate], reclaimed, true);",
-    "to": "      if (readLegacyLock()?.runId === store.runId && !own && replayJournal(store.read()).state === 'awaiting_approval') throw new AdmissionBlocked('slots_full', [store.runId], '舊版正在核准');\n      reconcileLegacyMarker([...active, candidate], reclaimed, true);",
+    "from": "      try { reconcileLegacyMarker([...active, candidate], reclaimed, true); }",
+    "to": "      if (readLegacyLock()?.runId === store.runId && !own && replayJournal(store.read()).state === 'awaiting_approval') throw new AdmissionBlocked('slots_full', [store.runId], '舊版正在核准');\n      try { reconcileLegacyMarker([...active, candidate], reclaimed, true); }",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "G2b own marker left before the slot write"
   },
@@ -5761,15 +5761,15 @@
   {
     "name": "kernel H2：定期檢查發現缺標記卻不補",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "      reconcileLegacyMarker(targets);",
-    "to": "      void targets;",
+    "from": "      try { reconcileLegacyMarker(targets, released); }",
+    "to": "      try { void targets; }",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "H2 marker check restores a deleted marker"
   },
   {
     "name": "kernel H2：標記正常時也進 admission 互斥",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "    if (marker && slots.some(slot => slot.runId === marker.runId)) return 'ok';",
+    "from": "    if (marker && slots.some(slot => slot.runId === marker.runId) && liveState(marker.runId)) return 'ok';",
     "to": "    void marker;",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "H2 healthy marker never enters the admission mutex"
@@ -5797,5 +5797,69 @@
     "from": "- worker 回報刪除檔案被 hook 或權限擋下時，不要換方式重派，也不要叫 worker 繞過；把要刪的路徑與確切指令寫進最終報告的「尚待確認」，交給人執行。",
     "to": "",
     "expect": "不要換方式重派"
+  },
+  {
+    "name": "kernel I1：定期檢查把已終止 run 留下的名額檔當成健康標記",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "    if (marker && slots.some(slot => slot.runId === marker.runId) && liveState(marker.runId)) return 'ok';",
+    "to": "    if (marker && slots.some(slot => slot.runId === marker.runId)) return 'ok';",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "I1 release failure is recovered by the marker check"
+  },
+  {
+    "name": "kernel I1：釋放時先刪名額檔（覆蓋失敗後認不出新版 run）",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "    if (liveState(runId)) rmSync(slotPath(runId), { force: true });",
+    "to": "    rmSync(slotPath(runId), { force: true });",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "I1 release failure is recovered by the marker check"
+  },
+  {
+    "name": "kernel I1：回收過期名額時先刪名額檔（覆蓋失敗後認不出新版 run）",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "{ if (view) rmSync(slotPath(slot.runId), { force: true }); reclaimed.add(slot.runId); continue; }",
+    "to": "{ rmSync(slotPath(slot.runId), { force: true }); reclaimed.add(slot.runId); continue; }",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "I1 admission reclaim failure keeps the slot"
+  },
+  {
+    "name": "kernel I1：標記仍指向時也刪掉留作證據的名額檔",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "    if (liveState(runId) || named === undefined || named === runId) continue;",
+    "to": "    if (liveState(runId)) continue;",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "I1 release failure is recovered by the marker check"
+  },
+  {
+    "name": "kernel I2：active.lock 覆蓋失敗讓已交付的 runner 以失敗結束",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "from": "    if (error instanceof LegacyMarkerReplaceFailed) {",
+    "to": "    if (error instanceof LegacyMarkerReplaceFailed && error.attempts < 0) {",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "I2 a failed marker overwrite never fails a delivered run"
+  },
+  {
+    "name": "kernel I3：定期檢查遇到互斥忙碌仍排隊等 15 秒",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "    }, { maxWaitMs: LEGACY_MARKER_CHECK_WAIT_MS });",
+    "to": "    });",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "I3 marker check gives up within a second"
+  },
+  {
+    "name": "kernel I5：同 repo 被舊版 run 擋下時沒有 cancel 提示",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "`同 repo 同時最多一個 run${cancelHint(same)}`",
+    "to": "'同 repo 同時最多一個 run'",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "I5 same_repo refusal names cancel for a legacy run only"
+  },
+  {
+    "name": "kernel I5：新版名額擋下時也附 cancel 提示",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "  return slots.filter(slot => slot.legacy).map(",
+    "to": "  return slots.map(",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "expect": "I5 same_repo refusal names cancel for a legacy run only"
   }
 ]

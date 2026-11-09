@@ -51,9 +51,12 @@ export async function identityAlive(owner: ProcessIdentity): Promise<boolean> {
   return live ? !owner.started || sameIdentity(owner, live) : mayBeAlive(owner.pid);
 }
 
-export async function withProcessMutex<T>(name: string, work: () => T | Promise<T>, deps: { now?: () => number; sleep?: (ms: number) => Promise<void> } = {}): Promise<T> {
+/** `maxWaitMs`（I3）：整次取得的等待上限，從呼叫起算，含第一次身分查詢；取不到就丟 ProcessMutexBusy，
+ * finally 照常清掉自己的 ticket。不給就是原本的 15 秒，行為完全相同。只放棄、不搶，所以不影響互斥正確性。 */
+export async function withProcessMutex<T>(name: string, work: () => T | Promise<T>, deps: { now?: () => number; sleep?: (ms: number) => Promise<void>; maxWaitMs?: number } = {}): Promise<T> {
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const bounded = deps.maxWaitMs === undefined ? undefined : now() + deps.maxWaitMs;
   const directory = join(kernelStateDir(), `${name}.tickets`);
   mkdirSync(directory, { recursive: true });
   const mine: Ticket = { owner: await processIdentity(), number: 0, id: `${process.pid}-${randomBytes(12).toString('hex')}` };
@@ -85,7 +88,10 @@ export async function withProcessMutex<T>(name: string, work: () => T | Promise<
     const others = read();
     // Windows identity lookup is expensive. Batch the initial snapshot; repeated
     // live-ticket checks use kill(0), with a fresh identity check on the next call.
-    const identities = await lookupIdentities([...new Set(others.filter(ticket => ticket.id !== mine.id).map(ticket => ticket.owner.pid))]).catch(() => new Map<number, ProcessIdentity>());
+    const lookup = lookupIdentities([...new Set(others.filter(ticket => ticket.id !== mine.id).map(ticket => ticket.owner.pid))]).catch(() => new Map<number, ProcessIdentity>());
+    // Bounded callers do not wait out a slow identity lookup either: out of time, every ticket whose
+    // pid exists counts as alive (never less safe, only more likely busy) and the deadline below gives up.
+    const identities = bounded === undefined ? await lookup : await Promise.race([lookup, sleep(Math.max(0, bounded - now())).then(() => new Map<number, ProcessIdentity>())]);
     for (const ticket of others) {
       if (ticket.id === mine.id) continue;
       const live = identities.get(ticket.owner.pid);
@@ -95,7 +101,7 @@ export async function withProcessMutex<T>(name: string, work: () => T | Promise<
     for (const ticket of others) if (ticket.id !== mine.id && !await stale(ticket)) maximum = Math.max(maximum, ticket.number);
     mine.number = maximum + 1;
     atomicWrite(path, JSON.stringify(mine));
-    const deadline = now() + 15000;
+    const deadline = bounded ?? now() + 15000;
     for (;;) {
       let blocked = false;
       for (const ticket of read()) {
