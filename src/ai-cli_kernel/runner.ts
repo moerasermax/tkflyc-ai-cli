@@ -14,7 +14,7 @@ import { gitSnapshot } from './verdict.js';
 import { realWorkspace } from './workspace.js';
 import { aiCliKernelMemoryForContract } from './memory.js';
 import { settleRunnerRun } from './runner-settle.js';
-import { claimRunnerSlot } from './admission.js';
+import { claimRunnerSlot, startLegacyMarkerWatch } from './admission.js';
 
 async function main(): Promise<void> {
   const directory = process.argv[2];
@@ -23,6 +23,8 @@ async function main(): Promise<void> {
   const self = (await lookupIdentities([process.pid])).get(process.pid) ?? { pid: process.pid, started: '', name: 'node' };
   if (!await claimRunnerSlot(store, () => acquireRunnerLock(store, self, lookupIdentities))) return;
   const executor = new FileJobExecutor();
+  // 舊版先讀後刪可能刪掉新版名額的 active.lock；每 20 秒便宜檢查一次，缺了就補回（只記 journal，不影響 run）。
+  const stopMarkerWatch = startLegacyMarkerWatch(store);
   try {
     await settleRunnerRun(store, executor, async () => {
       const contract = store.readContract();
@@ -34,6 +36,7 @@ async function main(): Promise<void> {
       });
     });
   } finally {
+    stopMarkerWatch();
     releaseRunnerLock(store, self);
   }
 }

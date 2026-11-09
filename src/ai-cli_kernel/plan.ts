@@ -93,6 +93,7 @@ export function buildDecidePrompt(contract: KernelContract, view: RunView, marke
   const scope = develop ? `- 工作目錄：${workDirOf(develop)}。這是 kernel 為這個任務開的 worktree，分支 ${develop.branch}，基準 commit ${develop.baseCommit.slice(0, 10)}。
 - step 的 mode 決定權限：write 可以改檔和跑指令，read 只能讀。不寫就是 write。審查和查資料用 read。
 - 每個 write 步驟通過後 kernel 會自動 commit，worker 不用 commit。失敗步驟留下的改動還在工作目錄裡，要繼續修或請 worker 還原。
+- worker 回報刪除檔案被 hook 或權限擋下時，不要換方式重派，也不要叫 worker 繞過；把要刪的路徑與確切指令寫進最終報告的「尚待確認」，交給人執行。
 - 測試由 kernel 自己跑，你不能改：${develop.testCommand}。每段計畫走完、或報告步驟通過後，只要有新 commit 就會跑。
 - 只有「有改動、最新 commit 通過測試、報告通過驗收」才算完成。${develop.allowedPaths.length ? `
 - 只能改這些路徑（相對 repo 根目錄）：${develop.allowedPaths.join('、')}。改到其他地方這一步就不算通過。` : ''}` : `- 工作目錄：${contract.workFolder}
@@ -139,7 +140,7 @@ export function buildWorkerPrompt(contract: KernelContract, step: PlanStep, mark
   const format = isReport ? `\n\n## 交付格式（kernel 會逐項驗收）\n${contract.reportInstructions}` : '';
   const develop = contract.develop;
   const role = develop && step.mode === 'write'
-    ? `你是 ai-cli_kernel 派出的開發工作者：可以改檔和跑指令，但只能動工作目錄裡的東西${develop.allowedPaths.length ? `，而且只能改 ${develop.allowedPaths.join('、')}` : ''}。不要 push、不要切換或建立分支、不要改 git 設定、不要改寫歷史。改完不用 commit，kernel 會處理。kernel 會自己跑 ${develop.testCommand} 驗收，所以你說測過了不算數，做不到就老實寫出來。不開子 agent，也不要呼叫 ai-cli。無法問使用者。一律在前景完成，不要把工作丟到背景。`
+    ? `你是 ai-cli_kernel 派出的開發工作者：可以改檔和跑指令，但只能動工作目錄裡的東西${develop.allowedPaths.length ? `，而且只能改 ${develop.allowedPaths.join('、')}` : ''}。不要 push、不要切換或建立分支、不要改 git 設定、不要改寫歷史。改完不用 commit，kernel 會處理。kernel 會自己跑 ${develop.testCommand} 驗收，所以你說測過了不算數，做不到就老實寫出來。刪除檔案若被 hook 或權限擋下，不要換別的方式繞過（例如改用其他指令、覆寫成空檔、搬移），在回覆列出要刪的路徑與確切指令，交給人執行；刪除完成前，不要在 CHANGELOG 或文件寫成已刪除。不開子 agent，也不要呼叫 ai-cli。無法問使用者。一律在前景完成，不要把工作丟到背景。`
     : `你是 ai-cli_kernel 派出的唯讀工作者：不改任何檔案、不開子 agent，也不要呼叫 ai-cli。無法問使用者。一律在前景完成，不要把工作丟到背景。`;
   const verification = review?.verification;
   const testLine = !verification ? '這個 commit 還沒跑過測試。'

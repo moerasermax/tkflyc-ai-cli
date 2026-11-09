@@ -8,7 +8,7 @@ import { atomicWrite, digestText, kernelRunDir, kernelStateDir, RunStore } from 
 import { openActions, replayJournal } from './replay.js';
 import { isTerminalState, type KernelContract } from './types.js';
 import { agentForModel, readQuota } from './runtime.js';
-import { identityAlive, processIdentity, withProcessMutex, retryProcessMutex, type MutexRetryDeps } from './process-mutex.js';
+import { identityAlive, processIdentity, withProcessMutex, retryProcessMutex, ProcessMutexBusy, type MutexRetryDeps } from './process-mutex.js';
 import type { ProcessIdentity } from '../core/live-jobs.js';
 
 export interface ConcurrencyConfig { maxRuns: number; claudeMinRemainingPercent: number; codexMinRemainingPercent: number }
@@ -158,13 +158,43 @@ function putMarker(marker: Marker): boolean {
     return true;
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false; throw error; }
 }
+/** rename 覆蓋 active.lock 時，Windows 上被防毒或其他程序開著會丟 EPERM／EBUSY／EACCES。有限次重試後仍失敗就丟這個。
+ * 丟出時 active.lock 維持覆蓋前的內容（仍存在、仍指向新版名額的 run），不會留下沒有標記的狀態。 */
+export class LegacyMarkerReplaceFailed extends Error {
+  readonly code = 'KERNEL_LEGACY_MARKER_REPLACE_FAILED';
+  constructor(readonly attempts: number, cause: unknown) {
+    super(`active.lock 原子覆蓋失敗（重試 ${attempts} 次仍是 ${(cause as NodeJS.ErrnoException)?.code ?? cause}）；標記維持原本指向，之後的協調會再補`, { cause });
+    this.name = 'LegacyMarkerReplaceFailed';
+  }
+}
+const MARKER_REPLACE_ATTEMPTS = 20;
+const MARKER_REPLACE_RETRYABLE = new Set(['EPERM', 'EBUSY', 'EACCES']);
+/** Atomic overwrite (temp in the same directory, then rename over active.lock), like journal.ts atomicWrite.
+ * Only for a marker naming a new-format slot: the old launcher cannot win wx while the file
+ * exists, and its release only deletes a marker naming its own run, so nothing old is lost. */
+function replaceMarker(marker: Marker): void {
+  const temp = `${legacyPath()}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  try {
+    const fd = openSync(temp, 'wx', 0o600);
+    try { writeSync(fd, JSON.stringify({ runId: marker.runId, at: marker.at })); fsyncSync(fd); } finally { closeSync(fd); }
+    for (let attempt = 1; ; attempt++) {
+      try { renameSync(temp, legacyPath()); return; }
+      catch (error) {
+        if (!MARKER_REPLACE_RETRYABLE.has((error as NodeJS.ErrnoException).code ?? '')) throw error;
+        if (attempt >= MARKER_REPLACE_ATTEMPTS) throw new LegacyMarkerReplaceFailed(attempt, error);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+      }
+    }
+  } finally { rmSync(temp, { force: true }); }
+}
 /**
  * Only called inside the admission mutex. The old release deletes active.lock whenever the
  * runId matches, so while any new-format slot exists the marker must name one of `targets`
  * (never a legacy run). Without targets it may keep naming a live legacy run; otherwise it is
  * pointed back at a live legacy record, or removed when stale (terminal/missing/released).
- * Markers are displaced by rename, never overwritten, and every displaced live run without
- * a new-format slot becomes a legacy record. `blockAwaiting` keeps the c646 rule for an old
+ * A marker naming a new-format slot (a target or a released run) is replaced atomically, so
+ * active.lock never disappears; any other marker is displaced by rename, never overwritten, and
+ * every displaced live run without a new-format slot becomes a legacy record. `blockAwaiting` keeps the c646 rule for an old
  * launcher's approval window: refuse and leave its marker alone — unless this call already
  * displaced a live legacy run, in which case the newcomer is recorded too so nothing is lost.
  */
@@ -185,6 +215,14 @@ function reconcileLegacyMarker(targets: Slot[], released: ReadonlySet<string> = 
       want = record ? { runId: record.runId, at: record.acquiredAt || undefined } : null;
     }
     if ((marker?.runId ?? null) === (want?.runId ?? null)) return;
+    // Repointing between new-format slots (the marker names a target, or the run being released):
+    // overwrite atomically so active.lock exists throughout — take＋put would leave a window where
+    // an old launcher's wx succeeds and it runs outside every admission limit.
+    if (marker && want && (ids.has(marker.runId) || released.has(marker.runId))) {
+      replaceMarker(want);
+      if (readLegacyLock()?.runId === want.runId) return;
+      continue;
+    }
     if (marker) {
       const taken = takeMarker();
       if (taken && taken.runId !== want?.runId && !ids.has(taken.runId) && !released.has(taken.runId) && recordLegacy(taken)) captured = true;
@@ -207,6 +245,10 @@ export function readActiveRuns(): ActiveRun[] {
   if (legacy) slots.push(legacy);
   return slots.sort((a, b) => a.acquiredAt.localeCompare(b.acquiredAt) || a.runId.localeCompare(b.runId)).map(({ runId, repo, models, acquiredAt }) => ({ runId, repo, models, acquiredAt }));
 }
+/** New-format slots that hold a place: run alive and past approval. Inside the admission mutex only. */
+function liveSlots(): Slot[] {
+  return storedSlots().filter(slot => { const view = liveState(slot.runId); return view && view.state !== 'awaiting_approval'; });
+}
 /** Bounded retries (retryProcessMutex). `keep` runs inside the admission mutex, so a
  * runner claiming its slot cannot interleave between the check and the removal. */
 export async function releaseRunSlot(runId: string, deps: Partial<MutexRetryDeps> = {}, keep?: () => boolean | Promise<boolean>): Promise<void> {
@@ -214,11 +256,52 @@ export async function releaseRunSlot(runId: string, deps: Partial<MutexRetryDeps
     if (keep && await keep()) return;
     rmSync(slotPath(runId), { force: true });
     rmSync(legacyRecordPath(runId), { force: true });
-    const remaining = storedSlots().filter(slot => { const view = liveState(slot.runId); return view && view.state !== 'awaiting_approval'; });
+    const remaining = liveSlots();
     // The last release also reclaims a marker naming a terminal/missing run; otherwise old
     // launchers would stay blocked by it until some later admission happened to run.
     reconcileLegacyMarker(remaining, new Set([runId]));
   }, deps);
+}
+export type LegacyMarkerCheck = 'ok' | 'repaired' | 'busy' | 'failed';
+export interface LegacyMarkerCheckDeps { mutex?: typeof withProcessMutex }
+/**
+ * 新舊版共存的補標記檢查（runner 定期呼叫）。舊版釋放是「讀到自己的 runId 就刪」，先讀後刪不是原子的：
+ * 它讀完、還沒刪之前，新版若剛把標記改指向新版名額 N，舊版接著就把 N 的標記刪了。這是舊版程式的問題，
+ * 新版只能縮短沒有標記的時間。
+ *
+ * 平常只讀 active.lock 和名額檔、不進互斥；只有「有新版名額，而標記不存在或不是指向新版名額的 run」時，
+ * 才進 admission 互斥（不重試），用既有的協調把標記補回。互斥忙碌就回 busy、下次再試。
+ * 任何錯誤都只記一筆 legacy_marker_check_failed（不是 state 事件），絕不丟出、不改變 run 的狀態。
+ */
+export async function ensureLegacyMarker(store?: RunStore, deps: LegacyMarkerCheckDeps = {}): Promise<LegacyMarkerCheck> {
+  try {
+    const slots = storedSlots();
+    if (!slots.length) return 'ok';
+    const marker = readLegacyLock();
+    if (marker && slots.some(slot => slot.runId === marker.runId)) return 'ok';
+    return await (deps.mutex ?? withProcessMutex)('admission', (): LegacyMarkerCheck => {
+      const targets = liveSlots();
+      if (!targets.length) return 'ok';
+      reconcileLegacyMarker(targets);
+      return 'repaired';
+    });
+  } catch (error) {
+    if (error instanceof ProcessMutexBusy) return 'busy';
+    try { store?.append({ type: 'legacy_marker_check_failed', detail: String((error as Error)?.message ?? error) }); }
+    catch { /* 記不進去就算了：這個檢查不能讓 run 失敗 */ }
+    return 'failed';
+  }
+}
+/** 定期跑 ensureLegacyMarker（單飛：上一次還沒結束就跳過）。回傳停止函式，run 結束時呼叫。 */
+export function startLegacyMarkerWatch(store: RunStore, everyMs = 20000, check: (store: RunStore) => Promise<unknown> = ensureLegacyMarker): () => void {
+  let running = false;
+  const timer = setInterval(() => {
+    if (running) return;
+    running = true;
+    void check(store).catch(() => undefined).finally(() => { running = false; });
+  }, everyMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 /** A launcher can outlive its approving process. Fence a delayed runner against
  * reclamation before it creates runner.json; keep the per-run lock unchanged. */
@@ -291,6 +374,11 @@ export async function admitRun(store: RunStore, start: () => void, deps: Admissi
       // A legacy own keeps its legacy record, not the slot written for this attempt.
       if (!own || own.legacy) rmSync(slotPath(store.runId), { force: true });
       if (!own) reclaimed.add(store.runId);
+      // Trade-off (kept on purpose): this pass runs with blockAwaiting=false. If the refusal came from
+      // an old launcher's awaiting_approval marker and other new-format slots exist, the marker is
+      // repointed to one of them and that old run is recorded as a legacy reservation. The G2 rule
+      // (with any new-format slot, the marker names one) wins over "leave an awaiting marker alone";
+      // the legacy record still counts toward the cap and blocks its repo, so nothing is let through.
       reconcileLegacyMarker(active, reclaimed);
       throw error;
     }
