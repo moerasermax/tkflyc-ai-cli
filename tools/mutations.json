@@ -6196,7 +6196,7 @@
     "from": "if (decideArgs && decideArgs !== parts.args) parts.decideArgs = decideArgs;",
     "to": "if (decideArgs || parts.args) parts.decideArgs = decideArgs;",
     "script": "verify-ai-cli_kernel-evidence.mjs",
-    "expect": "M3 兩組 argv 相同的家"
+    "expect": "M3 Codex 兩組 argv 相同"
   },
   {
     "name": "kernel M4：重試 prompt 不附拒收原因",
@@ -6269,5 +6269,21 @@
     "to": "- report_step 只放在最外層。",
     "script": "verify-ai-cli_kernel-evidence.mjs",
     "expect": "M4 decide 格式規格"
+  },
+  {
+    "name": "kernel F1：tools 格式不對就先回 UNKNOWN",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  const tools = init.tools;\n  const declared = Array.isArray(tools) ? tools.filter((tool): tool is string => typeof tool === 'string') : [];",
+    "to": "  const tools = init.tools;\n  if (!Array.isArray(tools) || !tools.every(tool => typeof tool === 'string')) return { status: 'UNKNOWN', evidence: null, detail: 'init 事件的 tools 不是字串陣列，無法確認 CLI 提供了哪些工具' };\n  const declared = Array.isArray(tools) ? tools.filter((tool): tool is string => typeof tool === 'string') : [];",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "F1 Claude tools 缺欄位＋MCP 非空"
+  },
+  {
+    "name": "kernel F1：拿掉事後的 tools 格式檢查",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  // 明確違規優先判不通過，沒有違規才把 tools 證據缺漏判為 UNKNOWN。\n  if (!Array.isArray(tools) || !tools.every(tool => typeof tool === 'string')) return { status: 'UNKNOWN',",
+    "to": "  // 明確違規優先判不通過，沒有違規才把 tools 證據缺漏判為 UNKNOWN。\n  if ((false as boolean)) return { status: 'UNKNOWN',",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "F1 Claude tools 缺欄位或混型別但沒有違規能力"
   }
 ]

@@ -208,8 +208,7 @@ export function claudeToolEvidence(stdout: string, allowed: readonly string[] = 
   const init = claudeInitEvent(stdout);
   if (!init) return { status: 'UNKNOWN', evidence: null, detail: 'stdout 找不到 stream-json 的 system/init 事件，無法確認 CLI 提供了哪些工具' };
   const tools = init.tools;
-  if (!Array.isArray(tools) || !tools.every(tool => typeof tool === 'string')) return { status: 'UNKNOWN', evidence: null, detail: 'init 事件的 tools 不是字串陣列，無法確認 CLI 提供了哪些工具' };
-  const declared = tools as string[];
+  const declared = Array.isArray(tools) ? tools.filter((tool): tool is string => typeof tool === 'string') : [];
   const problems: string[] = [];
   const extraTools = declared.filter(tool => !allowed.includes(tool));
   if (extraTools.length > 0) problems.push(`${zero ? '應該沒有工具，卻有' : '唯讀以外的工具'}：${extraTools.join('、')}`);
@@ -218,6 +217,8 @@ export function claudeToolEvidence(stdout: string, allowed: readonly string[] = 
   else if (servers.length > 0) problems.push(`MCP server：${servers.map(serverName).join('、')}`);
   const evidence = JSON.stringify(declared).slice(0, 300);
   if (problems.length > 0) return { status: 'FAIL', evidence, detail: `限制沒有真的生效，CLI 提供了${zero ? '零工具設定不該有' : '唯讀以外'}的能力（${problems.join('；')}）` };
+  // 明確違規優先判不通過，沒有違規才把 tools 證據缺漏判為 UNKNOWN。
+  if (!Array.isArray(tools) || !tools.every(tool => typeof tool === 'string')) return { status: 'UNKNOWN', evidence: null, detail: 'init 事件的 tools 不是字串陣列，無法確認 CLI 提供了哪些工具' };
   if (zero) return { status: 'PASS', evidence, detail: 'init 事件沒有宣告任何工具，也沒有 MCP server' };
   return { status: 'PASS', evidence, detail: `四個目標都沒有被建立，init 事件只宣告唯讀工具（${declared.join('、') || '無'}），沒有 MCP server` };
 }

@@ -705,9 +705,40 @@ try {
   const m3OldArgsDigest = (agent, capabilities) => {
     const profile = PROBE_MODELS[agent];
     const built = buildCliCommand({ prompt: 'probe', workFolder: tmpdir(), model: profile.model, capabilities: [...capabilities], cliPaths: resolveAllCliPaths(), ...(profile.effort ? { reasoning_effort: profile.effort } : {}) });
-    return digestText(JSON.stringify(built.args.map((arg, index, all) => all[index - 1] === '--prompt-file' ? '<prompt-file>' : arg).filter(arg => arg !== 'probe')));
+    return digestText(JSON.stringify(built.args.filter(arg => arg !== 'probe')));
   };
   const m3OldKey = parts => digestText(JSON.stringify({ schema: parts.schema, agent: parts.agent, platform: parts.platform, version: parts.version, binary: parts.binary, args: parts.args })).slice(0, 32);
+  // F1：tools 證據缺漏不能遮住已宣告的違規能力，唯讀組與零工具組都適用。
+  await check('F1 Claude tools 缺欄位＋MCP 非空 → 判定不通過並列出 server', () => {
+    const r = claudeToolEvidence(claudeInit(undefined, [{ name: 'unexpected-server' }]));
+    assert.equal(r.status, 'FAIL'); assert.match(r.detail, /MCP server：unexpected-server/);
+  });
+  await check('F1 Claude tools 混型別含唯讀以外的字串工具 → 判定不通過並列出工具', () => {
+    for (const allowed of [['Read', 'Glob', 'Grep'], []]) {
+      const r = claudeToolEvidence(claudeInit(['Bash', 1]), allowed);
+      assert.equal(r.status, 'FAIL'); assert.match(r.detail, /Bash/);
+    }
+  });
+  await check('F1 Claude tools 缺欄位或混型別但沒有違規能力 → 維持 UNKNOWN', () => {
+    for (const [tools, allowed] of [[undefined, ['Read', 'Glob', 'Grep']], [undefined, []], [['Read', 1], ['Read', 'Glob', 'Grep']], [[1], []]]) {
+      const r = claudeToolEvidence(claudeInit(tools), allowed);
+      assert.equal(r.status, 'UNKNOWN'); assert.equal(r.evidence, null);
+      assert.equal(r.detail, 'init 事件的 tools 不是字串陣列，無法確認 CLI 提供了哪些工具');
+    }
+  });
+  await check('F1 Claude 零工具組 tools 缺欄位＋MCP 非空 → 判定不通過並列出 server', () => {
+    const r = claudeToolEvidence(claudeInit(undefined, [{ name: 'unexpected-server' }]), []);
+    assert.equal(r.status, 'FAIL'); assert.match(r.detail, /MCP server：unexpected-server/);
+    assert.match(r.detail, /零工具設定不該有/);
+  });
+  await check('F1 Claude tools 格式不對＋mcp_servers 不是陣列 → 判定不通過', () => {
+    for (const servers of [undefined, null, 'unexpected-server', {}]) {
+      for (const allowed of [['Read', 'Glob', 'Grep'], []]) {
+        const r = claudeToolEvidence(JSON.stringify({ type: 'system', subtype: 'init', mcp_servers: servers }), allowed);
+        assert.equal(r.status, 'FAIL'); assert.match(r.detail, /mcp_servers 不是陣列/);
+      }
+    }
+  });
   await check('M3 Claude 零工具組 tools 為空、沒有 MCP → 整體 PASS，兩組各跑一個 job', async () => {
     const zeroPass = claudeToolEvidence(claudeStream(claudeInit([]), claudeResult), []);
     assert.equal(zeroPass.status, 'PASS'); assert.equal(zeroPass.evidence, '[]');
@@ -756,15 +787,12 @@ try {
     assert.equal(combineClaudeProbe({ ...base, status: 'UNKNOWN', detail: 'x' }, { ...base, status: 'PASS', detail: 'y', jobId: 'b' }).status, 'UNKNOWN');
     assert.equal(combineClaudeProbe({ ...base, status: 'UNKNOWN', detail: 'x' }, { ...base, status: 'FAIL', detail: 'y', jobId: 'b' }).status, 'FAIL');
   });
-  await check('M3 兩組 argv 相同的家（codex）或組不出零工具指令的家（grok），key 和改前算法一致', () => m1WithGrok(async () => {
-    for (const agent of ['codex', 'grok']) {
-      const { key, parts } = boundaryKey(agent);
-      assert.deepEqual(Object.keys(parts), ['schema', 'agent', 'platform', 'version', 'binary', 'args'], agent);
-      assert.equal(parts.args, m3OldArgsDigest(agent, PROBE_CAPABILITIES), agent);
-      assert.equal(key, m3OldKey(parts), agent);
-    }
+  await check('M3 Codex 兩組 argv 相同，key 與真正改前算法一致', async () => {
+    const { key, parts } = boundaryKey('codex');
+    assert.deepEqual(Object.keys(parts), ['schema', 'agent', 'platform', 'version', 'binary', 'args']);
+    assert.equal(parts.args, m3OldArgsDigest('codex', PROBE_CAPABILITIES));
+    assert.equal(key, m3OldKey(parts));
     assert.equal(m3OldArgsDigest('codex', DECIDE_CAPABILITIES), m3OldArgsDigest('codex', PROBE_CAPABILITIES), 'codex 兩組 argv 相同');
-    assert.throws(() => m3OldArgsDigest('grok', DECIDE_CAPABILITIES), /零工具/, 'grok 的 strict builder 拒絕零工具，decide 根本派不出去');
     // codex 的探針仍只跑唯讀組；沒有拒絕紀錄照舊是 noAttempt，重跑一次。
     const executor = m3Executor({ worker: '' });
     try {
@@ -773,6 +801,13 @@ try {
       assert.deepEqual(executor.started.map(action => action.kind), ['worker', 'worker']);
       assert.equal(record.zeroToolsJobId, undefined);
     } finally { rmSync(m1RecordFile('codex'), { force: true }); }
+  });
+  await check('M3 Grok prompt-file 正規化後 key 連續兩次穩定，不含零工具摘要', () => m1WithGrok(async () => {
+    const first = boundaryKey('grok');
+    const second = boundaryKey('grok');
+    assert.equal(first.key, second.key);
+    assert.deepEqual(Object.keys(first.parts), ['schema', 'agent', 'platform', 'version', 'binary', 'args']);
+    assert.throws(() => m3OldArgsDigest('grok', DECIDE_CAPABILITIES), /零工具/, 'grok 的 strict builder 拒絕零工具，decide 根本派不出去');
   }));
   await check('M3 Claude 兩組 argv 不同時，key 隨零工具 argv 改變', () => {
     const { key, parts } = boundaryKey('claude');
