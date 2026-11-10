@@ -264,7 +264,13 @@ export interface KernelExecutor {
   isGone(job: JobRef): Promise<boolean>;
 }
 
-export type BoundaryStatus = 'PASS' | 'FAIL' | 'UNKNOWN';
+/** 探針紀錄裡能存的結果。 */
+export type ProbeStatus = 'PASS' | 'FAIL' | 'UNKNOWN';
+/**
+ * 閘門看到的邊界狀態。UNREADABLE 不是探針結果：紀錄檔存在卻讀不出來、解析失敗、status 不合法，
+ * 或查詢本身丟例外。它和 UNKNOWN（沒有證據）不同，核准時同意未驗證也不放行，要重跑探針。
+ */
+export type BoundaryStatus = ProbeStatus | 'UNREADABLE';
 
 export interface WorkspaceState {
   /** 目前所在分支；detached 時是 null。 */

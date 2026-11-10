@@ -3090,7 +3090,7 @@
     "name": "kernel：探針沒過也派工",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/loop.ts",
-    "from": "if (boundary !== 'PASS') {",
+    "from": "if (boundary !== 'PASS' && !acknowledged) {",
     "to": "if (false) {",
     "expect": "探針結果不是 PASS 就不派工"
   },
@@ -5260,7 +5260,63 @@
     "from": "export function hasProbeEvidenceFormat(agent: string): boolean { return EVIDENCE_AGENTS.has(agent); }",
     "to": "export function hasProbeEvidenceFormat(agent: string): boolean { return true; }",
     "script": "verify-ai-cli_kernel-evidence.mjs",
-    "expect": "A5 缺少格式與已支援格式的 FAIL/UNKNOWN 標籤不同，未增 Claude 格式"
+    "expect": "A5 缺少格式與已支援格式的 FAIL/UNKNOWN 標籤不同"
+  },
+  {
+    "name": "kernel K2：Claude 探針不看 mcp_servers",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  else if (servers.length > 0) problems.push(",
+    "to": "  else if (servers.length > 99) problems.push(",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K2 Claude init 的 mcp_servers 非空 → FAIL"
+  },
+  {
+    "name": "kernel K2：Claude 探針不看唯讀以外的工具",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  if (extraTools.length > 0) problems.push(",
+    "to": "  if (extraTools.length < 0) problems.push(",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K2 Claude init 含唯讀以外的工具"
+  },
+  {
+    "name": "kernel K2：Claude init 也從 assistant 文字裡找",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "try { parsed = JSON.parse(text); } catch { continue; }",
+    "to": "try { parsed = JSON.parse(text); const inner = (parsed as { message?: { content?: Array<{ text?: unknown }> } } | null)?.message?.content?.[0]?.text; if (typeof inner === 'string') parsed = JSON.parse(inner); } catch { continue; }",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K2 Claude init 樣式的文字只在 assistant 事件的文字裡"
+  },
+  {
+    "name": "kernel K2：claude 移出探針證據格式",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "const EVIDENCE_AGENTS = new Set(['codex', 'claude']);",
+    "to": "const EVIDENCE_AGENTS = new Set(['codex']);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K2 Claude init 只有 Read／Glob／Grep"
+  },
+  {
+    "name": "kernel K2：Claude init 從輸出尾端找",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "if (agent === 'claude') return claudeToolEvidence(probe.log('stdout', 'head'), claudeAllowed);",
+    "to": "if (agent === 'claude') return claudeToolEvidence(probe.log('stdout', 'tail'), claudeAllowed);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K2 Claude init 只有 Read／Glob／Grep"
+  },
+  {
+    "name": "kernel K2：Claude 檔案被建立不判 FAIL",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  if (created.length > 0) return { status: 'FAIL', evidence: null",
+    "to": "  if (created.length > 0 && agent !== 'claude') return { status: 'FAIL', evidence: null",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K2 Claude tools 合規但檔案被建立仍是 FAIL"
+  },
+  {
+    "name": "kernel K2：沒有格式的家缺出路說明",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  if (status !== 'UNKNOWN' || hasProbeEvidenceFormat(agent) || detail.includes(NO_EVIDENCE_FORMAT_HINT)) return detail;",
+    "to": "  if (status !== 'UNKNOWN' || hasProbeEvidenceFormat(agent) || detail.length >= 0) return detail;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K2 沒有證據格式的家（grok）只到 UNKNOWN"
   },
   {
     "name": "kernel D：archive 目標摘要超過八十字",
@@ -5861,5 +5917,357 @@
     "to": "  return slots.map(",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "I5 same_repo refusal names cancel for a legacy run only"
+  },
+  {
+    "name": "Claude strict 拿掉 --restricted",
+    "file": "src/agents/claude.ts",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "'--restricted',",
+    "to": "",
+    "expect": "claude strict 帶 --restricted"
+  },
+  {
+    "name": "Claude strict 唯讀白名單放寬（多給 shell 工具）",
+    "file": "src/agents/claude.ts",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "Object.freeze(['Read', 'Glob', 'Grep'])",
+    "to": "Object.freeze(['Read', 'Glob', 'Grep', 'Bash'])",
+    "expect": "claude strict 的 --tools 白名單剛好是唯讀三件"
+  },
+  {
+    "name": "Claude strict 拿掉 --tools 白名單（只剩黑名單）",
+    "file": "src/agents/claude.ts",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "...(tools.length > 0 ? ['--tools', tools.join(',')] : ['--tools=']),",
+    "to": "",
+    "expect": "claude strict 的 --tools 白名單剛好是唯讀三件"
+  },
+  {
+    "name": "Claude strict 的 --tools 拆成多個位置值",
+    "file": "src/agents/claude.ts",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "['--tools', tools.join(',')]",
+    "to": "['--tools', ...tools]",
+    "expect": "claude strict 的 --tools 值後面緊接另一個旗標"
+  },
+  {
+    "name": "Claude strict 零工具時 --tools 帶空字串值",
+    "file": "src/agents/claude.ts",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "['--tools=']",
+    "to": "['--tools', '']",
+    "expect": "claude strict 零工具時沒有空字串參數"
+  },
+  {
+    "name": "Claude strict 零工具時仍帶空的 --allowedTools",
+    "file": "src/agents/claude.ts",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "...(tools.length > 0 ? ['--allowedTools', tools.join(',')] : []),",
+    "to": "'--allowedTools', tools.join(','),",
+    "expect": "claude strict 零工具時沒有空字串參數"
+  },
+  {
+    "name": "Claude strict 拿掉 --disallowedTools 第二層",
+    "file": "src/agents/claude.ts",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "'--disallowedTools',\n    DENIED_WHEN_STRICT.join(','),",
+    "to": "",
+    "expect": "claude strict 保留 --disallowedTools 第二層"
+  },
+  {
+    "name": "kernel K3：loop 把核准時的同意也套到 FAIL",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "const acknowledged = boundary === 'UNKNOWN' && view.overrides.has('boundary_unverified');",
+    "to": "const acknowledged = view.overrides.has('boundary_unverified');",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 loop：核准時同意未驗證，探針結果FAIL仍停在 boundary_unverified"
+  },
+  {
+    "name": "kernel K3：loop 忽略核准時的同意",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "const acknowledged = boundary === 'UNKNOWN' && view.overrides.has('boundary_unverified');",
+    "to": "const acknowledged = boundary === 'UNKNOWN' && false;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 loop：核准時同意未驗證 → 探針 UNKNOWN 照派"
+  },
+  {
+    "name": "kernel K3：裁決標籤不寫核准時同意",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "view.overrides.has('boundary_unverified') ? 'unverified_acknowledged_at_approval'",
+    "to": "false ? 'unverified_acknowledged_at_approval'",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 loop：核准時同意未驗證 → 探針 UNKNOWN 照派"
+  },
+  {
+    "name": "kernel K3：approve 帶旗標時放行 FAIL",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "if (status === 'FAIL') throw",
+    "to": "if (status === 'FAIL' && !ackBoundary) throw",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 探針結果FAIL＋旗標"
+  },
+  {
+    "name": "kernel K3：approve 收到旗標但不記進 approved 事件",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "    if (ackBoundary) overrides.push('boundary_unverified');",
+    "to": "",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 UNKNOWN 加旗標"
+  },
+  {
+    "name": "kernel K3：approve 等待核准時忽略旗標",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "(status === 'UNKNOWN' && ackBoundary)",
+    "to": "(status === 'UNKNOWN' && false)",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 UNKNOWN 加旗標"
+  },
+  {
+    "name": "kernel K3：status 標籤不寫核准時同意",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "view.overrides.has('boundary_unverified') ? '未驗證（使用者核准時明確同意）；' : ''",
+    "to": "''",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 UNKNOWN 加旗標"
+  },
+  {
+    "name": "kernel K3：MCP 忽略 acknowledgeUnverifiedBoundary",
+    "file": "src/ai-cli_kernel/mcp-tools.ts",
+    "from": ", acknowledgeUnverifiedBoundary: args.acknowledgeUnverifiedBoundary === true });",
+    "to": " });",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 CLI 與 MCP 都把核准旗標傳進 approve"
+  },
+  {
+    "name": "kernel K3：CLI 忽略 --acknowledge-unverified-boundary",
+    "file": "src/ai-cli_kernel/cli.ts",
+    "from": "acknowledgeUnverifiedBoundary: flags.get('acknowledge-unverified-boundary') === true",
+    "to": "acknowledgeUnverifiedBoundary: false",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "K3 CLI 與 MCP 都把核准旗標傳進 approve"
+  },
+  {
+    "name": "kernel M1：未正常結束的路徑不看目標檔",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  if (created.length > 0) return { status: 'FAIL', targets: seen,",
+    "to": "  if (created.length < 0) return { status: 'FAIL', targets: seen,",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M1 探針建立目標檔後逾時"
+  },
+  {
+    "name": "kernel M1：逾時路徑不查目標檔",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "return unfinished('逾時', '探針逾時');",
+    "to": "return { ...base, jobId: startedId, status: 'UNKNOWN', targets: {}, evidence: null, detail: '探針逾時' };",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M1 探針建立目標檔後逾時"
+  },
+  {
+    "name": "kernel M1：紀錄消失路徑不查目標檔",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "return unfinished('紀錄消失', '探針 job 的紀錄消失');",
+    "to": "return { ...base, jobId: startedId, status: 'UNKNOWN', targets: {}, evidence: null, detail: '探針 job 的紀錄消失' };",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M1 探針建立目標檔後逾時"
+  },
+  {
+    "name": "kernel M1：例外路徑不查目標檔",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "return unfinished('例外', `探針無法啟動：${(error as Error).message}`);",
+    "to": "return { ...base, jobId: startedId, status: 'UNKNOWN', targets: {}, evidence: null, detail: `探針無法啟動：${(error as Error).message}` };",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M1 探針建立目標檔後逾時"
+  },
+  {
+    "name": "kernel M1：隨機 prompt 檔名進了探針 key",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "all[index - 1] === '--prompt-file' ? '<prompt-file>' : arg",
+    "to": "all[index - 1] === '--prompt-file-unused' ? '<prompt-file>' : arg",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M1 boundaryKey 對每一家都穩定"
+  },
+  {
+    "name": "kernel M2：損毀的探針紀錄當成沒有紀錄",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  if (loaded.state === 'unreadable') return 'UNREADABLE';",
+    "to": "  if (loaded.state === 'unreadable') return 'UNKNOWN';",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M2 boundaryStatus：沒有紀錄是 UNKNOWN"
+  },
+  {
+    "name": "kernel M2：探針紀錄的 status 欄位不驗證",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "if (typeof status !== 'string' || !PROBE_STATUSES.includes(status)) return",
+    "to": "if (typeof status !== 'string') return",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M2 boundaryStatus：沒有紀錄是 UNKNOWN"
+  },
+  {
+    "name": "kernel M2：任何讀檔錯誤都當成沒有紀錄",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "    if (code === 'ENOENT') return { state: 'missing' };",
+    "to": "    if (code !== undefined) return { state: 'missing' };",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M2 boundaryStatus：沒有紀錄是 UNKNOWN"
+  },
+  {
+    "name": "kernel M2：重跑探針時損毀的舊紀錄擋住寫入",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  return loaded.state === 'ok' ? loaded.record : null;",
+    "to": "  if (loaded.state === 'unreadable') throw new Error(loaded.reason);\n  return loaded.state === 'ok' ? loaded.record : null;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M2 損毀紀錄之後重跑探針"
+  },
+  {
+    "name": "kernel M2：approve 帶旗標接回時不擋讀不出來的紀錄",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "不放行 FAIL`);\n      if (status === 'UNREADABLE') throw new Error(unreadableBoundaryMessage(agent));",
+    "to": "不放行 FAIL`);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M2 approve：損毀或 status 不合法的紀錄"
+  },
+  {
+    "name": "kernel M2：approve 核准委任書時讀不出來的紀錄沒有專屬說明",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "continue;\n        if (status === 'UNREADABLE') throw new Error(unreadableBoundaryMessage(agent));",
+    "to": "continue;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M2 approve：損毀或 status 不合法的紀錄"
+  },
+  {
+    "name": "kernel M2：loop 把邊界查詢例外當成 UNKNOWN",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "queryError = error instanceof Error ? error.message : String(error); return 'UNREADABLE';",
+    "to": "queryError = error instanceof Error ? error.message : String(error); return 'UNKNOWN';",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "M2 loop：邊界查詢丟例外"
+  },
+  {
+    "name": "kernel M2：loop 讀不出來的紀錄也吃核准時的同意",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "      if (boundary === 'UNREADABLE') {",
+    "to": "      if (boundary === 'UNREADABLE' && !view.overrides.has('boundary_unverified')) {",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "M2 loop：探針紀錄不是 JSON"
+  },
+  {
+    "name": "kernel M3：零工具組沿用唯讀允許清單",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "marker: zeroMarker }, []);",
+    "to": "marker: zeroMarker }, CLAUDE_READ_ONLY_TOOLS);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M3 Claude 零工具組 tools 含任何工具或有 MCP server"
+  },
+  {
+    "name": "kernel M3：Claude 不跑零工具組",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "    if (agent !== 'claude') return readOnly;",
+    "to": "    if (agent !== 'claude' || readOnly.jobId !== '') return readOnly;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M3 Claude 零工具組 tools 為空"
+  },
+  {
+    "name": "kernel M3：零工具組判定不通過被吞成 UNKNOWN",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  if (zero?.status === 'FAIL') return",
+    "to": "  if (zero?.status === 'FAIL' && zero.jobId === '') return",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M3 Claude 零工具組 tools 含任何工具或有 MCP server"
+  },
+  {
+    "name": "kernel M3：零工具組沒結論也算通過",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "if (readOnly.status === 'PASS' && zero?.status === 'PASS') return",
+    "to": "if (readOnly.status === 'PASS' && zero !== null) return",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M3 Claude 零工具組沒有 init"
+  },
+  {
+    "name": "kernel M3：零工具 argv 不進探針 key",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "if (decideArgs && decideArgs !== parts.args) parts.decideArgs = decideArgs;",
+    "to": "if (decideArgs && decideArgs === '') parts.decideArgs = decideArgs;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M3 Claude 兩組 argv 不同時"
+  },
+  {
+    "name": "kernel M3：argv 相同也改動探針 key",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "if (decideArgs && decideArgs !== parts.args) parts.decideArgs = decideArgs;",
+    "to": "if (decideArgs || parts.args) parts.decideArgs = decideArgs;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M3 兩組 argv 相同的家"
+  },
+  {
+    "name": "kernel M4：重試 prompt 不附拒收原因",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "${aiCliKernelRejectionText(view.lastRejection)}",
+    "to": "${aiCliKernelRejectionText(\"\")}",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 第二次 decide 的 prompt 附上第一次的拒收原因"
+  },
+  {
+    "name": "kernel M4：拒收原因不跳脫就送回 decide",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "return aiCliKernelUntrustedText(cut);",
+    "to": "return cut;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "包成不可信資料"
+  },
+  {
+    "name": "kernel M4：拒收原因不截斷",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "reason.length > REJECTION_CHARS ?",
+    "to": "reason.length > Infinity ?",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 拒收原因超過上限時截斷"
+  },
+  {
+    "name": "kernel M4：步驟與最外層的 report_step 不一致也放行",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "if (claims.length === 1 && 'report_step' in raw && raw.report_step !== claims[0]) {",
+    "to": "if (claims.length === 1 && 'report_step' in raw && raw.report_step === undefined) {",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 步驟上的 report_step 矛盾時拒收"
+  },
+  {
+    "name": "kernel M4：步驟上的 report_step 不是自己的 id 也放行",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "if (typeof step.report_step !== 'string' || step.report_step !== step.id) {",
+    "to": "if (typeof step.report_step !== 'string') {",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 步驟上的 report_step 矛盾時拒收"
+  },
+  {
+    "name": "kernel M4：多個步驟各自宣稱也放行",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "if (claims.length > 1) throw",
+    "to": "if (claims.length > 9) throw",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 多個步驟各自宣稱"
+  },
+  {
+    "name": "kernel M4：驗證前不正規化步驟上的 report_step",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "DecisionSchema.safeParse(normalizeStepReport(extractJson(text)))",
+    "to": "DecisionSchema.safeParse(extractJson(text))",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 步驟帶冗餘而一致的 report_step"
+  },
+  {
+    "name": "kernel M4：最外層缺 report_step 時不提升",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "!('report_step' in raw) && claims.length === 1 ?",
+    "to": "false && claims.length === 1 ?",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 最外層缺 report_step 時"
+  },
+  {
+    "name": "kernel M4：decide 格式規格漏掉步驟鍵那句",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "- ${DECIDE_STEP_KEYS_RULE}",
+    "to": "- report_step 只放在最外層。",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 decide 格式規格"
   }
 ]

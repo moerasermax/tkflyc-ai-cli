@@ -64,6 +64,81 @@ console.log('MCP run 的唯讀能力（capabilities → strict builder）\n');
   );
 }
 
+// 2b. claude strict 的第一層是 --tools 白名單，不是黑名單。
+//     黑名單會過期：只靠它時 init 事件還列著 20 個工具（Workflow、CronCreate、WebFetch……）。
+//     期望值刻意寫成字面值，不從 dist 匯入——拿受測的那份清單驗它自己，等於沒驗。
+{
+  const built = plan({ model: 'opus', capabilities: ['fs/read', 'analysis/produce'] });
+  const args = built.args;
+  check(args.includes('--restricted'), '★ claude strict 帶 --restricted', args.join(' '));
+  const i = args.indexOf('--tools');
+  check(
+    i >= 0 && args.indexOf('--tools', i + 1) < 0 && args[i + 1] === 'Read,Glob,Grep',
+    '★ claude strict 的 --tools 白名單剛好是唯讀三件',
+    i >= 0 ? `--tools ${args[i + 1]}` : '沒有 --tools'
+  );
+  check(
+    i >= 0 && typeof args[i + 2] === 'string' && args[i + 2].startsWith('--'),
+    '★ claude strict 的 --tools 值後面緊接另一個旗標（variadic 不吃到位置參數）',
+    i >= 0 ? `下一個參數：${args[i + 2]}` : '沒有 --tools'
+  );
+  check(
+    args.includes('--disallowedTools'),
+    '★ claude strict 保留 --disallowedTools 第二層',
+    args.join(' ')
+  );
+  check(args.every((a) => !/dangerous/i.test(a)), 'claude strict 白名單版零危險旗標', args.join(' '));
+
+  // 其他旗標的行為不能因為加了白名單而改變：續接、effort、-p、model 的順序與值。
+  const resumed = plan({ model: 'haiku', session_id: 'strict-claude', reasoning_effort: 'low', capabilities: ['fs/read'] });
+  check(
+    JSON.stringify(resumed.args.slice(resumed.args.indexOf('--strict-mcp-config'))) === JSON.stringify([
+      '--strict-mcp-config', '--disable-slash-commands', '--output-format', 'stream-json', '--verbose',
+      '-r', 'strict-claude', '--fork-session', '--effort', 'low', '-p', '--model', 'haiku',
+    ]) && resumed.stdinPrompt === 'hi' && !resumed.args.includes('hi'),
+    'claude strict 其餘旗標不變（MCP／slash／輸出格式／續接／effort／-p／model，prompt 走 stdin）',
+    resumed.args.join(' ')
+  );
+
+  // 單一來源：探針要 import 這份清單判斷 init 事件的 tools。
+  const claudeMod = await import(pathToFileURL(join(ROOT, 'dist', 'agents', 'claude.js')).href);
+  check(
+    JSON.stringify(claudeMod.CLAUDE_READ_ONLY_TOOLS) === JSON.stringify(['Read', 'Glob', 'Grep'])
+      && JSON.stringify(claudeMod.claudeStrictTools(['fs/read', 'analysis/produce'])) === JSON.stringify(['Read', 'Glob', 'Grep']),
+    'claude 唯讀工具清單有匯出成單一來源'
+  );
+
+  let refused = false;
+  try { plan({ model: 'opus', capabilities: ['fs/read', 'fs/write'] }); }
+  catch (error) { refused = /拒絕啟動/.test(error.message); }
+  check(refused, '★ claude strict 對不到的能力仍拒絕啟動（不放寬）');
+}
+
+// 2c. 工具集為空（純產出、空陣列）：variadic 旗標不能帶空字串值。
+//     Windows 經 cmd.exe 時空字串參數會消失，旗標就把下一個旗標吃成值——
+//     2026-09-16 實測過 --allowedTools 空值吃掉整組 --disallowedTools、寫入完全擋不住。
+for (const capabilities of [['analysis/produce'], []]) {
+  const built = plan({ model: 'opus', capabilities });
+  const args = built.args;
+  const label = JSON.stringify(capabilities);
+  check(
+    args.every((a) => a !== ''),
+    `★ claude strict 零工具時沒有空字串參數（${label}）`,
+    args.join(' ')
+  );
+  check(
+    args.includes('--tools=') && !args.includes('--tools') && !args.includes('--allowedTools'),
+    `★ claude strict 零工具時以 --tools= 停用全部工具（${label}）`,
+    args.join(' ')
+  );
+  check(
+    args.includes('--restricted') && args.includes('--disallowedTools')
+      && args.every((a) => !/dangerous/i.test(a)),
+    `★ claude strict 零工具時仍有 --restricted 與黑名單、零危險旗標（${label}）`,
+    args.join(' ')
+  );
+}
+
 // 3. codex 的 read-only sandbox。
 {
   const built = plan({ model: 'gpt-5.3-codex', capabilities: ['fs/read'] });

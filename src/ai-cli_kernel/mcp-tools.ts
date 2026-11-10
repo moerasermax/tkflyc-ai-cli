@@ -75,6 +75,7 @@ const TOOLS = [
         note: { type: 'string', description: '給決策模型的補充或問題的答案。' },
         reconcile: { type: 'string', enum: ['abandon'], description: '狀態是 needs_reconcile 時，確認後放棄未知動作的結果。' },
         acknowledgeUnisolated: { type: 'boolean', description: 'develop 第一次核准必須傳 true：使用者知道 worker 權限等於本人、不是隔離環境。沒有使用者同意不可以傳。' },
+        acknowledgeUnverifiedBoundary: { type: 'boolean', description: '使用者知道權限邊界探針結果是 UNKNOWN（沒有證據）、仍同意這個 run 照跑時才傳 true；只作用在這個 run、從這次核准開始，標籤寫「未驗證（使用者核准時明確同意）」。FAIL 一律不放行。沒有使用者明確同意不可以傳。' },
       },
       required: ['runId'],
     },
@@ -96,7 +97,7 @@ const TOOLS = [
   },
   {
     name: 'ai-cli_kernel_probe',
-    description: 'Run the permission boundary probe for an agent: asks a real model to try writing files and checks the result. Consumes a small amount of quota and blocks until done. Required once per CLI version before approving a run.',
+    description: 'Run the permission boundary probe for an agent: asks a real model to try writing files and checks the result. Consumes a small amount of quota and blocks until done. Required once per CLI version before approving a run. Only codex (tool-refusal records) and claude (the tools/mcp_servers declared in the stream-json init event) have an evidence format and can reach PASS; agents without one (currently grok) top out at UNKNOWN and re-running will not change that — to use such a worker, pass allowUnverifiedBoundary to kernel_start or acknowledgeUnverifiedBoundary when approving. PASS means tool-limited, not isolated.',
     inputSchema: {
       type: 'object',
       properties: { agent: { type: 'string', enum: ['codex', 'claude', 'grok'] } },
@@ -162,7 +163,7 @@ export async function aiCliKernelHandleTool(name: string, args: Record<string, u
         }).filter(([, value]) => value !== undefined)),
       });
     case 'ai-cli_kernel_approve':
-      return aiCliKernelApprove({ runId: requireString(args, 'runId'), note: optionalString(args, 'note'), reconcile: optionalString(args, 'reconcile'), acknowledgeUnisolated: args.acknowledgeUnisolated === true });
+      return aiCliKernelApprove({ runId: requireString(args, 'runId'), note: optionalString(args, 'note'), reconcile: optionalString(args, 'reconcile'), acknowledgeUnisolated: args.acknowledgeUnisolated === true, acknowledgeUnverifiedBoundary: args.acknowledgeUnverifiedBoundary === true });
     case 'ai-cli_kernel_status':
       return aiCliKernelStatus({ runId: optionalString(args, 'runId') });
     case 'ai-cli_kernel_result':

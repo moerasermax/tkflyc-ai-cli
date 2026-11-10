@@ -41,9 +41,12 @@ readonly-audit（預設）只讀不改。develop 會在獨立的 worktree 和分
       [--max-test-failures <數>]         測試失敗幾次就停（預設 4）
       [--checkpoint push|local|off]      開工前回復點；有 origin 預設 push，否則 local
   approve <run> [--note <文字>] [--reconcile abandon] [--acknowledge-unisolated]
+       [--acknowledge-unverified-boundary]
                                          核准委任書，或接回停住的 run。
                                          develop 第一次核准要加 --acknowledge-unisolated：
                                          worker 權限等於你本人，不是隔離環境
+                                         --acknowledge-unverified-boundary：探針結果 UNKNOWN
+                                         （沒有證據）仍同意這個 run 照跑；FAIL 不放行
   wait <run> [--timeout <秒>]            等它停下來（預設 600 秒，逾時不算錯誤）
   status [run]                           看狀態；不給 run 就列出最近的
   actions <run> --json                    列出此刻可用操作與確認參數
@@ -294,7 +297,8 @@ export async function runKernelCli(argv: string[], io: Io, deps: { schedule?: Ke
         return 0;
       }
       case 'approve': {
-        const status = await aiCliKernelApprove({ runId: needRun(), note: stringFlag(flags, 'note'), reconcile: stringFlag(flags, 'reconcile'), acknowledgeUnisolated: flags.get('acknowledge-unisolated') === true });
+        const status = await aiCliKernelApprove({ runId: needRun(), note: stringFlag(flags, 'note'), reconcile: stringFlag(flags, 'reconcile'), acknowledgeUnisolated: flags.get('acknowledge-unisolated') === true,
+          acknowledgeUnverifiedBoundary: flags.get('acknowledge-unverified-boundary') === true });
         emit(status, formatStatus(status));
         return 0;
       }

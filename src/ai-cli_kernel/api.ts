@@ -17,7 +17,7 @@ import { admitRun, readActiveRuns, type ActiveRun, type AdmissionDeps } from './
 import { releaseStoppedTestLock } from './test-lock.js';
 import type { MutexRetryDeps } from './process-mutex.js';
 import { atomicWrite, kernelRunDir, listRunIds, newRunId, recordSlotReleaseFailed, releaseActiveLock, RunStore, SLOT_RELEASE_DEFERRED_NOTE, SLOT_RELEASE_MARKER_NOTE } from './journal.js';
-import { boundaryKey, boundaryStatus, hasProbeEvidenceFormat, probeResultLabel, runBoundaryProbe, type ProbeRecord } from './probe.js';
+import { boundaryKey, boundaryStatus, hasProbeEvidenceFormat, probeResultLabel, probeRerunHint, runBoundaryProbe, type ProbeRecord } from './probe.js';
 import { activeMinutes, nextStep, openActions, replayJournal, unprocessedActions, type RunView } from './replay.js';
 import { agentForModel } from './runtime.js';
 import { buildContract, TEMPLATES, type KernelStartInput } from './templates.js';
@@ -126,7 +126,7 @@ function nextActionFor(state: EffectiveState, runId: string, reason?: string): s
     case 'waiting_human':
       if (reason === 'checkpoint_push_failed') return `回復點沒有推成功。人手動建立的 run 可用 ai-cli kernel approve ${runId} 同意只留本地；觸發的 run 必須先排除遠端問題。`;
       if (reason === 'checkpoint_secret_risk') return `回復點含疑似秘密，不會推送或派工。請取消此 run，處理秘密後重新建立委任書。`;
-      if (reason === 'boundary_unverified') return `先跑 ai-cli kernel probe --agent <agent>，通過後再 ai-cli kernel approve ${runId}`;
+      if (reason === 'boundary_unverified') return `先跑 ai-cli kernel probe --agent <agent>，通過後再 ai-cli kernel approve ${runId}。結果是 UNKNOWN（沒有證據）而且使用者明確同意未驗證時，才可以加 --acknowledge-unverified-boundary；FAIL 和紀錄讀不出來（UNREADABLE）都不能這樣放行，後者要重跑探針`;
       if (reason === 'decide_question') return `回答問題：ai-cli kernel approve ${runId} --note "你的回答"`;
       return `確認上面的原因後，要繼續就執行 ai-cli kernel approve ${runId}，不要就執行 ai-cli kernel cancel ${runId}`;
     case 'needs_reconcile': return `先用 ai-cli jobs 和 git status 確認實際情況。確定要放棄這個動作的結果就執行 ai-cli kernel approve ${runId} --reconcile abandon`;
@@ -170,6 +170,10 @@ function describeSteps(view: RunView): KernelRunStatus['steps'] {
   return rows;
 }
 
+function unreadableBoundaryMessage(agent: string): string {
+  return `${agent} 的權限邊界探針紀錄讀不出來（損毀、格式不合或無法讀取，UNREADABLE）。這不是「沒有證據」，不論有沒有 --acknowledge-unverified-boundary 都不放行。${probeRerunHint(agent)}，新結果會蓋掉損毀的紀錄`;
+}
+
 function boundaries(contract: KernelContract): Record<string, BoundaryStatus> {
   const result: Record<string, BoundaryStatus> = {};
   if (contract.develop) return result; // 已經明示未隔離，探針證明的東西在這裡不成立。
@@ -205,7 +209,7 @@ async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRun
       checkpoint: contract.develop.checkpoint, checkpointResult: view.checkpoint, checkpointPrepared: view.checkpointPrepared,
       checkpointMode: contract.develop.checkpoint?.mode === 'push' && view.overrides.has('checkpoint_push_failed') && contract.origin?.kind !== 'trigger' ? 'local' : contract.develop.checkpoint?.mode ?? null,
     } : null,
-    boundaryLabel: contract.develop ? `未隔離：worker 權限等於你本人，worktree 只隔開正常路徑的寫入${probeLabels ? `；${probeLabels}` : ''}` : `${contract.allowUnverifiedBoundary ? '未驗證（呼叫端明確允許）；' : ''}${probeLabels}`,
+    boundaryLabel: contract.develop ? `未隔離：worker 權限等於你本人，worktree 只隔開正常路徑的寫入${probeLabels ? `；${probeLabels}` : ''}` : `${contract.allowUnverifiedBoundary ? '未驗證（呼叫端明確允許）；' : ''}${view.overrides.has('boundary_unverified') ? '未驗證（使用者核准時明確同意）；' : ''}${probeLabels}`,
     progress: {
       decides: { used: view.counters.decides, max: contract.budget.maxDecides },
       workerSteps: { used: view.counters.workerSteps, max: contract.budget.maxWorkerSteps },
@@ -295,7 +299,7 @@ export function aiCliKernelRollback(input: { runId: string; apply?: boolean }): 
   return aiCliKernelRestoreCheckpointBranch(contract.develop, checkpoint, store.runId, input.apply === true);
 }
 
-export interface KernelApproveInput { runId: string; note?: string; reconcile?: string; acknowledgeUnisolated?: boolean }
+export interface KernelApproveInput { runId: string; note?: string; reconcile?: string; acknowledgeUnisolated?: boolean; acknowledgeUnverifiedBoundary?: boolean }
 
 export async function aiCliKernelApprove(input: KernelApproveInput, deps: AdmissionDeps & { launch?: (store: RunStore) => Promise<void>; beforeStart?: () => void; release?: Partial<MutexRetryDeps> } = {}): Promise<KernelRunStatus> {
   assertCanStartJob();
@@ -310,6 +314,17 @@ export async function aiCliKernelApprove(input: KernelApproveInput, deps: Admiss
 
   if (view.state === 'needs_reconcile' && input.reconcile !== 'abandon') throw new Error('結果不明，確認後使用 --reconcile abandon');
   if (view.state !== 'needs_reconcile' && input.reconcile !== undefined) throw new Error('這個狀態不需要 --reconcile');
+  // 使用者核准時明確同意權限邊界未驗證。develop 不跑探針、委任書已帶 allowUnverifiedBoundary 時旗標沒有作用，
+  // 這兩種都不記進日誌，免得留下沒生效的同意。
+  const ackBoundary = input.acknowledgeUnverifiedBoundary === true && !contract.develop && !contract.allowUnverifiedBoundary;
+  // 旗標只放行 UNKNOWN（沒有證據）。FAIL 是探針證明限制沒生效：不論核准委任書還是接回都先擋，loop 派工前也會再擋一次。
+  // 紀錄讀不出來（UNREADABLE）可能是一筆壞掉的 FAIL，也不是「沒有證據」，同樣不放行。
+  if (ackBoundary) {
+    for (const [agent, status] of Object.entries(boundaries(contract))) {
+      if (status === 'FAIL') throw new Error(`${agent} 的權限邊界探針結果是 FAIL：探針證明限制沒生效。--acknowledge-unverified-boundary 只放行 UNKNOWN（沒有證據），不放行 FAIL`);
+      if (status === 'UNREADABLE') throw new Error(unreadableBoundaryMessage(agent));
+    }
+  }
   if (view.state === 'awaiting_approval') {
     if (contract.develop) {
       if (input.acknowledgeUnisolated !== true) throw new Error('worker 未隔離；讀完委任書後加 --acknowledge-unisolated 明確承認');
@@ -317,7 +332,9 @@ export async function aiCliKernelApprove(input: KernelApproveInput, deps: Admiss
     }
     if (!contract.allowUnverifiedBoundary) {
       for (const [agent, status] of Object.entries(boundaries(contract))) {
-        if (status !== 'PASS') throw new Error(`${agent} 的權限邊界探針結果是 ${status}。請先執行 ai-cli kernel probe --agent ${agent}`);
+        if (status === 'PASS' || (status === 'UNKNOWN' && ackBoundary)) continue;
+        if (status === 'UNREADABLE') throw new Error(unreadableBoundaryMessage(agent));
+        throw new Error(`${agent} 的權限邊界探針結果是 ${status}。請先執行 ai-cli kernel probe --agent ${agent}${status === 'UNKNOWN' ? '；結果仍是 UNKNOWN 而且使用者明確同意未驗證時，才可以加 --acknowledge-unverified-boundary' : ''}`);
       }
     }
   }
@@ -331,6 +348,8 @@ export async function aiCliKernelApprove(input: KernelApproveInput, deps: Admiss
       if (view.openCheck) store.append({ type: 'check_finished', pid: view.openCheck.pid });
     }
     const overrides = view.reason && OVERRIDABLE_REASONS.has(view.reason) && view.state === 'waiting_human' && !(view.reason === 'checkpoint_push_failed' && contract.origin?.kind === 'trigger') ? [view.reason] : [];
+    // 只作用在這個 run、從這次核准開始；委任書內容與 contractDigest 不變。
+    if (ackBoundary) overrides.push('boundary_unverified');
     store.append({ type: 'approved', contractDigest: digest, kind: view.state === 'awaiting_approval' ? 'contract' : 'continue', ...(input.note ? { note: input.note } : {}), ...(overrides.length ? { overrides } : {}) });
     store.append({ type: 'state', state: 'running' });
   }, deps);

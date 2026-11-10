@@ -344,6 +344,50 @@ check('成功的報告提到限流不算失敗', classifyJobResult({ status: 'co
   const verdict = existsSync(run.store.verdictPath) ? JSON.parse(readFileSync(run.store.verdictPath, 'utf8')) : {};
   check('呼叫端明確允許未驗證時可以跑，但標籤要照實寫', state === 'completed' && verdict.boundaryLabel === 'unverified_allowed_by_caller', state);
 }
+/* M2：探針紀錄有問題、或查詢丟例外，不是「沒有證據」。核准時同意未驗證（boundary_unverified）也不派工。
+   這裡用真的 boundaryStatus 讀紀錄檔，codex 暫時指向假 CLI（只回 --version，不啟動模型）。 */
+{
+  const { boundaryStatus, boundaryKey } = await load('probe');
+  const { kernelStateDir } = await load('journal');
+  const previousCodex = process.env.CODEX_CLI_NAME;
+  process.env.CODEX_CLI_NAME = join(ROOT, 'tools', 'stubs', process.platform === 'win32' ? 'kernel-agent.cmd' : 'kernel-agent.mjs');
+  const recordFile = join(kernelStateDir(), 'probes', `${boundaryKey('codex').key}.json`);
+  const setRecord = text => { mkdirSync(dirname(recordFile), { recursive: true }); if (text === null) rmSync(recordFile, { force: true }); else writeFileSync(recordFile, text); };
+  const acknowledgedRun = () => {
+    const run = newRun();
+    run.store.append({ type: 'approved', contractDigest: run.store.contractDigest(), kind: 'continue', overrides: ['boundary_unverified'] });
+    return run;
+  };
+  try {
+    for (const [label, text] of [['不是 JSON', '{ broken'], ['status 不合法', JSON.stringify({ status: 'MAYBE' })]]) {
+      setRecord(text);
+      const run = acknowledgedRun();
+      const executor = new FakeExecutor(standard);
+      const state = await runKernelLoop(deps(run.store, run.contract, executor, { boundary: async agent => boundaryStatus(agent) }));
+      const v = view(run.store);
+      check(`M2 loop：探針紀錄${label}＋核准時同意未驗證 → 停下不派工、提示重跑探針`,
+        state === 'waiting_human' && v.reason === 'boundary_unverified' && /讀不出來/.test(v.detail ?? '') && /ai-cli kernel probe --agent codex/.test(v.detail ?? '') && executor.started.length === 0, `${state} ${v.detail}`);
+    }
+    {
+      const run = acknowledgedRun();
+      const executor = new FakeExecutor(standard);
+      const state = await runKernelLoop(deps(run.store, run.contract, executor, { boundary: async () => { throw new Error('fixture boundary failure'); } }));
+      const v = view(run.store);
+      check('M2 loop：邊界查詢丟例外＋核准時同意未驗證 → 停下不派工、不當成 UNKNOWN',
+        state === 'waiting_human' && v.reason === 'boundary_unverified' && /查詢失敗（fixture boundary failure）/.test(v.detail ?? '') && /ai-cli kernel probe --agent codex/.test(v.detail ?? '') && executor.started.length === 0, `${state} ${v.detail}`);
+    }
+    {
+      setRecord(null);
+      const run = acknowledgedRun();
+      const executor = new FakeExecutor(standard);
+      const state = await runKernelLoop(deps(run.store, run.contract, executor, { boundary: async agent => boundaryStatus(agent) }));
+      check('M2 loop：沒有探針紀錄＋核准時同意未驗證 → 照 K3 放行', state === 'completed' && workers(executor) >= 1, state);
+    }
+  } finally {
+    setRecord(null);
+    if (previousCodex === undefined) delete process.env.CODEX_CLI_NAME; else process.env.CODEX_CLI_NAME = previousCodex;
+  }
+}
 {
   const run = newRun();
   const executor = new FakeExecutor(standard);
