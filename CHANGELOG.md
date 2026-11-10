@@ -56,6 +56,8 @@
   - 舊結論更正（僅追加，保留 2026-10-12 原紀錄）：codex-cli 0.162.1 的 elevated 曾回 helper_unknown_error 而被判不可行；2026-11-10 主 session 於 codex-cli 0.167.0 實測 elevated 可讀不可寫，因此改採此 backend；不據此推斷差異一定來自版本。
   - 主 session 回報真機驗收（2026-11-10，這台 Windows 11、codex-cli 0.167.0、新 dist）：新開 strict job 的 Get-ChildItem、rg 讀到隨機 token；Copy-Item、Set-Content、git add 皆被 OS 拒絕，磁碟無新檔且 index 未變，即使使用者規則允許相關命令；續接同一 session 再寫仍被拒。當時 `ai-cli kernel probe --agent codex` 回 PASS（4 目標皆記拒絕）；沙箱成功啟動，未取得 sandbox_warning 真機樣本。本輪離線核對該探針原始日誌，僅三個目標有具名輸出，probe-write.txt 只有匿名 patch 拒絕、沒有 file_change 事件；新規則無法替缺失的結構化證據補名，因此該舊樣本仍為 UNKNOWN。新版解析器依官方事件格式支援具名失敗 patch，合成三筆 shell 加一筆結構化 patch 可 PASS；主 session 須重跑確認實際 CLI 有發出所需事件，未發出時不能宣稱已驗證。 後續主 session 重跑確認 codex-cli 0.167.0 的 apply_patch 被拒仍不產生 file_change，僅在 CLI 自己的 stderr 記 `codex_core::tools::router: error=patch rejected: writing is blocked by read-only sandbox`；因此新增窄歸屬：只有 stderr 這個 router 前綴、patch rejected 動作與唯讀拒絕原因可替唯一要求 apply_patch 的 probe-write.txt 作證，不能替其他三目標或由 stdout 取得。結構化 file_change 支援保留，檔案不存在、process completed、exit 0 條件不變；證據版本升為 target-output-router-patch-v3，須重跑探針。（@moerasermax）
 
+- 修正跨平台 CI 的 kernel 測試 fixture：獨立執行 kernel／evidence 測試時補齊 POSIX stub 執行權限；e2e 假 Codex 改輸出 0.167 的 stdout OS 拒絕事件與 stderr readonly patch 拒絕，符合 issue #24 的逐目標證據規則；dashboard 測試改用本機絕對工作路徑，並驗證 Linux／macOS 不會啟動 Windows Terminal。產品安全規則與 POSIX CI 閘門不變。（Codex Astra）
+
 ### 新增
 
 - kernel dashboard 加入無依賴 16 色狀態、反白選取、標題／警告／結果及按鍵樣式；支援 NO_COLOR 非空及 TERM=dumb 禁色，ANSI 安全裁切與逐行／退出 reset，保留中文 grapheme 寬度與原安全閘門。新增 alias、fallback、配色回歸與突變；Windows Node v24.15.0 實際 nativeLaunch 啟動 Store alias 返回 0，真人 dashboard 與深淺主題視覺驗收仍待確認。（@moerasermax）

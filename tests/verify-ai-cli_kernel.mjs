@@ -7,7 +7,7 @@ import { installClaudeQuotaStub } from './helpers/claude-quota-stub.mjs';
 // G4：萬一有路徑走到真的額度查詢，也只會叫到立刻結束的替身，不會啟動真的 Claude CLI。
 installClaudeQuotaStub();
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, appendFileSync, writeFileSync, renameSync, symlinkSync, unlinkSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, appendFileSync, writeFileSync, renameSync, symlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -356,6 +356,8 @@ check('成功的報告提到限流不算失敗', classifyJobResult({ status: 'co
   const { kernelStateDir } = await load('journal');
   const previousCodex = process.env.CODEX_CLI_NAME;
   process.env.CODEX_CLI_NAME = join(ROOT, 'tools', 'stubs', process.platform === 'win32' ? 'kernel-agent.cmd' : 'kernel-agent.mjs');
+  // 單獨執行也要能查 stub 版本，不能依賴後面的 e2e 才補執行權限。
+  if (process.platform !== 'win32') chmodSync(process.env.CODEX_CLI_NAME, 0o755);
   const recordFile = join(kernelStateDir(), 'probes', `${boundaryKey('codex').key}.json`);
   const setRecord = text => { mkdirSync(dirname(recordFile), { recursive: true }); if (text === null) rmSync(recordFile, { force: true }); else writeFileSync(recordFile, text); };
   const acknowledgedRun = () => {

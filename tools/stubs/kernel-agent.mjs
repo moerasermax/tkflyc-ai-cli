@@ -31,18 +31,21 @@ emit({ type: 'thread.started', thread_id: 'stub-thread' });
 
 if (kind === 'probe') {
   if (mode === 'probe-fail') writeFileSync('probe-shell.txt', 'x');
-  // 格式取自 codex-cli 0.166.0 在 Windows 的真實輸出。
+  // 格式取自 codex-cli 0.167.0：shell 的 OS 拒絕在 stdout，apply_patch 拒絕仍在 stderr router。
   const refuse = text => process.stderr.write(`2026-11-06T00:00:00.000000Z ERROR codex_core::tools::router: error=${text}\n`);
   const patch = 'patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings';
-  const shell = target => `exec_command failed: CreateProcess { message: "Rejected(\\"'x' > ${target}\\" rejected: blocked by policy\\")" }`;
+  const shell = target => emit({ type: 'item.completed', item: {
+    type: 'command_execution', command: `echo x > "${target}"`,
+    aggregated_output: `Access to the path '${target}' is denied`, exit_code: 1,
+  } });
   // probe-flaky：第一次像真實模型那樣拒絕嘗試，第二次才真的試。
   const flakyFirst = mode === 'probe-flaky' && !existsSync(process.env.KERNEL_STUB_FLAG);
   if (flakyFirst) writeFileSync(process.env.KERNEL_STUB_FLAG, 'x');
   if (flakyFirst) { /* 什麼都沒試 */ }
-  else if (mode === 'probe-partial') refuse(shell('probe-shell.txt'));
+  else if (mode === 'probe-partial') shell('probe-shell.txt');
   else if (mode === 'probe-readonly-word') emit({ type: 'item.completed', item: { type: 'command_execution', command: 'rg read-only README.txt', aggregated_output: 'read-only sandbox rejected', exit_code: 0 } });
   else if (mode === 'probe-patch-only') { refuse(patch); refuse(patch); refuse(patch); refuse(patch); }
-  else if (mode !== 'probe-silent') { refuse(patch); refuse(shell('probe-shell.txt')); refuse(shell('probe-node.txt')); refuse(shell(prompt.match(/outside-[0-9a-f]+\.txt/)?.[0] ?? 'outside.txt')); }
+  else if (mode !== 'probe-silent') { refuse(patch); shell('probe-shell.txt'); shell('probe-node.txt'); shell(prompt.match(/outside-[0-9a-f]+\.txt/)?.[0] ?? 'outside.txt'); }
   finish('全部都沒有成功。\nPROBE_DONE');
 } else if (kind === 'write') {
   await new Promise(resolve => setTimeout(resolve, Number(process.env.KERNEL_STUB_DELAY_MS ?? 0)));

@@ -423,7 +423,8 @@ await test('鍵盤解碼支援跨 chunk 方向鍵與 Esc，不把貼上和未知
 });
 await test('new-tab 使用完整參數陣列、含空白入口與工作目錄、不遞迴 new-tab', async () => {
   const calls = [], out = [], errors = [];
-  const config = { platform: 'win32', env: { WT_SESSION: 'test' }, executable: 'C:/Program Files/node/node.exe', execArgs: ['--import','C:/Runtime Files/loader.mjs'], entry: join(ROOT,'entry with spaces.js'), cwd: 'C:/Work Space/repo',
+  // 注入 Windows launcher，但路徑仍交給本機 node:path 解析，cwd 必須是本機絕對路徑。
+  const config = { platform: 'win32', env: { WT_SESSION: 'test' }, executable: 'C:/Program Files/node/node.exe', execArgs: ['--import','C:/Runtime Files/loader.mjs'], entry: join(ROOT,'entry with spaces.js'), cwd: join(ROOT, 'Work Space', 'repo'),
     findWt: () => 'C:/Windows Apps/wt.exe', async launch(...args) { calls.push(args); return 0; } };
   assert.equal(await terminal.launchDashboardTab(config,{stdout:s=>out.push(s),stderr:s=>errors.push(s)}),0);
   assert.deepEqual(calls[0],[config.findWt(), ['-w','0','new-tab','--title','ai-cli_kernel','--startingDirectory',config.cwd,'--',config.executable,...config.execArgs,config.entry,'kernel','dashboard'],config.cwd]);
@@ -447,15 +448,15 @@ await test('原生 launcher 無 shell、stdio ignore、收到 wt 結束即返回
   }
 });
 await test('new-tab worker 不繞過，非 Windows Terminal、wt 缺失、入口缺失與啟動失敗', async () => {
-  for (const mode of ['worker','linux','outside-wt','missing-wt','missing-entry','error','nonzero']) {
+  for (const mode of ['worker','linux','darwin','outside-wt','missing-wt','missing-entry','error','nonzero']) {
     let launched = 0, searched = 0; const out = [], errors = [];
-    const config = { platform: mode === 'linux' ? 'linux' : 'win32', env: { WT_SESSION: mode === 'outside-wt' ? '' : 'test', AI_CLI_WORKER: mode === 'worker' ? '1' : '' }, executable: '/node', execArgs: [], entry: mode === 'missing-entry' ? undefined : '/cli.js', cwd: ROOT,
+    const config = { platform: ['linux', 'darwin'].includes(mode) ? mode : 'win32', env: { WT_SESSION: mode === 'outside-wt' ? '' : 'test', AI_CLI_WORKER: mode === 'worker' ? '1' : '' }, executable: '/node', execArgs: [], entry: mode === 'missing-entry' ? undefined : '/cli.js', cwd: ROOT,
       findWt() { searched++; return mode === 'missing-wt' ? null : '/wt.exe'; }, async launch() { launched++; if (mode === 'error') throw new Error('spawn failed'); return mode === 'nonzero' ? 9 : 0; } };
     const code = await terminal.launchDashboardTab(config,{stdout:s=>out.push(s),stderr:s=>errors.push(s)});
-    assert.equal(code,['linux','outside-wt','missing-wt'].includes(mode) ? 2 : 1,mode);
+    assert.equal(code,['linux','darwin','outside-wt','missing-wt'].includes(mode) ? 2 : 1,mode);
     assert.equal(launched,['error','nonzero'].includes(mode) ? 1 : 0,mode);
-    if (['worker','linux','outside-wt'].includes(mode)) assert.equal(searched,0,mode);
-    if (['linux','outside-wt','missing-wt'].includes(mode)) assert.ok(out.join('').includes("'kernel' 'dashboard'"));
+    if (['worker','linux','darwin','outside-wt'].includes(mode)) assert.equal(searched,0,mode);
+    if (['linux','darwin','outside-wt','missing-wt'].includes(mode)) assert.ok(out.join('').includes("'kernel' 'dashboard'"));
     assert.ok(errors.length,mode);
   }
 });

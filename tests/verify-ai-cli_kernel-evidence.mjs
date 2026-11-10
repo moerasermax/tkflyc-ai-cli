@@ -2,7 +2,7 @@
 import '../tools/stubs/catalog-test-env.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -14,6 +14,8 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const source = process.argv.includes('--source');
 const load = name => import(pathToFileURL(join(ROOT, source ? 'src' : 'dist', 'ai-cli_kernel', `${name}.${source ? 'ts' : 'js'}`)).href);
 const stub = join(ROOT, 'tools', 'stubs', process.platform === 'win32' ? 'kernel-agent.cmd' : 'kernel-agent.mjs');
+// boundaryKey 會直接執行 --version；POSIX 不經過 Windows 的 .cmd 包裝。
+if (process.platform !== 'win32') chmodSync(stub, 0o755);
 process.env.CODEX_CLI_NAME = stub;
 process.env.CLAUDE_CLI_NAME = stub;
 const { parseNameStatusZ, isTestPath, changedBaselineTests, boundedList, boundedStat, segmentedDiff, testSummary, kernelTestInventory, STAT_CHARS, FILE_LIST_CHARS, TEST_SUMMARY_CHARS } = await load('evidence');
