@@ -5305,8 +5305,8 @@
   {
     "name": "kernel K2：Claude 檔案被建立不判 FAIL",
     "file": "src/ai-cli_kernel/probe.ts",
-    "from": "  if (created.length > 0) return { status: 'FAIL'",
-    "to": "  if (created.length > 0 && agent !== 'claude') return { status: 'FAIL'",
+    "from": "  if (created.length > 0) return { status: 'FAIL', evidence: null",
+    "to": "  if (created.length > 0 && agent !== 'claude') return { status: 'FAIL', evidence: null",
     "script": "verify-ai-cli_kernel-evidence.mjs",
     "expect": "K2 Claude tools 合規但檔案被建立仍是 FAIL"
   },
@@ -6045,5 +6045,109 @@
     "to": "acknowledgeUnverifiedBoundary: false",
     "script": "verify-ai-cli_kernel-evidence.mjs",
     "expect": "K3 CLI 與 MCP 都把核准旗標傳進 approve"
+  },
+  {
+    "name": "kernel M1：未正常結束的路徑不看目標檔",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  if (created.length > 0) return { status: 'FAIL', targets: seen,",
+    "to": "  if (created.length < 0) return { status: 'FAIL', targets: seen,",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M1 探針建立目標檔後逾時"
+  },
+  {
+    "name": "kernel M1：逾時路徑不查目標檔",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "return unfinished('逾時', '探針逾時');",
+    "to": "return { ...base, jobId: startedId, status: 'UNKNOWN', targets: {}, evidence: null, detail: '探針逾時' };",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M1 探針建立目標檔後逾時"
+  },
+  {
+    "name": "kernel M1：紀錄消失路徑不查目標檔",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "return unfinished('紀錄消失', '探針 job 的紀錄消失');",
+    "to": "return { ...base, jobId: startedId, status: 'UNKNOWN', targets: {}, evidence: null, detail: '探針 job 的紀錄消失' };",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M1 探針建立目標檔後逾時"
+  },
+  {
+    "name": "kernel M1：例外路徑不查目標檔",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "return unfinished('例外', `探針無法啟動：${(error as Error).message}`);",
+    "to": "return { ...base, jobId: startedId, status: 'UNKNOWN', targets: {}, evidence: null, detail: `探針無法啟動：${(error as Error).message}` };",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M1 探針建立目標檔後逾時"
+  },
+  {
+    "name": "kernel M1：隨機 prompt 檔名進了探針 key",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "all[index - 1] === '--prompt-file' ? '<prompt-file>' : arg",
+    "to": "all[index - 1] === '--prompt-file-unused' ? '<prompt-file>' : arg",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M1 boundaryKey 對每一家都穩定"
+  },
+  {
+    "name": "kernel M2：損毀的探針紀錄當成沒有紀錄",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  if (loaded.state === 'unreadable') return 'UNREADABLE';",
+    "to": "  if (loaded.state === 'unreadable') return 'UNKNOWN';",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M2 boundaryStatus：沒有紀錄是 UNKNOWN"
+  },
+  {
+    "name": "kernel M2：探針紀錄的 status 欄位不驗證",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "if (typeof status !== 'string' || !PROBE_STATUSES.includes(status)) return",
+    "to": "if (typeof status !== 'string') return",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M2 boundaryStatus：沒有紀錄是 UNKNOWN"
+  },
+  {
+    "name": "kernel M2：任何讀檔錯誤都當成沒有紀錄",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "    if (code === 'ENOENT') return { state: 'missing' };",
+    "to": "    if (code !== undefined) return { state: 'missing' };",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M2 boundaryStatus：沒有紀錄是 UNKNOWN"
+  },
+  {
+    "name": "kernel M2：重跑探針時損毀的舊紀錄擋住寫入",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  return loaded.state === 'ok' ? loaded.record : null;",
+    "to": "  if (loaded.state === 'unreadable') throw new Error(loaded.reason);\n  return loaded.state === 'ok' ? loaded.record : null;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M2 損毀紀錄之後重跑探針"
+  },
+  {
+    "name": "kernel M2：approve 帶旗標接回時不擋讀不出來的紀錄",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "不放行 FAIL`);\n      if (status === 'UNREADABLE') throw new Error(unreadableBoundaryMessage(agent));",
+    "to": "不放行 FAIL`);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M2 approve：損毀或 status 不合法的紀錄"
+  },
+  {
+    "name": "kernel M2：approve 核准委任書時讀不出來的紀錄沒有專屬說明",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "continue;\n        if (status === 'UNREADABLE') throw new Error(unreadableBoundaryMessage(agent));",
+    "to": "continue;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M2 approve：損毀或 status 不合法的紀錄"
+  },
+  {
+    "name": "kernel M2：loop 把邊界查詢例外當成 UNKNOWN",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "queryError = error instanceof Error ? error.message : String(error); return 'UNREADABLE';",
+    "to": "queryError = error instanceof Error ? error.message : String(error); return 'UNKNOWN';",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "M2 loop：邊界查詢丟例外"
+  },
+  {
+    "name": "kernel M2：loop 讀不出來的紀錄也吃核准時的同意",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "      if (boundary === 'UNREADABLE') {",
+    "to": "      if (boundary === 'UNREADABLE' && !view.overrides.has('boundary_unverified')) {",
+    "script": "verify-ai-cli_kernel.mjs",
+    "expect": "M2 loop：探針紀錄不是 JSON"
   }
 ]

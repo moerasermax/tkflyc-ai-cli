@@ -17,7 +17,7 @@ import { admitRun, readActiveRuns, type ActiveRun, type AdmissionDeps } from './
 import { releaseStoppedTestLock } from './test-lock.js';
 import type { MutexRetryDeps } from './process-mutex.js';
 import { atomicWrite, kernelRunDir, listRunIds, newRunId, recordSlotReleaseFailed, releaseActiveLock, RunStore, SLOT_RELEASE_DEFERRED_NOTE, SLOT_RELEASE_MARKER_NOTE } from './journal.js';
-import { boundaryKey, boundaryStatus, hasProbeEvidenceFormat, probeResultLabel, runBoundaryProbe, type ProbeRecord } from './probe.js';
+import { boundaryKey, boundaryStatus, hasProbeEvidenceFormat, probeResultLabel, probeRerunHint, runBoundaryProbe, type ProbeRecord } from './probe.js';
 import { activeMinutes, nextStep, openActions, replayJournal, unprocessedActions, type RunView } from './replay.js';
 import { agentForModel } from './runtime.js';
 import { buildContract, TEMPLATES, type KernelStartInput } from './templates.js';
@@ -126,7 +126,7 @@ function nextActionFor(state: EffectiveState, runId: string, reason?: string): s
     case 'waiting_human':
       if (reason === 'checkpoint_push_failed') return `回復點沒有推成功。人手動建立的 run 可用 ai-cli kernel approve ${runId} 同意只留本地；觸發的 run 必須先排除遠端問題。`;
       if (reason === 'checkpoint_secret_risk') return `回復點含疑似秘密，不會推送或派工。請取消此 run，處理秘密後重新建立委任書。`;
-      if (reason === 'boundary_unverified') return `先跑 ai-cli kernel probe --agent <agent>，通過後再 ai-cli kernel approve ${runId}。結果是 UNKNOWN（沒有證據）而且使用者明確同意未驗證時，才可以加 --acknowledge-unverified-boundary；FAIL 不能這樣放行`;
+      if (reason === 'boundary_unverified') return `先跑 ai-cli kernel probe --agent <agent>，通過後再 ai-cli kernel approve ${runId}。結果是 UNKNOWN（沒有證據）而且使用者明確同意未驗證時，才可以加 --acknowledge-unverified-boundary；FAIL 和紀錄讀不出來（UNREADABLE）都不能這樣放行，後者要重跑探針`;
       if (reason === 'decide_question') return `回答問題：ai-cli kernel approve ${runId} --note "你的回答"`;
       return `確認上面的原因後，要繼續就執行 ai-cli kernel approve ${runId}，不要就執行 ai-cli kernel cancel ${runId}`;
     case 'needs_reconcile': return `先用 ai-cli jobs 和 git status 確認實際情況。確定要放棄這個動作的結果就執行 ai-cli kernel approve ${runId} --reconcile abandon`;
@@ -168,6 +168,10 @@ function describeSteps(view: RunView): KernelRunStatus['steps'] {
     rows.push({ id: step.id, title: step.title, status: open.has(step.id) ? 'running' : 'pending', findings: [] });
   }
   return rows;
+}
+
+function unreadableBoundaryMessage(agent: string): string {
+  return `${agent} 的權限邊界探針紀錄讀不出來（損毀、格式不合或無法讀取，UNREADABLE）。這不是「沒有證據」，不論有沒有 --acknowledge-unverified-boundary 都不放行。${probeRerunHint(agent)}，新結果會蓋掉損毀的紀錄`;
 }
 
 function boundaries(contract: KernelContract): Record<string, BoundaryStatus> {
@@ -314,9 +318,11 @@ export async function aiCliKernelApprove(input: KernelApproveInput, deps: Admiss
   // 這兩種都不記進日誌，免得留下沒生效的同意。
   const ackBoundary = input.acknowledgeUnverifiedBoundary === true && !contract.develop && !contract.allowUnverifiedBoundary;
   // 旗標只放行 UNKNOWN（沒有證據）。FAIL 是探針證明限制沒生效：不論核准委任書還是接回都先擋，loop 派工前也會再擋一次。
+  // 紀錄讀不出來（UNREADABLE）可能是一筆壞掉的 FAIL，也不是「沒有證據」，同樣不放行。
   if (ackBoundary) {
     for (const [agent, status] of Object.entries(boundaries(contract))) {
       if (status === 'FAIL') throw new Error(`${agent} 的權限邊界探針結果是 FAIL：探針證明限制沒生效。--acknowledge-unverified-boundary 只放行 UNKNOWN（沒有證據），不放行 FAIL`);
+      if (status === 'UNREADABLE') throw new Error(unreadableBoundaryMessage(agent));
     }
   }
   if (view.state === 'awaiting_approval') {
@@ -327,6 +333,7 @@ export async function aiCliKernelApprove(input: KernelApproveInput, deps: Admiss
     if (!contract.allowUnverifiedBoundary) {
       for (const [agent, status] of Object.entries(boundaries(contract))) {
         if (status === 'PASS' || (status === 'UNKNOWN' && ackBoundary)) continue;
+        if (status === 'UNREADABLE') throw new Error(unreadableBoundaryMessage(agent));
         throw new Error(`${agent} 的權限邊界探針結果是 ${status}。請先執行 ai-cli kernel probe --agent ${agent}${status === 'UNKNOWN' ? '；結果仍是 UNKNOWN 而且使用者明確同意未驗證時，才可以加 --acknowledge-unverified-boundary' : ''}`);
       }
     }

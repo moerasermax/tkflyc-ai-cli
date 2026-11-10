@@ -20,7 +20,7 @@ const { realWorkspace } = await load('workspace');
 const { checkCitations } = await load('verdict');
 const { buildContract } = await load('templates');
 const { buildWorkerPrompt } = await load('plan');
-const { hasProbeEvidenceFormat, probeResultLabel, judgeFinishedProbe, claudeInitEvent, NO_EVIDENCE_FORMAT_HINT, boundaryKey } = await load('probe');
+const { hasProbeEvidenceFormat, probeResultLabel, judgeFinishedProbe, claudeInitEvent, NO_EVIDENCE_FORMAT_HINT, boundaryKey, boundaryStatus, loadProbeRecord, readProbeRecord, runBoundaryProbe, judgeUnfinishedProbe } = await load('probe');
 const { RunStore, newRunId, kernelRunDir, kernelStateDir, releaseActiveLock } = await load('journal');
 const { runKernelLoop } = await load('loop');
 const { aiCliKernelStatus, aiCliKernelApprove } = await load('api');
@@ -524,6 +524,149 @@ try {
     assert.equal(await runKernelLoop(k3LoopDeps(store, contract, executor, 'UNKNOWN')), 'waiting_human');
     assert.equal(replayJournal(store.read()).reason, 'boundary_unverified');
     assert.equal(executor.started.length, 0);
+  });
+
+  // M1：探針 job 啟動後的每一條結束路徑，都要在刪目錄前看目標檔。用假 executor，不啟動 CLI 或模型；
+  // boundaryKey 只會叫假 CLI 的 --version。
+  const m1Executor = ({ create = [], poll }) => {
+    const ex = {
+      started: [], killed: 0,
+      async start(action, contract) {
+        ex.started.push(action);
+        for (const name of create) writeFileSync(join(contract.workFolder, name), 'x');
+        return { jobId: `m1-${ex.started.length}`, pid: 0 };
+      },
+      async poll(job) { return poll(job); },
+      async find() { return null; }, async kill() { ex.killed++; return true; }, async isGone() { return true; },
+    };
+    return ex;
+  };
+  const m1Paths = [
+    ['逾時', () => ({ state: 'running' }), /探針逾時/],
+    ['紀錄消失', () => ({ state: 'missing' }), /探針 job 的紀錄消失/],
+    ['例外', () => { throw new Error('fixture poll failure'); }, /探針無法啟動：fixture poll failure/],
+  ];
+  const m1RecordFile = agent => join(kernelStateDir(), 'probes', `${boundaryKey(agent).key}.json`);
+  const m1WithGrok = async fn => {
+    // grok 在測試環境預設模擬未安裝；這裡暫時指向同一支假 CLI，讓三家都走到 executor。
+    const previous = process.env.GROK_CLI_NAME;
+    process.env.GROK_CLI_NAME = stub;
+    try { return await fn(); } finally { if (previous === undefined) delete process.env.GROK_CLI_NAME; else process.env.GROK_CLI_NAME = previous; }
+  };
+  await check('M1 judgeUnfinishedProbe：任一目標存在就判FAIL並註明路徑；全不存在維持 UNKNOWN 與原 detail', () => {
+    const absent = { 'probe-write.txt': 'absent', 'probe-shell.txt': 'absent', 'probe-node.txt': 'absent', 'outside-x.txt': 'absent' };
+    const fail = judgeUnfinishedProbe({ ...absent, 'outside-x.txt': 'created' }, '逾時', '探針逾時');
+    assert.equal(fail.status, 'FAIL'); assert.match(fail.detail, /outside-x\.txt/); assert.match(fail.detail, /逾時/);
+    assert.equal(fail.targets['outside-x.txt'], 'created'); assert.equal(fail.targets['probe-write.txt'], 'absent');
+    const none = judgeUnfinishedProbe(absent, '例外', '探針無法啟動：x');
+    assert.deepEqual(none, { status: 'UNKNOWN', targets: {}, evidence: null, detail: '探針無法啟動：x' });
+  });
+  await check('M1 探針建立目標檔後逾時、紀錄消失、poll 丟例外 → 三家都判 FAIL，targets 記實際狀態', () => m1WithGrok(async () => {
+    for (const agent of ['codex', 'claude', 'grok']) {
+      for (const [path, poll, _] of m1Paths) {
+        const executor = m1Executor({ create: ['probe-shell.txt'], poll });
+        try {
+          const record = await runBoundaryProbe(agent, { executor, timeoutMs: 20, pollMs: 5 });
+          assert.equal(executor.started.length, 1, `${agent}/${path} 應該只啟動一次`);
+          assert.equal(record.status, 'FAIL', `${agent}/${path}: ${record.detail}`);
+          assert.match(record.detail, /probe-shell\.txt/); assert.ok(record.detail.includes(`在${path}路徑上發現`), record.detail);
+          assert.equal(record.targets['probe-shell.txt'], 'created'); assert.equal(record.targets['probe-write.txt'], 'absent');
+          assert.equal(record.jobId, 'm1-1');
+          if (path === '逾時') assert.equal(executor.killed, 1);
+          assert.equal(boundaryStatus(agent), 'FAIL', `${agent}/${path}：閘門要讀得回剛寫的紀錄`);
+        } finally { rmSync(m1RecordFile(agent), { force: true }); }
+      }
+    }
+  }));
+  await check('M1 boundaryKey 對每一家都穩定：grok 的 --prompt-file 隨機檔名不進 key', () => m1WithGrok(async () => {
+    for (const agent of ['codex', 'claude', 'grok']) {
+      const first = boundaryKey(agent), second = boundaryKey(agent);
+      assert.ok(first.parts.version && first.parts.args, `${agent} 應該組得出指令`);
+      assert.equal(first.key, second.key, agent);
+    }
+  }));
+  await check('M1 三條路徑都沒有檔案 → 維持 UNKNOWN、targets 為空、detail 不變', () => m1WithGrok(async () => {
+    for (const agent of ['codex', 'claude', 'grok']) {
+      for (const [path, poll, detail] of m1Paths) {
+        const executor = m1Executor({ poll });
+        try {
+          const record = await runBoundaryProbe(agent, { executor, timeoutMs: 20, pollMs: 5 });
+          assert.equal(record.status, 'UNKNOWN', `${agent}/${path}: ${record.detail}`);
+          assert.match(record.detail, detail); assert.doesNotMatch(record.detail, /檔案被建立/);
+          assert.deepEqual(record.targets, {});
+        } finally { rmSync(m1RecordFile(agent), { force: true }); }
+      }
+    }
+  }));
+
+  // M2：沒有紀錄是「沒有證據」（UNKNOWN，可被核准旗標放行）；紀錄檔在卻讀不出來是 UNREADABLE，一律不放行。
+  const m2Corrupt = [['不是 JSON', '{ broken'], ['status 不合法', JSON.stringify({ key: 'x', status: 'MAYBE' })], ['不是物件', '[1]']];
+  await check('M2 boundaryStatus：沒有紀錄是 UNKNOWN；非 JSON、status 不合法、讀檔失敗是 UNREADABLE', () => {
+    const file = k3ProbeFile(); const key = boundaryKey('codex').key;
+    try {
+      k3SetProbe(null);
+      assert.equal(boundaryStatus('codex'), 'UNKNOWN'); assert.equal(loadProbeRecord(key).state, 'missing');
+      for (const [label, text] of m2Corrupt) {
+        writeFileSync(file, text);
+        assert.equal(boundaryStatus('codex'), 'UNREADABLE', label);
+        assert.equal(loadProbeRecord(key).state, 'unreadable', label);
+        assert.equal(readProbeRecord(key), null, `${label}：合併時當作沒有`);
+      }
+      rmSync(file, { force: true }); mkdirSync(file);
+      const unreadable = loadProbeRecord(key);
+      assert.equal(unreadable.state, 'unreadable'); assert.match(unreadable.reason, /讀檔失敗/);
+      assert.equal(boundaryStatus('codex'), 'UNREADABLE');
+      rmSync(file, { recursive: true, force: true });
+      for (const status of ['PASS', 'FAIL', 'UNKNOWN']) { k3SetProbe(status); assert.equal(boundaryStatus('codex'), status); }
+    } finally { rmSync(file, { recursive: true, force: true }); }
+  });
+  await check('M2 UNREADABLE 標籤每一家都提示重跑探針，PASS／FAIL／UNKNOWN 標籤不變', () => {
+    for (const agent of ['codex', 'claude', 'grok']) {
+      const label = probeResultLabel(agent, 'UNREADABLE');
+      assert.match(label, /讀不出來/); assert.ok(label.includes(`ai-cli kernel probe --agent ${agent}`), label);
+      assert.doesNotMatch(label, /工具受限，非隔離|沒有探針證據格式/);
+    }
+    assert.match(probeResultLabel('codex', 'PASS'), /工具受限，非隔離/);
+    assert.match(probeResultLabel('codex', 'UNKNOWN'), /探針未通過或結果不明（UNKNOWN）/);
+  });
+  await check('M2 approve：損毀或 status 不合法的紀錄＋同意未驗證 → 核准委任書與接回都被拒、提示重跑探針；沒有紀錄＋同意照 K3 放行', async () => {
+    try {
+      for (const [label, text] of m2Corrupt) {
+        writeFileSync(k3ProbeFile(), text);
+        const store = k3Awaiting();
+        await assert.rejects(aiCliKernelApprove({ runId: store.runId, acknowledgeUnverifiedBoundary: true }, { quota: k3Quota, launch: k3NoLaunch }), /讀不出來.*ai-cli kernel probe --agent codex/s, label);
+        await assert.rejects(aiCliKernelApprove({ runId: store.runId }, { quota: k3Quota, launch: k3NoLaunch }), /讀不出來/, `${label}（不帶旗標）`);
+        assert.equal(k3Approvals(store).length, 0);
+        const paused = k3Awaiting();
+        paused.append({ type: 'approved', contractDigest: paused.contractDigest(), kind: 'contract' });
+        paused.append({ type: 'state', state: 'waiting_human', reason: 'boundary_unverified', detail: 'fixture' });
+        await assert.rejects(aiCliKernelApprove({ runId: paused.runId, acknowledgeUnverifiedBoundary: true }, { quota: k3Quota, launch: k3NoLaunch }), /讀不出來/, `${label}（接回）`);
+        assert.equal(k3Approvals(paused).length, 1);
+        const status = await aiCliKernelStatus({ runId: store.runId });
+        assert.equal(status.boundary.codex, 'UNREADABLE'); assert.match(status.boundaryLabel, /探針紀錄讀不出來/);
+      }
+      k3SetProbe(null);
+      const store = k3Awaiting(); let launches = 0;
+      try {
+        await aiCliKernelApprove({ runId: store.runId, acknowledgeUnverifiedBoundary: true }, { quota: k3Quota, launch: async () => { launches++; } });
+        assert.equal(launches, 1); assert.deepEqual(k3Approvals(store)[0].overrides, ['boundary_unverified']);
+      } finally { await k3Done(store); }
+    } finally { k3SetProbe(null); }
+  });
+  await check('M2 損毀紀錄之後重跑探針（假 executor）可以寫入新結果', async () => {
+    try {
+      writeFileSync(k3ProbeFile(), '{ broken');
+      assert.equal(boundaryStatus('codex'), 'UNREADABLE');
+      const executor = m1Executor({ create: ['probe-write.txt'], poll: () => ({ state: 'finished', result: { status: 'completed', exitCode: 0, message: '', rawTail: '', usage: null } }) });
+      const record = await runBoundaryProbe('codex', { executor, timeoutMs: 1000, pollMs: 5 });
+      assert.equal(record.status, 'FAIL');
+      assert.equal(boundaryStatus('codex'), 'FAIL');
+      assert.equal(JSON.parse(readFileSync(k3ProbeFile(), 'utf8')).status, 'FAIL');
+      writeFileSync(k3ProbeFile(), JSON.stringify({ status: 'BROKEN' }));
+      const unknown = await runBoundaryProbe('codex', { executor: m1Executor({ poll: () => ({ state: 'missing' }) }), timeoutMs: 1000, pollMs: 5 });
+      assert.equal(unknown.status, 'UNKNOWN');
+      assert.equal(boundaryStatus('codex'), 'UNKNOWN', '沒結論的重跑也要蓋掉損毀紀錄');
+    } finally { k3SetProbe(null); }
   });
 } finally { rmSync(temp, { recursive: true, force: true }); }
 assert.ok(passed + failed > 0, 'refuse an empty test selection');
