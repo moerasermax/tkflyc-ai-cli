@@ -6197,5 +6197,77 @@
     "to": "if (decideArgs || parts.args) parts.decideArgs = decideArgs;",
     "script": "verify-ai-cli_kernel-evidence.mjs",
     "expect": "M3 兩組 argv 相同的家"
+  },
+  {
+    "name": "kernel M4：重試 prompt 不附拒收原因",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "${aiCliKernelRejectionText(view.lastRejection)}",
+    "to": "${aiCliKernelRejectionText(\"\")}",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 第二次 decide 的 prompt 附上第一次的拒收原因"
+  },
+  {
+    "name": "kernel M4：拒收原因不跳脫就送回 decide",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "return aiCliKernelUntrustedText(cut);",
+    "to": "return cut;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "包成不可信資料"
+  },
+  {
+    "name": "kernel M4：拒收原因不截斷",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "reason.length > REJECTION_CHARS ?",
+    "to": "reason.length > Infinity ?",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 拒收原因超過上限時截斷"
+  },
+  {
+    "name": "kernel M4：步驟與最外層的 report_step 不一致也放行",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "if (claims.length === 1 && 'report_step' in raw && raw.report_step !== claims[0]) {",
+    "to": "if (claims.length === 1 && 'report_step' in raw && raw.report_step === undefined) {",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 步驟上的 report_step 矛盾時拒收"
+  },
+  {
+    "name": "kernel M4：步驟上的 report_step 不是自己的 id 也放行",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "if (typeof step.report_step !== 'string' || step.report_step !== step.id) {",
+    "to": "if (typeof step.report_step !== 'string') {",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 步驟上的 report_step 矛盾時拒收"
+  },
+  {
+    "name": "kernel M4：多個步驟各自宣稱也放行",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "if (claims.length > 1) throw",
+    "to": "if (claims.length > 9) throw",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 多個步驟各自宣稱"
+  },
+  {
+    "name": "kernel M4：驗證前不正規化步驟上的 report_step",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "DecisionSchema.safeParse(normalizeStepReport(extractJson(text)))",
+    "to": "DecisionSchema.safeParse(extractJson(text))",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 步驟帶冗餘而一致的 report_step"
+  },
+  {
+    "name": "kernel M4：最外層缺 report_step 時不提升",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "!('report_step' in raw) && claims.length === 1 ?",
+    "to": "false && claims.length === 1 ?",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 最外層缺 report_step 時"
+  },
+  {
+    "name": "kernel M4：decide 格式規格漏掉步驟鍵那句",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "- ${DECIDE_STEP_KEYS_RULE}",
+    "to": "- report_step 只放在最外層。",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M4 decide 格式規格"
   }
 ]
