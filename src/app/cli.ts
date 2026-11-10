@@ -145,6 +145,12 @@ Input: a JSON object on stdin
   { "cwd": "...", "model": "...", "prompt": "...",
     "capabilities": ["fs/read"], "reasoningEffort": "high", "sessionId": "..." }
 
+Codex strict uses read-only sandbox plus --ignore-rules; on Windows it selects
+windows.sandbox='elevated'. Resume keeps the same restrictions.
+This raw exec stream does not interpret tool results; inspect sandbox errors in
+vendor frames even when the terminal exitCode is 0. run/get_result report them
+as agentOutput.sandbox_warning.
+
 Output on stdout: one JSON object per line
   {"v":1,"type":"started",...}
   {"v":1,"type":"stdout","seq":1,"encoding":"base64","data":"..."}

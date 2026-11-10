@@ -70,8 +70,12 @@ export class FileJobExecutor implements KernelExecutor {
     }
     const status = String(result.status);
     if (status === 'running') return { state: 'running' };
-    const output = result.agentOutput as { message?: unknown; result?: unknown; usage?: unknown } | undefined;
-    const message = typeof output?.message === 'string' ? output.message : typeof output?.result === 'string' ? output.result : '';
+    const output = result.agentOutput as { message?: unknown; result?: unknown; usage?: unknown; sandbox_warning?: { message?: unknown; detail?: unknown } } | undefined;
+    const agentMessage = typeof output?.message === 'string' ? output.message : typeof output?.result === 'string' ? output.result : '';
+    const warning = output?.sandbox_warning;
+    const message = typeof warning?.message === 'string'
+      ? `[sandbox_warning] ${warning.message}\n${typeof warning.detail === 'string' ? warning.detail : ''}\n\n${agentMessage}`
+      : agentMessage;
     return {
       state: 'finished',
       result: {

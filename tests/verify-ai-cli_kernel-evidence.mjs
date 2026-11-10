@@ -25,7 +25,7 @@ const explicitModels = input => ({ ...input, model: input.model ?? EXPLICIT_MODE
 const { buildContract: buildContractRaw, needsQuotaSnapshot } = await load('templates');
 const buildContract = (input, ...rest) => buildContractRaw(explicitModels(input), ...rest);
 const { buildWorkerPrompt, buildDecidePrompt, parseDecision, DECIDE_STEP_KEYS_RULE, REJECTION_CHARS } = await load('plan');
-const { hasProbeEvidenceFormat, probeResultLabel, judgeFinishedProbe, claudeInitEvent, claudeToolEvidence, NO_EVIDENCE_FORMAT_HINT, boundaryKey, boundaryStatus, loadProbeRecord, readProbeRecord, runBoundaryProbe, judgeUnfinishedProbe, combineClaudeProbe, PROBE_MODELS, PROBE_CAPABILITIES, DECIDE_CAPABILITIES } = await load('probe');
+const { probeEvidence, hasProbeEvidenceFormat, probeResultLabel, judgeFinishedProbe, claudeInitEvent, claudeToolEvidence, NO_EVIDENCE_FORMAT_HINT, boundaryKey, boundaryStatus, loadProbeRecord, readProbeRecord, runBoundaryProbe, judgeUnfinishedProbe, combineClaudeProbe, PROBE_MODELS, PROBE_CAPABILITIES, DECIDE_CAPABILITIES } = await load('probe');
 const { RunStore, newRunId, kernelRunDir, kernelStateDir, releaseActiveLock, digestText } = await load('journal');
 const loadCore = name => import(pathToFileURL(join(ROOT, source ? 'src' : 'dist', 'core', `${name}.${source ? 'ts' : 'js'}`)).href);
 const { buildCliCommand } = await loadCore('command-builder');
@@ -333,18 +333,149 @@ try {
     assert.equal(judgeFinishedProbe('grok', { seen: { ...allAbsent, 'probe-node.txt': 'created' }, status: 'completed', exitCode: 0, log: () => '' }).status, 'FAIL');
     assert.ok(!judgeClaude(claudeStream(assistantText('PROBE_DONE'))).detail.includes(NO_EVIDENCE_FORMAT_HINT));
   });
-  await check('K2 Codex 判定照舊：拒絕紀錄齊全才 PASS，對不上是 noAttempt', () => {
+  await check('K2 Codex 拒絕輸出逐一具名才 PASS，沒有工具證據是 noAttempt', () => {
     const codexSeen = { 'probe-write.txt': 'absent', 'probe-shell.txt': 'absent', 'probe-node.txt': 'absent', 'outside-x.txt': 'absent' };
-    const stderr = [
-      'codex_core::tools::router: error=patch rejected: writing is blocked by read-only sandbox',
-      "codex_core::tools::router: error=exec_command failed: 'x' > probe-shell.txt rejected: blocked by policy",
-      "codex_core::tools::router: error=exec_command failed: node -e probe-node.txt rejected: blocked by policy",
-      "codex_core::tools::router: error=exec_command failed: 'x' > ../outside-x.txt rejected: blocked by policy",
-    ].join('\n');
+    const stderr = Object.keys(codexSeen).map(target => `codex_core::tools::router: error=PermissionDenied: ${target}`).join('\n');
     const pass = judgeFinishedProbe('codex', { seen: codexSeen, status: 'completed', exitCode: 0, log: (stream, from) => { assert.equal(from, 'tail'); return stream === 'stderr' ? stderr : ''; } });
     assert.equal(pass.status, 'PASS'); assert.match(pass.detail, /共 4 筆/);
     const none = judgeFinishedProbe('codex', { seen: codexSeen, status: 'completed', exitCode: 0, log: () => claudeStream(claudeInit(['Read'])) });
     assert.equal(none.status, 'UNKNOWN'); assert.equal(none.noAttempt, true);
+  });
+
+  const osTargets = ['probe-write.txt', 'probe-shell.txt', 'probe-node.txt', 'outside-x.txt'];
+  const osErrors = ['拒絕存取路徑', 'Access to the path canary is denied', 'UnauthorizedAccessException', 'PermissionDenied'];
+  const osEvent = (target, error, extra = {}) => ({ type: 'item.completed', item: { type: 'command_execution', command: `Set-Content ${target} test`, aggregated_output: `${error} ${target}`, exit_code: 1, ...extra } });
+  const osStream = events => events.map(event => JSON.stringify(event)).join('\n');
+  await check('issue24 探針辨識中英文 OS 寫入拒絕且逐目標核對', () => {
+    const events = osTargets.map((target, i) => osEvent(target, osErrors[i]));
+    assert.deepEqual(probeEvidence(osStream(events), '', osTargets).missing, []);
+    assert.deepEqual(probeEvidence(osStream(events.slice(0, 3)), '', osTargets).missing, [osTargets[3]]);
+    const r = judgeFinishedProbe('codex', { seen: Object.fromEntries(osTargets.map(t => [t, 'absent'])), status: 'completed', exitCode: 0, log: stream => stream === 'stdout' ? osStream(events) : '' });
+    assert.equal(r.status, 'PASS');
+  });
+  await check('issue24 探針不接受模型文字、偽事件、成功或缺結束碼', () => {
+    const real = osEvent(osTargets[0], osErrors.join(' '));
+    for (const fake of [
+      { type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(real), aggregated_output: osErrors.join(' '), command: osTargets[0], exit_code: 1 } },
+      { ...real, type: 'item.started' },
+      osEvent(osTargets[0], osErrors.join(' '), { exit_code: 0 }),
+      osEvent(osTargets[0], osErrors.join(' '), { exit_code: undefined }),
+      osEvent(osTargets[0], osErrors.join(' '), { exit_code: null }),
+      osEvent(osTargets[0], 'ok', { command: osErrors.join(' ') + osTargets[0] }),
+    ]) assert.deepEqual(probeEvidence(osStream([fake]), '', [osTargets[0]]).missing, [osTargets[0]]);
+    assert.deepEqual(probeEvidence('', osErrors.join(' ') + osTargets[0], [osTargets[0]]).missing, [osTargets[0]]);
+  });
+  await check('issue24 探針初始化失敗不可當成寫入被 OS 擋下', () => {
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+    try {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+    for (const error of ['CreateProcessAsUserW failed', 'helper_unknown_error', 'setup refresh had errors', 'windows sandbox failed']) {
+      assert.deepEqual(probeEvidence(osStream([osEvent(osTargets[0], error + ': PermissionDenied')]), '', [osTargets[0]]).missing, [osTargets[0]]);
+      assert.deepEqual(probeEvidence('', `codex_core::tools::router: error=${error}: permission denied ${osTargets[0]}`, [osTargets[0]]).missing, [osTargets[0]]);
+    }
+    } finally { Object.defineProperty(process, 'platform', descriptor); }
+  });
+
+  await check('issue24-audit F2 多目標拒絕不替任何目標背書', () => {
+    const event = osEvent(osTargets[0], 'PermissionDenied ' + osTargets.join(' '));
+    assert.deepEqual(probeEvidence(osStream([event]), '', osTargets).missing, osTargets);
+  });
+  await check('issue24-audit F2 檔名僅在 command 不算證據', () => {
+    const event = osEvent(osTargets[0], '', { aggregated_output: 'PermissionDenied' });
+    assert.deepEqual(probeEvidence(osStream([event]), '', osTargets).missing, osTargets);
+    const stderr = `codex_core::tools::router: error=exec_command failed: write ${osTargets[0]} rejected: blocked by policy`;
+    assert.deepEqual(probeEvidence('', stderr, osTargets).missing, osTargets);
+  });
+  await check('issue24-audit F2 一般匿名 router 拒絕不替任何目標背書', () => {
+    const stderr = 'codex_core::tools::router: error=permission denied';
+    assert.deepEqual(probeEvidence('', stderr, [osTargets[0]], [osTargets[0]]).missing, [osTargets[0]]);
+  });
+  // 主 session 提供的真機 stderr 原文；不從 stdout 或模型敘述取證。
+  const routerPatch = '2026-11-10T16:52:36.611407Z ERROR codex_core::tools::router: error=patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings';
+  const routerSeen = Object.fromEntries(osTargets.map(t => [t, 'absent']));
+  const routerLog = stream => stream === 'stderr' ? routerPatch : osStream(osTargets.slice(1).map(t => osEvent(t, 'PermissionDenied')));
+  await check('issue24-router 證據版本更新使舊快取失效', () => {
+    assert.equal(boundaryKey('codex').parts.evidence, 'target-output-router-patch-v3');
+  });
+  await check('issue24-router 真機三筆 shell 加 stderr patch 拒絕通過', () => {
+    assert.equal(judgeFinishedProbe('codex', { seen: routerSeen, status: 'completed', exitCode: 0, log: routerLog }).status, 'PASS');
+  });
+  await check('issue24-router patch 拒絕僅歸屬 probe-write 不替其他目標背書', () => {
+    for (const suffix of ['', ...osTargets.slice(1).map(t => ' ' + t)]) {
+      assert.deepEqual(probeEvidence('', routerPatch + suffix, osTargets, osTargets).missing, osTargets.slice(1));
+      assert.deepEqual(probeEvidence('', routerPatch + suffix, osTargets.slice(1), osTargets.slice(1)).missing, osTargets.slice(1));
+    }
+  });
+  await check('issue24-router stdout 模型與指令輸出不能冒充 router patch 拒絕', () => {
+    for (const target of osTargets) {
+      const text = routerPatch + ' ' + target;
+      for (const stdout of [text, osStream([{ type: 'item.completed', item: { type: 'agent_message', text } }]), osStream([osEvent(target, text)])]) {
+        assert.deepEqual(probeEvidence(stdout, '', osTargets).missing, osTargets);
+      }
+    }
+  });
+  await check('issue24-router 缺 router 前綴或 readonly 原因不作證', () => {
+    for (const text of [routerPatch.replace('codex_core::tools::router: error=', ''), routerPatch.replace('codex_core::tools::router', 'another::router'), routerPatch.replace('writing is blocked by read-only sandbox', 'invalid patch'), routerPatch.replace('patch rejected:', 'request rejected:')]) {
+      assert.deepEqual(probeEvidence('', text, osTargets).missing, osTargets);
+    }
+  });
+  await check('issue24-router 仍要求檔案不存在且程序正常完成', () => {
+    assert.equal(judgeFinishedProbe('codex', { seen: { ...routerSeen, 'probe-write.txt': 'created' }, status: 'completed', exitCode: 0, log: routerLog }).status, 'FAIL');
+    for (const [status, exitCode] of [['failed', 0], ['completed', 1]]) {
+      assert.equal(judgeFinishedProbe('codex', { seen: routerSeen, status, exitCode, log: routerLog }).status, 'UNKNOWN');
+    }
+  });
+  // 官方 rust-v0.167.0 exec_events.rs 的 FileChangeItem，failed 包含上游 Declined；非真機捕捉樣本。
+  const patchEvent = (paths, status = 'failed') => ({ type: 'item.completed', item: { id: 'patch-fixture', type: 'file_change', changes: paths.map(path => ({ path, kind: 'add' })), status } });
+  const patchJudge = event => judgeFinishedProbe('codex', { seen: Object.fromEntries(osTargets.map(t => [t, 'absent'])), status: 'completed', exitCode: 0,
+    log: stream => stream === 'stdout' ? osStream([...osTargets.slice(1).map(t => osEvent(t, 'PermissionDenied')), event]) : '' });
+  await check('issue24-audit F2 三筆 shell 加單目標結構化失敗 patch 通過', () => {
+    for (const path of [osTargets[0], '/fixture/' + osTargets[0], 'C:\\fixture\\' + osTargets[0]]) {
+      assert.equal(patchJudge(patchEvent([path])).status, 'PASS');
+    }
+  });
+  await check('issue24-audit F2 多目標 patch 不替任何目標背書', () => {
+    const event = patchEvent(osTargets.slice(0, 2));
+    assert.deepEqual(probeEvidence(osStream([event]), '', osTargets).missing, osTargets);
+  });
+  await check('issue24-audit F2 成功或未完成 patch 不算被拒', () => {
+    for (const status of ['completed', 'in_progress', undefined]) {
+      const event = patchEvent([osTargets[0]]); event.item.status = status;
+      assert.equal(patchJudge(event).status, 'UNKNOWN');
+    }
+    const event = patchEvent([osTargets[0]]); event.type = 'item.started';
+    assert.equal(patchJudge(event).status, 'UNKNOWN');
+  });
+  await check('issue24-audit F2 patch 僅認結構化有效路徑而非模型文字', () => {
+    const real = patchEvent([osTargets[0]]);
+    for (const event of [
+      { type: 'item.completed', item: { ...real.item, type: 'agent_message', text: JSON.stringify(real) + ' PermissionDenied' } },
+      patchEvent(['prefix-' + osTargets[0]]),
+      { ...real, item: { ...real.item, changes: 'PermissionDenied ' + osTargets[0] } },
+      { ...real, item: { ...real.item, changes: [{ path: osTargets[0], kind: 'unknown' }] } },
+      { ...real, item: { ...real.item, changes: [{ path: osTargets[0], kind: 'add' }, null] } },
+      patchEvent([]),
+    ]) assert.equal(patchJudge(event).status, 'UNKNOWN');
+  });
+  await check('issue24-audit F2 四筆具名 shell 仍須檔案全不存在', () => {
+    const seen = Object.fromEntries(osTargets.map(t => [t, 'absent']));
+    const log = stream => stream === 'stdout' ? osStream(osTargets.map(t => osEvent(t, 'PermissionDenied'))) : '';
+    assert.equal(judgeFinishedProbe('codex', { seen, status: 'completed', exitCode: 0, log }).status, 'PASS');
+    assert.equal(judgeFinishedProbe('codex', { seen: { ...seen, [osTargets[0]]: 'created' }, status: 'completed', exitCode: 0, log }).status, 'FAIL');
+  });
+  await check('issue24-audit F8 辨識具名存取被拒且不接受模型文字', () => {
+    const event = osEvent(osTargets[0], '存取被拒');
+    assert.deepEqual(probeEvidence(osStream([event]), '', osTargets).missing, osTargets.slice(1));
+    assert.deepEqual(probeEvidence(osStream([{ type: 'item.completed', item: { type: 'agent_message', text: event.item.aggregated_output } }]), '', osTargets).missing, osTargets);
+  });
+  await check('issue24-audit F6 kernel 保留沙箱警示原因與原始訊息', async () => {
+    const { FileJobExecutor } = await load('executor');
+    const poll = async agentOutput => FileJobExecutor.prototype.poll.call({ service: { getProcessResult: async () => ({ status: 'failed', exitCode: 0, agentOutput }) } }, { pid: 98765, jobId: 'issue24-audit-fixture' });
+    const warned = await poll({ message: 'original', sandbox_warning: { message: 'sandbox unavailable', detail: 'helper_unknown_error' } });
+    assert.equal(warned.state, 'finished'); assert.equal(warned.result.status, 'failed'); assert.equal(warned.result.exitCode, 0);
+    assert.match(warned.result.message, /\[sandbox_warning\] sandbox unavailable/);
+    assert.match(warned.result.message, /helper_unknown_error/); assert.match(warned.result.message, /original/);
+    assert.equal((await poll({ message: 'original' })).result.message, 'original');
   });
 
   await check('A4 驗收後 kernel 強制附加基準清單、略新段落不增驗收條件、重跑不重複', async () => {
@@ -792,11 +923,12 @@ try {
     assert.equal(combineClaudeProbe({ ...base, status: 'UNKNOWN', detail: 'x' }, { ...base, status: 'PASS', detail: 'y', jobId: 'b' }).status, 'UNKNOWN');
     assert.equal(combineClaudeProbe({ ...base, status: 'UNKNOWN', detail: 'x' }, { ...base, status: 'FAIL', detail: 'y', jobId: 'b' }).status, 'FAIL');
   });
-  await check('M3 Codex 兩組 argv 相同，key 與真正改前算法一致', async () => {
+  await check('issue24-audit F2 Codex 證據版本使舊 key 失效且兩組 argv 仍相同', async () => {
     const { key, parts } = boundaryKey('codex');
-    assert.deepEqual(Object.keys(parts), ['schema', 'agent', 'platform', 'version', 'binary', 'args']);
+    assert.deepEqual(Object.keys(parts), ['schema', 'agent', 'platform', 'version', 'binary', 'args', 'evidence']);
+    assert.equal(parts.evidence, 'target-output-router-patch-v3');
     assert.equal(parts.args, m3OldArgsDigest('codex', PROBE_CAPABILITIES));
-    assert.equal(key, m3OldKey(parts));
+    assert.notEqual(key, m3OldKey(parts));
     assert.equal(m3OldArgsDigest('codex', DECIDE_CAPABILITIES), m3OldArgsDigest('codex', PROBE_CAPABILITIES), 'codex 兩組 argv 相同');
     // codex 的探針仍只跑唯讀組；沒有拒絕紀錄照舊是 noAttempt，重跑一次。
     const executor = m3Executor({ worker: '' });

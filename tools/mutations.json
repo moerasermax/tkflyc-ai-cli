@@ -2455,7 +2455,7 @@
     "script": "verify-adopt.mjs"
   },
   {
-    "name": "codex strict 在 Windows 不再補讀檔提示（模型挑到管線就被 blocked by policy）",
+    "name": "codex strict 在 Windows 不再補 OS 唯讀沙箱提示",
     "file": "src/agents/codex.ts",
     "from": "  const stdinPrompt = process.platform === 'win32' ? `${CODEX_WINDOWS_READ_ONLY_HINT}\\n\\n${prompt}` : prompt;",
     "to": "  const stdinPrompt = prompt;",
@@ -3242,7 +3242,7 @@
     "name": "kernel：探針只看有沒有任何拒絕",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/probe.ts",
-    "from": "const missing = unnamed.filter(target => !(anonymousTargets.includes(target) && anonymous.length > 0));",
+    "from": "const missing = targets.filter(target => !named(target));",
     "to": "const missing: string[] = [];",
     "expect": "只有一筆拒絕不算"
   },
@@ -3250,8 +3250,8 @@
     "name": "kernel：探針把讀取指令當拒絕",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/probe.ts",
-    "from": "item.exit_code !== 0 && TOOL_REFUSAL.test",
-    "to": "TOOL_REFUSAL.test",
+    "from": "item.exit_code !== 0 && !ROUTER_PATCH_REFUSAL.test(item.aggregated_output ?? '') && TOOL_REFUSAL.test",
+    "to": "!ROUTER_PATCH_REFUSAL.test(item.aggregated_output ?? '') && TOOL_REFUSAL.test",
     "expect": "讀取指令含 read-only 字樣不算"
   },
   {
@@ -3290,8 +3290,8 @@
     "name": "kernel：匿名拒絕可以替任何目標背書",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/probe.ts",
-    "from": "anonymousTargets.includes(target) && anonymous.length > 0",
-    "to": "anonymous.length > 0",
+    "from": "patchTargets.add('probe-write.txt');",
+    "to": "targets.forEach(target => patchTargets.add(target));",
     "expect": "重複的匿名拒絕不能替其他目標背書"
   },
   {
@@ -6605,5 +6605,565 @@
     "to": "      throw error;",
     "script": "verify-ai-cli_kernel-evidence.mjs",
     "expect": "AUTO 範本存 auto 而不是當下選出的模型"
+  },
+  {
+    "name": "issue24：新開載入使用者規則",
+    "file": "src/agents/codex.ts",
+    "from": "    '--ignore-rules',",
+    "to": "    ...(sessionId ? ['--ignore-rules'] : []),",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 strict 新開 忽略規則並標記 strict"
+  },
+  {
+    "name": "issue24：新開不啟用 Windows backend",
+    "file": "src/agents/codex.ts",
+    "from": "  if (process.platform === 'win32') args.push('-c', \"windows.sandbox='elevated'\");",
+    "to": "  if (process.platform === 'win32' && !!sessionId) args.push('-c', \"windows.sandbox='elevated'\");",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 strict 新開 僅 Windows 使用 elevated"
+  },
+  {
+    "name": "issue24：新開遺失 stdin 提示",
+    "file": "src/agents/codex.ts",
+    "from": "  const stdinPrompt = process.platform === 'win32' ? `${CODEX_WINDOWS_READ_ONLY_HINT}\\n\\n${prompt}` : prompt;",
+    "to": "  const stdinPrompt = process.platform === 'win32' && !!sessionId ? `${CODEX_WINDOWS_READ_ONLY_HINT}\\n\\n${prompt}` : prompt;",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 strict 新開 提示僅進 Windows stdin"
+  },
+  {
+    "name": "issue24：續接載入使用者規則",
+    "file": "src/agents/codex.ts",
+    "from": "    '--ignore-rules',",
+    "to": "    ...(sessionId ? [] : ['--ignore-rules']),",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 strict 續接 忽略規則並標記 strict"
+  },
+  {
+    "name": "issue24：續接不啟用 Windows backend",
+    "file": "src/agents/codex.ts",
+    "from": "  if (process.platform === 'win32') args.push('-c', \"windows.sandbox='elevated'\");",
+    "to": "  if (process.platform === 'win32' && !sessionId) args.push('-c', \"windows.sandbox='elevated'\");",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 strict 續接 僅 Windows 使用 elevated"
+  },
+  {
+    "name": "issue24：續接遺失 stdin 提示",
+    "file": "src/agents/codex.ts",
+    "from": "  const stdinPrompt = process.platform === 'win32' ? `${CODEX_WINDOWS_READ_ONLY_HINT}\\n\\n${prompt}` : prompt;",
+    "to": "  const stdinPrompt = process.platform === 'win32' && !sessionId ? `${CODEX_WINDOWS_READ_ONLY_HINT}\\n\\n${prompt}` : prompt;",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 strict 續接 提示僅進 Windows stdin"
+  },
+  {
+    "name": "issue24：非 Windows 也加 backend",
+    "file": "src/agents/codex.ts",
+    "from": "  if (process.platform === 'win32') args.push('-c', \"windows.sandbox='elevated'\");",
+    "to": "  args.push('-c', \"windows.sandbox='elevated'\");",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 strict 新開 僅 Windows 使用 elevated（linux）"
+  },
+  {
+    "name": "issue24：strict builder 遺失身分",
+    "file": "src/agents/codex.ts",
+    "from": "  return { cliPath, args, cwd, agent: 'codex', prompt, resolvedModel, stdinPrompt, strict: true };",
+    "to": "  return { cliPath, args, cwd, agent: 'codex', prompt, resolvedModel, stdinPrompt, strict: false };",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 strict 新開 忽略規則並標記 strict"
+  },
+  {
+    "name": "issue24：提示恢復舊安全清單說法",
+    "file": "src/agents/codex.ts",
+    "from": "export const CODEX_WINDOWS_READ_ONLY_HINT = `【ai-cli 唯讀模式（Windows）】這次使用 OS 唯讀沙箱，並以 --ignore-rules 忽略使用者規則。讀檔可正常使用 Get-Content -Raw、rg、Get-ChildItem 等指令；寫入會被 OS 拒絕。若指令被拒或沙箱無法啟動，請回報原始錯誤並停止該嘗試，不要換寫法無限重試，也不要要求提權；未讀到的內容不可宣稱已完成。`;",
+    "to": "export const CODEX_WINDOWS_READ_ONLY_HINT = `【ai-cli 唯讀模式（Windows）】這次使用 安全清單，並以 --ignore-rules 忽略使用者規則。讀檔可正常使用 Get-Content -Raw、rg、Get-ChildItem 等指令；寫入會被 OS 拒絕。若指令被拒或沙箱無法啟動，請回報原始錯誤並停止該嘗試，不要換寫法無限重試，也不要要求提權；未讀到的內容不可宣稱已完成。`;",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 提示說明 OS 沙箱與錯誤處置"
+  },
+  {
+    "name": "issue24：忽略啟動錯誤 CreateProcessAsUserW failed",
+    "file": "src/agents/codex.ts",
+    "from": "  if (!/CreateProcessAsUserW failed|helper_unknown_error|setup refresh had errors|windows sandbox failed/i.test(detail.slice(0, 300))) return undefined;",
+    "to": "  if (!/unmatched_startup_error|helper_unknown_error|setup refresh had errors|windows sandbox failed/i.test(detail.slice(0, 300))) return undefined;",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 strict 解析四種沙箱初始化錯誤"
+  },
+  {
+    "name": "issue24：忽略啟動錯誤 helper_unknown_error",
+    "file": "src/agents/codex.ts",
+    "from": "  if (!/CreateProcessAsUserW failed|helper_unknown_error|setup refresh had errors|windows sandbox failed/i.test(detail.slice(0, 300))) return undefined;",
+    "to": "  if (!/CreateProcessAsUserW failed|unmatched_startup_error|setup refresh had errors|windows sandbox failed/i.test(detail.slice(0, 300))) return undefined;",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 strict 解析四種沙箱初始化錯誤"
+  },
+  {
+    "name": "issue24：忽略啟動錯誤 setup refresh had errors",
+    "file": "src/agents/codex.ts",
+    "from": "  if (!/CreateProcessAsUserW failed|helper_unknown_error|setup refresh had errors|windows sandbox failed/i.test(detail.slice(0, 300))) return undefined;",
+    "to": "  if (!/CreateProcessAsUserW failed|helper_unknown_error|unmatched_startup_error|windows sandbox failed/i.test(detail.slice(0, 300))) return undefined;",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 strict 解析四種沙箱初始化錯誤"
+  },
+  {
+    "name": "issue24：忽略啟動錯誤 windows sandbox failed",
+    "file": "src/agents/codex.ts",
+    "from": "  if (!/CreateProcessAsUserW failed|helper_unknown_error|setup refresh had errors|windows sandbox failed/i.test(detail.slice(0, 300))) return undefined;",
+    "to": "  if (!/CreateProcessAsUserW failed|helper_unknown_error|setup refresh had errors|unmatched_startup_error/i.test(detail.slice(0, 300))) return undefined;",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 strict 解析四種沙箱初始化錯誤"
+  },
+  {
+    "name": "issue24：一般模式也加警示",
+    "file": "src/agents/codex.ts",
+    "from": "  if (!strict || !['item.completed', 'item.failed'].includes(event?.type) || event?.item?.type !== 'command_execution') return undefined;",
+    "to": "  if (!['item.completed', 'item.failed'].includes(event?.type) || event?.item?.type !== 'command_execution') return undefined;",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 一般與舊 job 不加沙箱警示"
+  },
+  {
+    "name": "issue24：警示接受模型偽裝工具欄位",
+    "file": "src/agents/codex.ts",
+    "from": "  if (!strict || !['item.completed', 'item.failed'].includes(event?.type) || event?.item?.type !== 'command_execution') return undefined;",
+    "to": "  if (!strict || !['item.completed', 'item.failed'].includes(event?.type)) return undefined;",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 模型文字、command、未完成事件與正常寫入拒絕不冒充啟動失敗"
+  },
+  {
+    "name": "issue24：警示接受未完成事件",
+    "file": "src/agents/codex.ts",
+    "from": "  if (!strict || !['item.completed', 'item.failed'].includes(event?.type) || event?.item?.type !== 'command_execution') return undefined;",
+    "to": "  if (!strict || event?.item?.type !== 'command_execution') return undefined;",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 模型文字、command、未完成事件與正常寫入拒絕不冒充啟動失敗"
+  },
+  {
+    "name": "issue24：警示誤讀 command 文字",
+    "file": "src/agents/codex.ts",
+    "from": "  const detail = [event.item.aggregated_output, event.item.error, event.error]",
+    "to": "  const detail = [event.item.command, event.item.aggregated_output, event.item.error, event.error]",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 模型文字、command、未完成事件與正常寫入拒絕不冒充啟動失敗"
+  },
+  {
+    "name": "issue24：parser 未套用啟動警示",
+    "file": "src/agents/codex.ts",
+    "from": "        sandboxWarning ??= codexSandboxWarning(parsed, context?.strict);",
+    "to": "        sandboxWarning ??= codexSandboxWarning(parsed, false);",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 strict 解析四種沙箱初始化錯誤"
+  },
+  {
+    "name": "issue24：損毀輸出捏造警示",
+    "file": "src/agents/codex.ts",
+    "from": "  return null;\n}\n\nexport const codexAgent",
+    "to": "  return { sandbox_warning: true };\n}\n\nexport const codexAgent",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 損毀輸出不捏造沙箱警示"
+  },
+  {
+    "name": "issue24：啟動 metadata 遺失 strict",
+    "file": "src/core/job-store.ts",
+    "from": "    const metaBase: RunnerSpec['meta'] = { ...(cmd.strict ? { strict: true } : {}), version: 1, jobId, agent: cmd.agent, model, resolvedModel: cmd.resolvedModel, effort: cmd.reasoningEffort,",
+    "to": "    const metaBase: RunnerSpec['meta'] = { version: 1, jobId, agent: cmd.agent, model, resolvedModel: cmd.resolvedModel, effort: cmd.reasoningEffort,",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 啟動 metadata 保存 strict 身分"
+  },
+  {
+    "name": "issue24：增量解析丟掉警示",
+    "file": "src/core/job-store.ts",
+    "from": "  if (parsed?.sandbox_warning) { job.parsed.sandbox_warning = parsed.sandbox_warning; job.outputFailed = true; }",
+    "to": "  if (parsed?.sandbox_warning) {  job.outputFailed = true; }",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 持久化 job 警示跨截尾並反映狀態（strict）"
+  },
+  {
+    "name": "issue24：啟動失敗仍顯示 completed",
+    "file": "src/core/job-store.ts",
+    "from": "  if (parsed?.sandbox_warning) { job.parsed.sandbox_warning = parsed.sandbox_warning; job.outputFailed = true; }",
+    "to": "  if (parsed?.sandbox_warning) { job.parsed.sandbox_warning = parsed.sandbox_warning; job.outputFailed = false; }",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 持久化 job 警示跨截尾並反映狀態（strict）"
+  },
+  {
+    "name": "issue24：增量 parser 遺失 strict 上下文",
+    "file": "src/core/job-store.ts",
+    "from": "  const parsed: any = agent.parseOutput(job.toolType === 'claude' ? '{}\\n' + text : text, '', job.exitCode, { workFolder: job.workFolder, status: job.status, strict: job.meta.strict });",
+    "to": "  const parsed: any = agent.parseOutput(job.toolType === 'claude' ? '{}\\n' + text : text, '', job.exitCode, { workFolder: job.workFolder, status: job.status, strict: false });",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 持久化 job 警示跨截尾並反映狀態（strict）"
+  },
+  {
+    "name": "issue24：一般 job 誤視 strict",
+    "file": "src/core/job-store.ts",
+    "from": "  const parsed: any = agent.parseOutput(job.toolType === 'claude' ? '{}\\n' + text : text, '', job.exitCode, { workFolder: job.workFolder, status: job.status, strict: job.meta.strict });",
+    "to": "  const parsed: any = agent.parseOutput(job.toolType === 'claude' ? '{}\\n' + text : text, '', job.exitCode, { workFolder: job.workFolder, status: job.status, strict: job.meta.strict !== undefined });",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 持久化 job 警示跨截尾並反映狀態（normal）"
+  },
+  {
+    "name": "issue24：舊 metadata 誤視 strict",
+    "file": "src/core/job-store.ts",
+    "from": "  const parsed: any = agent.parseOutput(job.toolType === 'claude' ? '{}\\n' + text : text, '', job.exitCode, { workFolder: job.workFolder, status: job.status, strict: job.meta.strict });",
+    "to": "  const parsed: any = agent.parseOutput(job.toolType === 'claude' ? '{}\\n' + text : text, '', job.exitCode, { workFolder: job.workFolder, status: job.status, strict: job.meta.strict !== false });",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 持久化 job 警示跨截尾並反映狀態（legacy）"
+  },
+  {
+    "name": "issue24：run 說明漏掉規則隔離",
+    "file": "src/app/mcp.ts",
+    "from": "          description: `AI Agent Runner: Starts a Claude, Codex, Grok, Antigravity, or direct API agent job in the background and returns a PID immediately. Use list_processes and get_result to monitor progress. With capabilities, Codex uses read-only sandbox, --ignore-rules, and windows.sandbox=elevated on Windows; sandbox startup failure is reported as agentOutput.sandbox_warning even when the vendor exits 0.",
+    "to": "          description: `AI Agent Runner: Starts a Claude, Codex, Grok, Antigravity, or direct API agent job in the background and returns a PID immediately. Use list_processes and get_result to monitor progress. With capabilities, Codex uses read-only sandbox, 規則未隔離, and windows.sandbox=elevated on Windows; sandbox startup failure is reported as agentOutput.sandbox_warning even when the vendor exits 0.",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 MCP 與 CLI 說明包含規則隔離、elevated 與警示"
+  },
+  {
+    "name": "issue24：capabilities 說明漏掉規則隔離",
+    "file": "src/app/mcp.ts",
+    "from": "                  'Restrict what the agent may do. Give it and the agent starts through its STRICT builder instead of the normal one: claude gets --allowedTools Read,Glob,Grep with no --dangerously-skip-permissions, codex gets --sandbox read-only (resume: -c sandbox_mode=read-only), --ignore-rules, and Windows elevated OS sandbox (windows.sandbox=elevated); startup failures are reported as agentOutput.sandbox_warning; grok gets --tools Read,Glob,Grep, --disallowed-tools, --disable-web-search and --permission-mode dontAsk. A read-only turn is [\"fs/read\", \"analysis/produce\"]. OMITTING this field keeps the long-standing behaviour: unrestricted, with the vendor permission bypasses on. An EMPTY array is NOT the same as omitting it — empty means \"no capabilities at all\" and still goes through the strict builder. If the selected agent has no strict builder the call is REFUSED rather than quietly falling back to the permissive one.',",
+    "to": "                  'Restrict what the agent may do. Give it and the agent starts through its STRICT builder instead of the normal one: claude gets --allowedTools Read,Glob,Grep with no --dangerously-skip-permissions, codex gets --sandbox read-only (resume: -c sandbox_mode=read-only), 規則未隔離, and Windows elevated OS sandbox (windows.sandbox=elevated); startup failures are reported as agentOutput.sandbox_warning; grok gets --tools Read,Glob,Grep, --disallowed-tools, --disable-web-search and --permission-mode dontAsk. A read-only turn is [\"fs/read\", \"analysis/produce\"]. OMITTING this field keeps the long-standing behaviour: unrestricted, with the vendor permission bypasses on. An EMPTY array is NOT the same as omitting it — empty means \"no capabilities at all\" and still goes through the strict builder. If the selected agent has no strict builder the call is REFUSED rather than quietly falling back to the permissive one.',",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 MCP 與 CLI 說明包含規則隔離、elevated 與警示"
+  },
+  {
+    "name": "issue24：CLI 說明漏掉規則隔離",
+    "file": "src/app/cli.ts",
+    "from": "Codex strict uses read-only sandbox plus --ignore-rules; on Windows it selects",
+    "to": "Codex strict uses read-only sandbox plus 規則未隔離; on Windows it selects",
+    "script": "verify-mcp-capabilities.mjs",
+    "expect": "issue24 MCP 與 CLI 說明包含規則隔離、elevated 與警示"
+  },
+  {
+    "name": "issue24：探針不認 OS 拒絕 拒絕存取路徑",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "const TOOL_REFUSAL = /blocked by policy|writing is blocked|rejected by user approval|permission denied|access is denied|read-only file system|operation not permitted|拒絕存取路徑|Access to the path[^\\r\\n]*is denied|UnauthorizedAccessException|PermissionDenied|存取被拒/i;",
+    "to": "const TOOL_REFUSAL = /blocked by policy|writing is blocked|rejected by user approval|permission denied|access is denied|read-only file system|operation not permitted|Access to the path[^\\r\\n]*is denied|UnauthorizedAccessException|PermissionDenied|存取被拒/i;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24 探針辨識中英文 OS 寫入拒絕且逐目標核對"
+  },
+  {
+    "name": "issue24：探針不認 OS 拒絕 Access to the path[^\\r\\n]*is denied",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "const TOOL_REFUSAL = /blocked by policy|writing is blocked|rejected by user approval|permission denied|access is denied|read-only file system|operation not permitted|拒絕存取路徑|Access to the path[^\\r\\n]*is denied|UnauthorizedAccessException|PermissionDenied|存取被拒/i;",
+    "to": "const TOOL_REFUSAL = /blocked by policy|writing is blocked|rejected by user approval|permission denied|access is denied|read-only file system|operation not permitted|拒絕存取路徑|UnauthorizedAccessException|PermissionDenied|存取被拒/i;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24 探針辨識中英文 OS 寫入拒絕且逐目標核對"
+  },
+  {
+    "name": "issue24：探針不認 OS 拒絕 UnauthorizedAccessException",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "const TOOL_REFUSAL = /blocked by policy|writing is blocked|rejected by user approval|permission denied|access is denied|read-only file system|operation not permitted|拒絕存取路徑|Access to the path[^\\r\\n]*is denied|UnauthorizedAccessException|PermissionDenied|存取被拒/i;",
+    "to": "const TOOL_REFUSAL = /blocked by policy|writing is blocked|rejected by user approval|permission denied|access is denied|read-only file system|operation not permitted|拒絕存取路徑|Access to the path[^\\r\\n]*is denied|PermissionDenied|存取被拒/i;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24 探針辨識中英文 OS 寫入拒絕且逐目標核對"
+  },
+  {
+    "name": "issue24：探針不認 OS 拒絕 PermissionDenied",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "const TOOL_REFUSAL = /blocked by policy|writing is blocked|rejected by user approval|permission denied|access is denied|read-only file system|operation not permitted|拒絕存取路徑|Access to the path[^\\r\\n]*is denied|UnauthorizedAccessException|PermissionDenied|存取被拒/i;",
+    "to": "const TOOL_REFUSAL = /blocked by policy|writing is blocked|rejected by user approval|permission denied|access is denied|read-only file system|operation not permitted|拒絕存取路徑|Access to the path[^\\r\\n]*is denied|UnauthorizedAccessException|存取被拒/i;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24 探針辨識中英文 OS 寫入拒絕且逐目標核對"
+  },
+  {
+    "name": "issue24：探針接受模型偽裝工具欄位",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "    if (parsed?.type === 'item.completed' && item?.type === 'command_execution' && Number.isInteger(item.exit_code) && !codexSandboxWarning(parsed, true) && item.exit_code !== 0 && !ROUTER_PATCH_REFUSAL.test(item.aggregated_output ?? '') && TOOL_REFUSAL.test(item.aggregated_output ?? '')) {",
+    "to": "    if (parsed?.type === 'item.completed' && item && Number.isInteger(item.exit_code) && !codexSandboxWarning(parsed, true) && item.exit_code !== 0 && !ROUTER_PATCH_REFUSAL.test(item.aggregated_output ?? '') && TOOL_REFUSAL.test(item.aggregated_output ?? '')) {",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24 探針不接受模型文字、偽事件、成功或缺結束碼"
+  },
+  {
+    "name": "issue24：探針接受成功讀取",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "    if (parsed?.type === 'item.completed' && item?.type === 'command_execution' && Number.isInteger(item.exit_code) && !codexSandboxWarning(parsed, true) && item.exit_code !== 0 && !ROUTER_PATCH_REFUSAL.test(item.aggregated_output ?? '') && TOOL_REFUSAL.test(item.aggregated_output ?? '')) {",
+    "to": "    if (parsed?.type === 'item.completed' && item?.type === 'command_execution' && Number.isInteger(item.exit_code) && !codexSandboxWarning(parsed, true) && !ROUTER_PATCH_REFUSAL.test(item.aggregated_output ?? '') && TOOL_REFUSAL.test(item.aggregated_output ?? '')) {",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24 探針不接受模型文字、偽事件、成功或缺結束碼"
+  },
+  {
+    "name": "issue24：探針接受缺結束碼",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "    if (parsed?.type === 'item.completed' && item?.type === 'command_execution' && Number.isInteger(item.exit_code) && !codexSandboxWarning(parsed, true) && item.exit_code !== 0 && !ROUTER_PATCH_REFUSAL.test(item.aggregated_output ?? '') && TOOL_REFUSAL.test(item.aggregated_output ?? '')) {",
+    "to": "    if (parsed?.type === 'item.completed' && item?.type === 'command_execution' && !codexSandboxWarning(parsed, true) && item.exit_code !== 0 && !ROUTER_PATCH_REFUSAL.test(item.aggregated_output ?? '') && TOOL_REFUSAL.test(item.aggregated_output ?? '')) {",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24 探針不接受模型文字、偽事件、成功或缺結束碼"
+  },
+  {
+    "name": "issue24：探針誤收工具初始化失敗",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "    if (parsed?.type === 'item.completed' && item?.type === 'command_execution' && Number.isInteger(item.exit_code) && !codexSandboxWarning(parsed, true) && item.exit_code !== 0 && !ROUTER_PATCH_REFUSAL.test(item.aggregated_output ?? '') && TOOL_REFUSAL.test(item.aggregated_output ?? '')) {",
+    "to": "    if (parsed?.type === 'item.completed' && item?.type === 'command_execution' && Number.isInteger(item.exit_code) && item.exit_code !== 0 && !ROUTER_PATCH_REFUSAL.test(item.aggregated_output ?? '') && TOOL_REFUSAL.test(item.aggregated_output ?? '')) {",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24 探針初始化失敗不可當成寫入被 OS 擋下"
+  },
+  {
+    "name": "issue24：探針誤收 router 初始化失敗",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "      && !codexSandboxWarning({ type: 'item.completed', item: { type: 'command_execution', aggregated_output: output } }, true)) refusals.push(output);",
+    "to": "      ) refusals.push(output);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24 探針初始化失敗不可當成寫入被 OS 擋下"
+  },
+  {
+    "name": "issue24-audit：成功工具輸出仍觸發沙箱警示",
+    "file": "src/agents/codex.ts",
+    "to": "  if (process.platform !== 'win32') return undefined;",
+    "expect": "issue24-audit F1 成功讀檔或 echo",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "  if (process.platform !== 'win32' || event.item.exit_code === 0) return undefined;"
+  },
+  {
+    "name": "issue24-audit：非 Windows 也觸發沙箱警示",
+    "file": "src/agents/codex.ts",
+    "to": "  if (event.item.exit_code === 0) return undefined;",
+    "expect": "issue24-audit F1 非 Windows",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "  if (process.platform !== 'win32' || event.item.exit_code === 0) return undefined;"
+  },
+  {
+    "name": "issue24-audit：掃描整份輸出觸發沙箱警示",
+    "file": "src/agents/codex.ts",
+    "to": "detail",
+    "expect": "issue24-audit F1 輸出後段",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "detail.slice(0, 300)"
+  },
+  {
+    "name": "issue24-audit：缺結束碼忽略沙箱初始化失敗",
+    "file": "src/agents/codex.ts",
+    "to": "  if (process.platform !== 'win32' || !(event.item.exit_code! > 0)) return undefined;",
+    "expect": "issue24-audit F1 缺 exit_code",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "  if (process.platform !== 'win32' || event.item.exit_code === 0) return undefined;"
+  },
+  {
+    "name": "issue24-audit：多目標拒絕替各目標背書",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "to": "mentioned.includes(target)",
+    "expect": "issue24-audit F2 多目標拒絕",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": "mentioned.length === 1 && mentioned[0] === target"
+  },
+  {
+    "name": "issue24-audit：指令內檔名冒充輸出證據",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "to": "refusals.push(`${item.command ?? ''} ${item.aggregated_output ?? ''}`);",
+    "expect": "issue24-audit F2 檔名僅在 command",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": "refusals.push(item.aggregated_output ?? '');"
+  },
+  {
+    "name": "issue24-audit：router 指令內檔名冒充輸出證據",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "to": "",
+    "expect": "issue24-audit F2 檔名僅在 command",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": ".replace(/^exec_command failed:[\\s\\S]*?rejected:\\s*/, '')"
+  },
+  {
+    "name": "issue24-audit：匿名拒絕替目標背書",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "to": "mentioned.length === 0 || mentioned[0] === target",
+    "expect": "issue24-audit F2 一般匿名 router 拒絕",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": "mentioned.length === 1 && mentioned[0] === target"
+  },
+  {
+    "name": "issue24-audit：重用舊探針證據版本",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "to": "if (agent === 'codex') { /* omitted evidence revision */ }",
+    "expect": "issue24-audit F2 Codex 證據版本",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": "if (agent === 'codex') parts.evidence = 'target-output-router-patch-v3';"
+  },
+  {
+    "name": "issue24-audit：遺漏結構化失敗 patch 歸屬",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "to": "patchTargets.clear();",
+    "expect": "issue24-audit F2 三筆 shell 加單目標",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": "patchTargets.add(mentioned[0]);"
+  },
+  {
+    "name": "issue24-audit：多目標 patch 替各目標背書",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "to": "if (mentioned.length > 0) {",
+    "expect": "issue24-audit F2 多目標 patch",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": "if (mentioned.length === 1) {"
+  },
+  {
+    "name": "issue24-audit：成功 patch 也當成被拒",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "to": "",
+    "expect": "issue24-audit F2 成功或未完成 patch",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": " && item.status === 'failed'"
+  },
+  {
+    "name": "issue24-audit：未完成 patch 也當成被拒",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "to": "item?.type === 'file_change'",
+    "expect": "issue24-audit F2 成功或未完成 patch",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": "parsed?.type === 'item.completed' && item?.type === 'file_change'"
+  },
+  {
+    "name": "issue24-audit：模型文字偽裝結構化 patch",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "to": "item && item.status",
+    "expect": "issue24-audit F2 patch 僅認結構化",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": "item?.type === 'file_change' && item.status"
+  },
+  {
+    "name": "issue24-audit：patch 檔名子字串冒充目標",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "to": "path.includes(target)",
+    "expect": "issue24-audit F2 patch 僅認結構化",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": "path === target || path.endsWith('/' + target)"
+  },
+  {
+    "name": "issue24-audit：忽略 patch 路徑種類驗證",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "to": "",
+    "expect": "issue24-audit F2 patch 僅認結構化",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": " && ['add', 'update', 'delete'].includes(String(change.kind))"
+  },
+  {
+    "name": "issue24-audit：模型提示暴露 elevated 設定",
+    "file": "src/agents/codex.ts",
+    "to": "export const CODEX_WINDOWS_READ_ONLY_HINT = `【ai-cli 唯讀模式（Windows）】這次使用 OS 唯讀沙箱（windows.sandbox='elevated'），並以 --ignore-rules 忽略使用者規則。讀檔可正常使用 Get-Content -Raw、rg、Get-ChildItem 等指令；寫入會被 OS 拒絕。若指令被拒或沙箱無法啟動，請回報原始錯誤並停止該嘗試，不要換寫法無限重試，也不要要求提權；未讀到的內容不可宣稱已完成。`;",
+    "expect": "issue24-audit F4 模型提示",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "export const CODEX_WINDOWS_READ_ONLY_HINT = `【ai-cli 唯讀模式（Windows）】這次使用 OS 唯讀沙箱，並以 --ignore-rules 忽略使用者規則。讀檔可正常使用 Get-Content -Raw、rg、Get-ChildItem 等指令；寫入會被 OS 拒絕。若指令被拒或沙箱無法啟動，請回報原始錯誤並停止該嘗試，不要換寫法無限重試，也不要要求提權；未讀到的內容不可宣稱已完成。`;"
+  },
+  {
+    "name": "issue24-audit：測試遺留自己的暫存結果",
+    "file": "tests/verify-mcp-capabilities.mjs",
+    "to": "} finally { /* omitted fixture cleanup */ }",
+    "expect": "issue24-audit F5 合成結果目錄",
+    "script": "verify-mcp-capabilities.mjs",
+    "from": "} finally { rmSync(fixtureRoot, { recursive: true, force: true }); }"
+  },
+  {
+    "name": "issue24-audit：kernel 丟掉沙箱警示",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "to": "const warning = undefined as { message?: unknown; detail?: unknown } | undefined;",
+    "expect": "issue24-audit F6 kernel 保留沙箱警示",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": "const warning = output?.sandbox_warning;"
+  },
+  {
+    "name": "issue24-audit：kernel 丟掉沙箱原始錯誤",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "to": "typeof warning.detail === 'string' ? '' : ''",
+    "expect": "issue24-audit F6 kernel 保留沙箱警示",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": "typeof warning.detail === 'string' ? warning.detail : ''"
+  },
+  {
+    "name": "issue24-audit：不認繁中存取被拒",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "to": "const TOOL_REFUSAL = /blocked by policy|writing is blocked|rejected by user approval|permission denied|access is denied|read-only file system|operation not permitted|拒絕存取路徑|Access to the path[^\\r\\n]*is denied|UnauthorizedAccessException|PermissionDenied/i;",
+    "expect": "issue24-audit F8 辨識具名存取被拒",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "from": "const TOOL_REFUSAL = /blocked by policy|writing is blocked|rejected by user approval|permission denied|access is denied|read-only file system|operation not permitted|拒絕存取路徑|Access to the path[^\\r\\n]*is denied|UnauthorizedAccessException|PermissionDenied|存取被拒/i;"
+  },
+  {
+    "name": "issue24-audit：檔案已建立仍讓探針通過",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  if (created.length > 0) return { status: 'FAIL', evidence: null, detail: `限制沒有生效，檔案被建立了：${created.join('、')}` };",
+    "to": "  if (false) return { status: 'FAIL', evidence: null, detail: `限制沒有生效，檔案被建立了：${created.join('、')}` };",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24-audit F2 四筆具名 shell"
+  },
+  {
+    "name": "issue24-router：漏收 CLI stderr patch 拒絕",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "patchTargets.add('probe-write.txt');",
+    "to": "patchTargets.clear();",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24-router 真機三筆 shell"
+  },
+  {
+    "name": "issue24-router：patch 拒絕替所有目標背書",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "patchTargets.add('probe-write.txt');",
+    "to": "targets.forEach(target => patchTargets.add(target));",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24-router patch 拒絕僅歸屬"
+  },
+  {
+    "name": "issue24-router：patch 拒絕又落入 shell 具名歸屬",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "// 不進具名 shell 歸屬：即使這行提及其他目標，也不能替它們作證。\n      continue;",
+    "to": "// mutation: let patch log enter shell attribution",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24-router patch 拒絕僅歸屬"
+  },
+  {
+    "name": "issue24-router：stdout 指令輸出冒充 patch 拒絕",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": " && !ROUTER_PATCH_REFUSAL.test(item.aggregated_output ?? '')",
+    "to": "",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24-router stdout 模型與指令輸出"
+  },
+  {
+    "name": "issue24-router：混用 stdout 與 stderr 來源",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "for (const line of stderr.split('\\n'))",
+    "to": "for (const line of `${stderr}\\n${stdout}`.split('\\n'))",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24-router stdout 模型與指令輸出"
+  },
+  {
+    "name": "issue24-router：patch 拒絕不核對 router 前綴",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "const ROUTER_PATCH_REFUSAL = /(?:^|\\s)codex_core::tools::router: error=patch rejected:/;",
+    "to": "const ROUTER_PATCH_REFUSAL = /patch rejected:/;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24-router 缺 router 前綴"
+  },
+  {
+    "name": "issue24-router：patch 拒絕不核對 readonly 原因",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "line.includes('patch rejected: writing is blocked by read-only sandbox') && ",
+    "to": "",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24-router 缺 router 前綴"
+  },
+  {
+    "name": "issue24-router：router 證據忽略檔案已建立",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  if (created.length > 0) return { status: 'FAIL', evidence: null, detail: `限制沒有生效，檔案被建立了：${created.join('、')}` };",
+    "to": "  if (false) return { status: 'FAIL', evidence: null, detail: `限制沒有生效，檔案被建立了：${created.join('、')}` };",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24-router 仍要求檔案不存在"
+  },
+  {
+    "name": "issue24-router：router 證據忽略程序失敗",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "probe.status !== 'completed' || probe.exitCode !== 0",
+    "to": "probe.exitCode !== 0",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24-router 仍要求檔案不存在"
+  },
+  {
+    "name": "issue24-router：router 證據忽略非零結束碼",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "probe.status !== 'completed' || probe.exitCode !== 0",
+    "to": "probe.status !== 'completed'",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24-router 仍要求檔案不存在"
+  },
+  {
+    "name": "issue24-router：仍沿用舊探針證據版本",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "parts.evidence = 'target-output-router-patch-v3'",
+    "to": "parts.evidence = 'target-output-v2'",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "issue24-router 證據版本更新"
   }
 ]

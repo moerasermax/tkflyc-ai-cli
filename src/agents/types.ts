@@ -21,6 +21,8 @@ export type SpawnMode =
 
 /** 由 agent.buildCommand() 產出，交給 process-service 執行。 */
 export interface BuiltCommand {
+  /** 是否由受限 builder 啟動，持久化後供 parser 區分一般模式。 */
+  strict?: boolean;
   cliPath: string;
   args: string[];
   cwd: string;
@@ -90,6 +92,7 @@ export interface DirectRunIO {
 
 /** parser 可選上下文；主要供需要工作目錄/狀態的 agent 使用。 */
 export interface ParseOutputContext {
+  strict?: boolean;
   workFolder?: string;
   status?: string;
 }

@@ -1,8 +1,8 @@
 /**
  * 版本探針：真的叫模型寫檔，再看檔案在不在。
  *
- * 旗標名稱不等於行為：Claude 的 --allowedTools 實測擋不住寫檔，Windows 上 Codex 的唯讀靠的是
- * 指令清單而不是 OS 沙箱，而且 CLI 自動更新可能悄悄改掉語義。所以結果依「這支 CLI、這份參數」
+ * 旗標名稱不等於行為：Claude 單靠 --allowedTools 曾擋不住寫檔；Windows Codex 現採 elevated OS 唯讀沙箱
+ * 並忽略使用者規則。CLI 更新仍可能改變語義，所以結果依「這支 CLI、這份參數、證據版本」
  * 快取，任何一項變了就失效。通過只代表「工具受限」，不代表隔離。
  */
 import { spawnSync } from 'node:child_process';
@@ -10,6 +10,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { codexSandboxWarning } from '../agents/codex.js';
 import { CLAUDE_READ_ONLY_TOOLS } from '../agents/claude.js';
 import { resolveAllCliPaths } from '../core/doctor.js';
 import { buildCliCommand, type BuildCliCommandOptions } from '../core/command-builder.js';
@@ -30,12 +31,18 @@ const PROBE_SCHEMA = 1;
 
 /**
  * 工具層拒絕的痕跡。字樣要夠明確：只看到 read-only 這個詞不算，模型跑一個含這個詞的讀取指令就會命中。
- * 實測（codex-cli 0.166.0，Windows）拒絕只出現在 stderr，而且 patch 那種不含檔名：
+ * OS 層寫入拒絕也算：stdout 僅收 command_execution 的非零 exit 與工具輸出，stderr 仍須 router 來源。
+ * 初始化失敗不算寫入被擋。
+ * 舊版（codex-cli 0.166.0，Windows）曾只觀察到 stderr 拒絕；0.167.0 elevated 已觀察到 stdout 的 OS 拒絕。
+ * 舊 patch 的匿名拒絕現在不替任何目標作證，例如：
  *   error=patch rejected: writing is blocked by read-only sandbox
  *   error=exec_command failed: ... 'x' > probe-shell.txt ... rejected: blocked by policy
  */
-const TOOL_REFUSAL = /blocked by policy|writing is blocked|rejected by user approval|permission denied|access is denied|read-only file system|operation not permitted/i;
+const TOOL_REFUSAL = /blocked by policy|writing is blocked|rejected by user approval|permission denied|access is denied|read-only file system|operation not permitted|拒絕存取路徑|Access to the path[^\r\n]*is denied|UnauthorizedAccessException|PermissionDenied|存取被拒/i;
 const ROUTER_ERROR = /codex_core::tools::router: error=/;
+// 主 session 的 codex 0.167.0 真機 stderr：patch 被 readonly policy 拒絕時沒有 file_change。
+// 固定來源與動作前綴；不綁 timestamp，並另核對 readonly 原因。僅限探針唯一的 apply_patch 目標。
+const ROUTER_PATCH_REFUSAL = /(?:^|\s)codex_core::tools::router: error=patch rejected:/;
 
 /**
  * 有實測過證據格式的家。Codex 看「工具呼叫被拒」的紀錄；Claude 看 stream-json init 事件宣告的工具清單
@@ -100,6 +107,8 @@ function strictArgsDigest(profile: { model: string; effort?: string }, capabilit
 
 export function boundaryKey(agent: string): BoundaryKey {
   const parts: Record<string, string | null> = { schema: String(PROBE_SCHEMA), agent, platform: process.platform, version: null, binary: null, args: null };
+  // F2 收緊證據歸屬，不能重用舊判定的 PASS；其他 agent 的證據格式不變。
+  if (agent === 'codex') parts.evidence = 'target-output-router-patch-v3';
   const profile = PROBE_MODELS[agent];
   const cliPath = (resolveAllCliPaths() as Record<string, string | undefined>)[agent];
   if (profile && cliPath) {
@@ -155,29 +164,57 @@ export function boundaryStatus(agent: string): BoundaryStatus {
 
 /**
  * 逐一核對每個目標都有被工具擋下的紀錄。
- * 有寫檔名的拒絕歸給該目標。沒寫檔名的（patch）分不出是試了哪一項，只能替 anonymousTargets 作證，
- * 否則模型把同一項重試四次，就能替沒試過的 shell 背書。模型只試了一項、或根本沒試，都不會通過。
+ * shell 拒絕輸出必須只指向一個目標；patch 僅依失敗 file_change 的結構化 changes 路徑歸屬。
+ * command 的檔名、一般匿名拒絕、多目標事件都不能背書；stderr router 的 readonly patch 拒絕只歸屬 probe-write.txt。
+ * 第四參數只保留呼叫相容性，不能指定其他匿名目標；檔案不存在仍由 judgeFinishedProbe 另行驗證。
  */
-export function probeEvidence(stdout: string, stderr: string, targets: string[], anonymousTargets: string[] = []): { refusals: string[]; missing: string[] } {
+export function probeEvidence(stdout: string, stderr: string, targets: string[], _anonymousTargets: string[] = []): { refusals: string[]; missing: string[] } {
   const refusals: string[] = [];
+  const patchTargets = new Set<string>();
+  const patchRefusals: string[] = [];
   for (const line of stderr.split('\n')) {
-    if (ROUTER_ERROR.test(line) && TOOL_REFUSAL.test(line)) refusals.push(line);
+    if (ROUTER_PATCH_REFUSAL.test(line)) {
+      if (line.includes('patch rejected: writing is blocked by read-only sandbox') && targets.includes('probe-write.txt')) {
+        patchTargets.add('probe-write.txt');
+        patchRefusals.push(line);
+      }
+      // 不進具名 shell 歸屬：即使這行提及其他目標，也不能替它們作證。
+      continue;
+    }
+    // 舊 router 可能把待執行 command 包在 rejected 前；只留拒絕輸出，不拿 command 的檔名作證。
+    const output = line.replace(/^.*?codex_core::tools::router: error=/, '').replace(/^exec_command failed:[\s\S]*?rejected:\s*/, '');
+    if (ROUTER_ERROR.test(line) && TOOL_REFUSAL.test(output)
+      && !codexSandboxWarning({ type: 'item.completed', item: { type: 'command_execution', aggregated_output: output } }, true)) refusals.push(output);
   }
   for (const line of stdout.split('\n')) {
     if (!line.trim()) continue;
-    let parsed: { type?: string; item?: { type?: string; status?: string; exit_code?: number; command?: string; aggregated_output?: string } };
+    let parsed: { type?: string; item?: { type?: string; status?: string; exit_code?: number; command?: string; aggregated_output?: string; changes?: { path?: unknown; kind?: unknown }[] } };
     try { parsed = JSON.parse(line); } catch { continue; }
-    const item = parsed.item;
+    const item = parsed?.item;
+    // codex-rs/exec/src/exec_events.rs 與 event_processor_with_jsonl_output.rs：
+    // item.completed/file_change 的 changes[].path、kind；Failed/Declined 均序列化為 status=failed。
+    // 不解析模型文字或猜測 patch_apply 別名，也不把 command 的路徑拿來補證據。
+    if (parsed?.type === 'item.completed' && item?.type === 'file_change' && item.status === 'failed'
+      && Array.isArray(item.changes) && item.changes.length > 0
+      && item.changes.every(change => change && typeof change.path === 'string' && ['add', 'update', 'delete'].includes(String(change.kind)))) {
+      const paths = item.changes.map(change => String(change.path).replace(/\\/g, '/'));
+      const mentioned = targets.filter(target => paths.some(path => path === target || path.endsWith('/' + target)));
+      if (mentioned.length === 1) {
+        patchTargets.add(mentioned[0]);
+        patchRefusals.push(`file_change failed: ${paths.join(', ')}`);
+      }
+    }
     // 有 OS 沙箱的平台：指令有跑，但失敗而且輸出明確寫被拒。結束碼 0 的讀取指令不算。
-    if (parsed.type === 'item.completed' && item?.type === 'command_execution' && item.exit_code !== 0 && TOOL_REFUSAL.test(item.aggregated_output ?? '')) {
-      refusals.push(`${item.command ?? ''} ${item.aggregated_output ?? ''}`);
+    if (parsed?.type === 'item.completed' && item?.type === 'command_execution' && Number.isInteger(item.exit_code) && !codexSandboxWarning(parsed, true) && item.exit_code !== 0 && !ROUTER_PATCH_REFUSAL.test(item.aggregated_output ?? '') && TOOL_REFUSAL.test(item.aggregated_output ?? '')) {
+      refusals.push(item.aggregated_output ?? '');
     }
   }
-  const named = (target: string) => refusals.some(line => line.includes(target));
-  const unnamed = targets.filter(target => !named(target));
-  const anonymous = refusals.filter(line => !targets.some(target => line.includes(target)));
-  const missing = unnamed.filter(target => !(anonymousTargets.includes(target) && anonymous.length > 0));
-  return { refusals, missing };
+  const named = (target: string) => patchTargets.has(target) || refusals.some(output => {
+    const mentioned = targets.filter(name => output.includes(name));
+    return mentioned.length === 1 && mentioned[0] === target;
+  });
+  const missing = targets.filter(target => !named(target));
+  return { refusals: [...refusals, ...patchRefusals], missing };
 }
 
 /**

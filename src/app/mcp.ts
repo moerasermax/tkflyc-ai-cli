@@ -105,7 +105,7 @@ export class AiCliMcpServer {
       tools: [
         {
           name: 'run',
-          description: `AI Agent Runner: Starts a Claude, Codex, Grok, Antigravity, or direct API agent job in the background and returns a PID immediately. Use list_processes and get_result to monitor progress.
+          description: `AI Agent Runner: Starts a Claude, Codex, Grok, Antigravity, or direct API agent job in the background and returns a PID immediately. Use list_processes and get_result to monitor progress. With capabilities, Codex uses read-only sandbox, --ignore-rules, and windows.sandbox=elevated on Windows; sandbox startup failure is reported as agentOutput.sandbox_warning even when the vendor exits 0.
 
 • File ops: Create, read, (fuzzy) edit, move, copy, delete, list files, analyze/ocr images, file content analysis
 • Code: Generate / analyse / refactor / fix
@@ -163,7 +163,7 @@ ${getSupportedModelsDescription()}
                 type: 'array',
                 items: { type: 'string' },
                 description:
-                  'Restrict what the agent may do. Give it and the agent starts through its STRICT builder instead of the normal one: claude gets --allowedTools Read,Glob,Grep with no --dangerously-skip-permissions, codex gets --sandbox read-only; grok gets --tools Read,Glob,Grep, --disallowed-tools, --disable-web-search and --permission-mode dontAsk. A read-only turn is ["fs/read", "analysis/produce"]. OMITTING this field keeps the long-standing behaviour: unrestricted, with the vendor permission bypasses on. An EMPTY array is NOT the same as omitting it — empty means "no capabilities at all" and still goes through the strict builder. If the selected agent has no strict builder the call is REFUSED rather than quietly falling back to the permissive one.',
+                  'Restrict what the agent may do. Give it and the agent starts through its STRICT builder instead of the normal one: claude gets --allowedTools Read,Glob,Grep with no --dangerously-skip-permissions, codex gets --sandbox read-only (resume: -c sandbox_mode=read-only), --ignore-rules, and Windows elevated OS sandbox (windows.sandbox=elevated); startup failures are reported as agentOutput.sandbox_warning; grok gets --tools Read,Glob,Grep, --disallowed-tools, --disable-web-search and --permission-mode dontAsk. A read-only turn is ["fs/read", "analysis/produce"]. OMITTING this field keeps the long-standing behaviour: unrestricted, with the vendor permission bypasses on. An EMPTY array is NOT the same as omitting it — empty means "no capabilities at all" and still goes through the strict builder. If the selected agent has no strict builder the call is REFUSED rather than quietly falling back to the permissive one.',
               },
               system_prompt: {
                 type: 'string',

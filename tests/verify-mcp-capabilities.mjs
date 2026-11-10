@@ -23,7 +23,11 @@
 import '../tools/stubs/catalog-test-env.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const results = [];
@@ -150,13 +154,13 @@ for (const capabilities of [['analysis/produce'], []]) {
     built.args.join(' ')
   );
   check(!built.args.includes('--ephemeral'), '★ codex strict 新開保留 session（無 --ephemeral）');
-  // Windows 的 read-only 沒有沙箱、只認安全指令清單；提示只進 stdin，原 prompt 不變。
+  // Windows 使用 OS 唯讀沙箱；提示只進 stdin，原 prompt 不變。
   check(
     built.prompt === 'hi'
       && (process.platform === 'win32'
         ? built.stdinPrompt.startsWith('【ai-cli 唯讀模式（Windows）】') && built.stdinPrompt.endsWith('\n\nhi')
         : built.stdinPrompt === 'hi'),
-    '★ codex strict 在 Windows 的 stdin 前綴讀檔提示（不用管線／cmd /c），其他平台原樣',
+    '★ codex strict 在 Windows 的 stdin 前綴讀檔提示（OS 沙箱），其他平台原樣',
     JSON.stringify({ platform: process.platform, prompt: built.prompt, stdin: built.stdinPrompt?.slice(0, 40) })
   );
 }
@@ -191,6 +195,118 @@ for (const capabilities of [['analysis/produce'], []]) {
   catch (error) { refused = /拒絕啟動/.test(error.message); }
   check(refused, '★ codex strict 續接不支援能力仍 fail-closed');
 }
+
+// issue24：只組 argv／解析合成事件，不啟動 CLI 或模型。
+const { codexAgent, codexSandboxWarning, CODEX_WINDOWS_READ_ONLY_HINT } = await import(pathToFileURL(join(ROOT, 'dist/agents/codex.js')).href);
+const commandEvent = (output, extra = {}) => ({ type: 'item.completed', item: { type: 'command_execution', command: 'Get-Content target.txt', aggregated_output: output, exit_code: 1, ...extra } });
+const sandboxErrors = ['CreateProcessAsUserW failed: 5', 'helper_unknown_error', 'setup refresh had errors', 'windows sandbox failed'];
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+try {
+  for (const platform of ['win32', 'linux', 'darwin']) {
+    Object.defineProperty(process, 'platform', { value: platform });
+    for (const sessionId of [undefined, 'strict-session']) {
+      const built = codexAgent.buildStrictCommand({ cliPath: 'codex', cwd: ROOT, prompt: 'hi', resolvedModel: 'codex', rawModel: 'codex', reasoningEffort: 'low', sessionId }, ['fs/read']);
+      const label = sessionId ? '續接' : '新開';
+      const idx = built.args.indexOf("windows.sandbox='elevated'");
+      check(built.args.includes('--ignore-rules') && built.args.includes('--ignore-user-config') && built.strict === true,
+        `issue24 strict ${label} 忽略規則並標記 strict（${platform}）`);
+      check(platform === 'win32' ? idx > 0 && built.args[idx - 1] === '-c' : !built.args.some(a => a.includes('windows.sandbox')),
+        `issue24 strict ${label} 僅 Windows 使用 elevated（${platform}）`);
+      check(platform === 'win32' ? built.stdinPrompt === CODEX_WINDOWS_READ_ONLY_HINT + '\n\nhi' : built.stdinPrompt === 'hi',
+        `issue24 strict ${label} 提示僅進 Windows stdin（${platform}）`);
+    }
+  }
+} finally { Object.defineProperty(process, 'platform', platformDescriptor); }
+check(['OS 唯讀沙箱', '--ignore-rules', '讀檔可正常使用', '回報原始錯誤', '不要換寫法無限重試', '不要要求提權'].every(x => CODEX_WINDOWS_READ_ONLY_HINT.includes(x))
+  && !/沒有沙箱|安全清單|不要用管線|cmd \/c/.test(CODEX_WINDOWS_READ_ONLY_HINT), 'issue24 提示說明 OS 沙箱與錯誤處置');
+const withPlatform = (platform, fn) => {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  try { Object.defineProperty(process, 'platform', { value: platform }); return fn(); }
+  finally { Object.defineProperty(process, 'platform', descriptor); }
+};
+withPlatform('win32', () => {
+check(sandboxErrors.every(error => ['output', 'itemError', 'eventError'].every(location => {
+  const event = commandEvent(location === 'output' ? error : '', location === 'itemError' ? { error: { message: error } } : {});
+  if (location === 'eventError') { event.type = 'item.failed'; event.error = { message: error }; }
+  const warning = codexSandboxWarning(event, true);
+  const parsed = codexAgent.parseOutput(JSON.stringify(event), '', 0, { strict: true });
+  return warning?.code === 'windows_sandbox_unavailable' && warning.detail.includes(error) && parsed?.sandbox_warning?.code === warning.code;
+})), 'issue24 strict 解析四種沙箱初始化錯誤（含工具 error、vendor exit 0）');
+check([false, undefined].every(strict => sandboxErrors.every(error => !codexSandboxWarning(commandEvent(error), strict)
+  && !codexAgent.parseOutput(JSON.stringify(commandEvent(error)), '', 0, { strict })?.sandbox_warning)), 'issue24 一般與舊 job 不加沙箱警示');
+check([
+  { type: 'item.completed', item: { type: 'agent_message', text: sandboxErrors.join(' '), aggregated_output: sandboxErrors.join(' ') } },
+  { type: 'item.completed', item: { type: 'reasoning', text: sandboxErrors.join(' ') } },
+  commandEvent('ok', { command: sandboxErrors.join(' '), exit_code: 0 }),
+  { ...commandEvent(sandboxErrors[0]), type: 'item.started' },
+  commandEvent('PermissionDenied: Access to the path canary.txt is denied'),
+].every(event => !codexSandboxWarning(event, true)), 'issue24 模型文字、command、未完成事件與正常寫入拒絕不冒充啟動失敗');
+check(!codexAgent.parseOutput('invalid json\nnull', '', 0, { strict: true })?.sandbox_warning,
+  'issue24 損毀輸出不捏造沙箱警示');
+check(sandboxErrors.every(error => !codexSandboxWarning(commandEvent(error, { exit_code: 0 }), true)
+  && !codexAgent.parseOutput(JSON.stringify(commandEvent(error, { exit_code: 0 })), '', 0, { strict: true })?.sandbox_warning),
+  'issue24-audit F1 成功讀檔或 echo 含錯誤字樣不警示');
+check(sandboxErrors.every(error => !codexSandboxWarning(commandEvent('x'.repeat(300) + error), true)),
+  'issue24-audit F1 輸出後段錯誤字樣不警示');
+check(sandboxErrors.every(error => codexSandboxWarning(commandEvent(error, { exit_code: undefined }), true)?.code === 'windows_sandbox_unavailable'),
+  'issue24-audit F1 缺 exit_code 的初始化錯誤仍警示');
+});
+check(['linux', 'darwin'].every(platform => withPlatform(platform, () => sandboxErrors.every(error =>
+  !codexSandboxWarning(commandEvent(error), true)
+  && !codexAgent.parseOutput(JSON.stringify(commandEvent(error)), '', 0, { strict: true })?.sandbox_warning))),
+  'issue24-audit F1 非 Windows 不警示');
+check(!/elevated|windows\.sandbox/.test(CODEX_WINDOWS_READ_ONLY_HINT), 'issue24-audit F4 模型提示不提 elevated 設定');
+// 用持久化合成 job 驗證重啟後增量解析、截尾及 compact/verbose，不啟動 runner。
+const { JobStore, jobResult } = await import(pathToFileURL(join(ROOT, 'dist/core/job-store.js')).href);
+const fixtureRoot = mkdtempSync(join(tmpdir(), 'issue24-results-'));
+try {
+// 攔截 spawn 前的 launch spec，驗證真實啟動資料；不啟動 runner 或模型。
+const metadataStore = new JobStore(fixtureRoot, 'cli', true, async () => new Map());
+await metadataStore.ready;
+const originalSpawn = childProcess.spawn;
+const launchMetas = [];
+let intercepted = 0;
+try {
+  childProcess.spawn = (_command, args) => {
+    if (!/job-(?:launcher|runner)\.js$/.test(args[0])) throw new Error('unexpected fixture launch');
+    launchMetas.push(JSON.parse(readFileSync(join(args[1], 'launch.tmp'), 'utf8')).meta);
+    throw new Error('issue24 fixture stopped before spawn');
+  };
+  syncBuiltinESMExports();
+  for (const strict of [true, false]) {
+    const cmd = plan({ model: 'codex', ...(strict ? { capabilities: ['fs/read'] } : {}) });
+    try { await metadataStore.start(cmd); }
+    catch (error) { if (error.message.includes('issue24 fixture stopped before spawn')) intercepted++; }
+  }
+} finally { childProcess.spawn = originalSpawn; syncBuiltinESMExports(); }
+check(intercepted === 2 && launchMetas[0]?.strict === true && launchMetas[1] && !Object.hasOwn(launchMetas[1], 'strict'),
+  'issue24 啟動 metadata 保存 strict 身分');
+for (const strict of [true, false, undefined]) {
+  const jobId = randomUUID(), directory = join(fixtureRoot, 'jobs', jobId), pid = 98760 + (strict === true ? 1 : strict === false ? 2 : 3);
+  mkdirSync(directory, { recursive: true });
+  const now = new Date().toISOString();
+  const meta = { version: 1, jobId, pid, agent: 'codex', resolvedModel: 'codex', task: 'fixture', workFolder: fixtureRoot,
+    startTime: now, source: 'cli', principal: null, server: null, recoverable: true, runner: { pid, started: now }, worker: null, ...(strict === undefined ? {} : { strict }) };
+  writeFileSync(join(directory, 'meta.json'), JSON.stringify(meta));
+  writeFileSync(join(directory, 'stdout.log'), JSON.stringify(commandEvent(sandboxErrors[0])) + '\n'
+    + JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'fixture '.repeat(1400) } }) + '\n');
+  writeFileSync(join(directory, 'exit.json'), JSON.stringify({ exitCode: 0, signal: null, endTime: now, timedOut: false, killed: false }));
+  const store = new JobStore(fixtureRoot, 'cli', true, async () => new Map());
+  await store.ready;
+  const job = store.get(pid, jobId);
+  const compact = jobResult(job), verbose = jobResult(job, true);
+  check([compact, verbose].every(result => strict === true && process.platform === 'win32'
+    ? result.status === 'failed' && result.exitCode === 0 && result.agentOutput?.sandbox_warning?.detail.includes(sandboxErrors[0]) && result.agentOutput?.message.startsWith('fixture')
+    : result.status === 'completed' && !result.agentOutput?.sandbox_warning),
+    `issue24 持久化 job 警示跨截尾並反映狀態（${strict === true ? 'strict' : strict === false ? 'normal' : 'legacy'}）`);
+}
+} finally { rmSync(fixtureRoot, { recursive: true, force: true }); }
+check(!existsSync(fixtureRoot), 'issue24-audit F5 合成結果目錄於 finally 清除');
+check(['src/app/mcp.ts', 'src/app/cli.ts'].every(file => {
+  const text = readFileSync(join(ROOT, file), 'utf8');
+  const descriptions = file.endsWith('mcp.ts') ? text.split('\n').filter(line => line.includes('codex gets') || line.includes('description: `AI Agent Runner:')) : [text];
+  return descriptions.length === (file.endsWith('mcp.ts') ? 2 : 1) && descriptions.every(description => description.includes('--ignore-rules') && /windows.sandbox.*elevated/i.test(description) && description.includes('sandbox_warning'));
+}), 'issue24 MCP 與 CLI 說明包含規則隔離、elevated 與警示');
 
 // 4. 空陣列 ≠ 沒給。折成同一件事，等於讓要求限制的呼叫端拿到全開權限而不自知。
 {

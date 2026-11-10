@@ -26,6 +26,8 @@ export const VERBOSE_MAX_BYTES = 8 * 1024 * 1024;
 export const STARTUP_GRACE_MS = 30_000;
 export const GC_INTERVAL_MS = 60_000;
 export interface JobMeta {
+  /** 舊 metadata 沒有此欄位，不推測其權限。 */
+  strict?: boolean;
   version: 1; jobId: string; pid: number; agent: AgentId; model?: string; resolvedModel: string;
   effort?: string; task: string; workFolder: string; sessionId?: string; startTime: string;
   source: 'mcp' | 'cli'; principal: ProcessIdentity | null; server: ProcessIdentity | null; projectDir?: string;
@@ -265,8 +267,9 @@ function event(job: StoredJob, text: string, ref: Reference): void {
   const events = job.cursors[ref.stream].extractor.push(text.endsWith('\n') ? text : text + '\n');
   // V8 sliced/cons strings 可能讓 80 字摘要仍引用整筆 1 MB JSON，必須實體複製。
   job.eventCount += events.length; if (events.length) job.lastEvent = Buffer.from(events.at(-1)!).toString('utf8');
-  const parsed: any = agent.parseOutput(job.toolType === 'claude' ? '{}\n' + text : text, '', job.exitCode, { workFolder: job.workFolder, status: job.status });
+  const parsed: any = agent.parseOutput(job.toolType === 'claude' ? '{}\n' + text : text, '', job.exitCode, { workFolder: job.workFolder, status: job.status, strict: job.meta.strict });
   let raw: any; try { raw = JSON.parse(text); } catch { return; }
+  if (parsed?.sandbox_warning) { job.parsed.sandbox_warning = parsed.sandbox_warning; job.outputFailed = true; }
   if (parsed?.session_id) job.parsed.session_id = Buffer.from(String(parsed.session_id)).toString('utf8');
   if (parsed?.message || (job.toolType === 'claude' && raw.type === 'result' && raw.result)) job.messageRef = ref;
   if (job.toolType === 'claude' && raw.type === 'result') { job.terminalRef = ref; job.outputFailed = raw.is_error === true; }
@@ -340,7 +343,7 @@ export function jobResult(job: StoredJob, verbose = false): Record<string, unkno
       finally { closeSync(fd); }
     };
     stdout = readBounded('stdout'); stderr = readBounded('stderr');
-    parsed = { ...(getAgent(job.toolType).parseOutput(stdout, stderr, job.exitCode, { workFolder: job.workFolder, status: job.status }) as object ?? {}), ...parsed };
+    parsed = { ...(getAgent(job.toolType).parseOutput(stdout, stderr, job.exitCode, { workFolder: job.workFolder, status: job.status, strict: job.meta.strict }) as object ?? {}), ...parsed };
   }
   const result = buildProcessResult({ ...job, agent: job.toolType, stdout, stderr,
     liveness: job.status === 'running' ? buildLiveness(job, job.startTime, true) : undefined }, parsed, verbose);
@@ -626,7 +629,7 @@ export class JobStore {
       cmd.releaseTemporaryPrompt?.();
     }
     if (typeof cmd.stdinPrompt === 'string') writeFileSync(join(directory, 'stdin.tmp'), cmd.stdinPrompt, { mode: 0o600 });
-    const metaBase: RunnerSpec['meta'] = { version: 1, jobId, agent: cmd.agent, model, resolvedModel: cmd.resolvedModel, effort: cmd.reasoningEffort,
+    const metaBase: RunnerSpec['meta'] = { ...(cmd.strict ? { strict: true } : {}), version: 1, jobId, agent: cmd.agent, model, resolvedModel: cmd.resolvedModel, effort: cmd.reasoningEffort,
       task: taskSummary(cmd.prompt), workFolder: cmd.cwd, sessionId: cmd.sessionId, startTime: new Date().toISOString(), source: this.source,
       // cwd 取不到時不寫，該 job 依舊 meta 規則以 workFolder 判定範圍。
       ...(this.source === 'mcp' && this.projectDir !== null ? { projectDir: this.projectDir } : {}),

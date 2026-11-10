@@ -6,7 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import type { AgentDefinition, BuildCommandInput, BuiltCommand } from './types.js';
+import type { AgentDefinition, BuildCommandInput, BuiltCommand, ParseOutputContext } from './types.js';
 import { debugLog } from '../core/debug.js';
 
 /**
@@ -100,17 +100,24 @@ const CODEX_REASONING = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra
 const CODEX_SAFE_CAPABILITIES = new Set(['fs/read', 'analysis/produce']);
 
 /**
- * strict 模式在 Windows 上沒有沙箱：`--ignore-user-config` 連 `[windows] sandbox` 也不載，
- * codex 改用安全指令清單把關，管線（`| Select-Object`）、`cmd /c` 會在執行前被拒（`blocked by policy`）；
- * 單一的 `Get-Content -Raw`、`rg`、`Get-ChildItem` 則照常通過。模型挑到被拒的寫法就讀不到檔，
- * 還會 exit 0 交一份「無法完成」的回覆——2026-10-10 一次唯讀審查就是這樣落空的。
- * 2026-10-12 對照（codex-cli 0.162.1、gpt-6.1-sol low，讀第 50–60 行）：沒提示的那次用
- * `Get-Content | Select-Object` 被拒後放棄；提示後改用 `rg` 一次成功。
- * 改帶 `-c windows.sandbox=...` 不可行：同機 unelevated 每個指令 exit -1、elevated 回
- * `helper_unknown_error: setup refresh had errors`，比安全清單還糟。
- * 只補在 stdin，不改 `prompt`：任務摘要與 F3 斷言看的是原 prompt。
+ * strict 一律忽略使用者規則，避免 allow 規則繞過 OS 沙箱；Windows 明確選 elevated。
+ * headless approval=never 且沒有 Windows backend 時，未命中 allow 的讀取也會被 policy 拒絕（issue #24）。
+ * elevated 的讀取成功／寫入被 OS 拒絕已由主 session 實測；其他機器仍可能初始化失敗，解析器另行警示。
+ * 舊管線／cmd /c 禁令依賴安全清單，不能套到 OS 沙箱，故不再宣稱這些寫法必被拒。
+ * 只補在 stdin，不改原 prompt，維持任務摘要。
  */
-export const CODEX_WINDOWS_READ_ONLY_HINT = `【ai-cli 唯讀模式（Windows）】這次以 codex --sandbox read-only 執行，Windows 上沒有沙箱，指令改由安全清單把關：讀檔請用單一指令，例如 Get-Content -Raw <路徑>、rg -n <模式> <路徑>、Get-ChildItem -Recurse -Name；不要用管線（|）、Select-Object、cmd /c，這些會在執行前被拒絕（blocked by policy）。只需要部分內容時，讀整個檔案或用 rg 篩選。`;
+export const CODEX_WINDOWS_READ_ONLY_HINT = `【ai-cli 唯讀模式（Windows）】這次使用 OS 唯讀沙箱，並以 --ignore-rules 忽略使用者規則。讀檔可正常使用 Get-Content -Raw、rg、Get-ChildItem 等指令；寫入會被 OS 拒絕。若指令被拒或沙箱無法啟動，請回報原始錯誤並停止該嘗試，不要換寫法無限重試，也不要要求提權；未讀到的內容不可宣稱已完成。`;
+
+export interface CodexSandboxWarning { code: 'windows_sandbox_unavailable'; message: string; detail: string }
+/** 只認 strict job 的工具事件；模型回覆、command 文字及一般模式都不是初始化失敗證據。 */
+export function codexSandboxWarning(event: any, strict = false): CodexSandboxWarning | undefined {
+  if (!strict || !['item.completed', 'item.failed'].includes(event?.type) || event?.item?.type !== 'command_execution') return undefined;
+  if (process.platform !== 'win32' || event.item.exit_code === 0) return undefined;
+  const detail = [event.item.aggregated_output, event.item.error, event.error]
+    .map(value => typeof value === 'string' ? value : value && typeof value === 'object' ? JSON.stringify(value) : '').join('\n');
+  if (!/CreateProcessAsUserW failed|helper_unknown_error|setup refresh had errors|windows sandbox failed/i.test(detail.slice(0, 300))) return undefined;
+  return { code: 'windows_sandbox_unavailable', message: 'Windows 沙箱無法啟動，至少一筆指令（包括讀檔）未執行；不可僅以 exit 0 視為已交付。請回報原始錯誤，不要重試或要求提權。', detail: detail.trim().slice(0, 1000) };
+}
 
 function buildStrictCommand(
   input: BuildCommandInput,
@@ -128,7 +135,8 @@ function buildStrictCommand(
     與 buildCommand 的差別：**沒有 --dangerously-bypass-approvals-and-sandbox**。
       --sandbox read-only   新開時模型產生的指令只能讀
       -c sandbox_mode='read-only'  續接不支援 --sandbox，改用相同的唯讀設定
-      --ignore-user-config  不載使用者的全域設定
+      --ignore-user-config / --ignore-rules  不載使用者的全域設定與規則
+      Windows 另用 -c windows.sandbox='elevated' 啟用 OS 沙箱
       2026-10-19 移除 --ephemeral：唯讀 job 也必須留存 session，供後續續接。
   */
   const args: string[] = sessionId ? ['exec', 'resume', sessionId] : ['exec'];
@@ -138,14 +146,16 @@ function buildStrictCommand(
   // 新開與續接都明確設定唯讀，不繼承舊 session 的可寫權限、不靜默放寬。
   if (sessionId) args.push('-c', "sandbox_mode='read-only'");
   else args.push('--sandbox', 'read-only');
+  if (process.platform === 'win32') args.push('-c', "windows.sandbox='elevated'");
   args.push(
     '--ignore-user-config',
+    '--ignore-rules',
     '--skip-git-repo-check',
     '--json',
     '-'
   );
   const stdinPrompt = process.platform === 'win32' ? `${CODEX_WINDOWS_READ_ONLY_HINT}\n\n${prompt}` : prompt;
-  return { cliPath, args, cwd, agent: 'codex', prompt, resolvedModel, stdinPrompt };
+  return { cliPath, args, cwd, agent: 'codex', prompt, resolvedModel, stdinPrompt, strict: true };
 }
 
 /**
@@ -227,7 +237,7 @@ function buildCommand(input: BuildCommandInput): BuiltCommand {
   return { cliPath, args, cwd, agent: 'codex', prompt, resolvedModel, stdinPrompt: prompt };
 }
 
-function parseOutput(stdout: string, stderr: string): unknown {
+function parseOutput(stdout: string, stderr: string, _exitCode?: number, context?: ParseOutputContext): unknown {
   // Codex 把 stdout 與 stderr 合併解析（1:1 dist）
   const combined = `${stdout || ''}\n${stderr || ''}`;
   if (!combined.trim()) return null;
@@ -239,10 +249,12 @@ function parseOutput(stdout: string, stderr: string): unknown {
     let incompleteUsage = false;
     let threadId: string | null = null;
     const tools: unknown[] = [];
+    let sandboxWarning: CodexSandboxWarning | undefined;
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
         const parsed = JSON.parse(line);
+        sandboxWarning ??= codexSandboxWarning(parsed, context?.strict);
         // 每個 turn 都回報自己的用量；只累加量到的值，缺事件不代表零用量。
         if (parsed.type === 'turn.completed') {
           if (parsed.usage && ['input_tokens', 'output_tokens'].every(
@@ -305,9 +317,10 @@ function parseOutput(stdout: string, stderr: string): unknown {
       }
     }
     if (usage && incompleteUsage) usage.incomplete = true;
-    if (lastMessage || tokenCount || threadId || tools.length > 0 || usage) {
+    if (lastMessage || tokenCount || threadId || tools.length > 0 || usage || sandboxWarning) {
       return {
         message: lastMessage,
+        ...(sandboxWarning ? { sandbox_warning: sandboxWarning } : {}),
         token_count: tokenCount,
         ...(usage ? { usage } : {}),
         session_id: threadId,

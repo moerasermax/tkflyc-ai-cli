@@ -613,24 +613,24 @@ check('成功的報告提到限流不算失敗', classifyJobResult({ status: 'co
   check('持有者自己退出才會清掉', !existsSync(store.runnerLockPath) && !existsSync(store.runnerPath));
 }
 {
-  // 稽核 2-2：探針不能因為出現 read-only 這個詞就通過。實際字串取自 codex-cli 0.166.0。
+  // 稽核 2-2／issue24 F2：保留舊匿名拒絕負例，成功證據改用輸出逐一具名。
   const targets = ['probe-write.txt', 'probe-shell.txt', 'probe-node.txt', 'outside-x.txt'];
   const router = 'ERROR codex_core::tools::router: error=';
   const patch = `${router}patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings`;
   const shell = target => `${router}exec_command failed: CreateProcess { message: "Rejected('x' > ${target} rejected: blocked by policy" }`;
   const pass = result => result.refusals.length > 0 && result.missing.length === 0;
   const anon = ['probe-write.txt'];
-  check('真實的四筆拒絕通過', pass(probeEvidence('', [patch, shell('probe-shell.txt'), shell('probe-node.txt'), shell('outside-x.txt')].join('\n'), targets, anon)));
+  check('四筆輸出各具名一個目標的拒絕通過', pass(probeEvidence('', targets.map(target => `${router}PermissionDenied: ${target}`).join('\n'), targets, anon)));
   check('重複的匿名拒絕不能替其他目標背書', !pass(probeEvidence('', [patch, patch, patch, patch].join('\n'), targets, anon)));
   check('沒有匿名拒絕時，編輯工具那一項也不能過', !pass(probeEvidence('', [shell('probe-shell.txt'), shell('probe-node.txt'), shell('outside-x.txt')].join('\n'), targets, anon)));
   check('只有一筆拒絕不算', !pass(probeEvidence('', shell('probe-shell.txt'), targets)));
   check('沒有任何拒絕不算', !pass(probeEvidence('', '', targets)));
   // 輸出真的含拒絕字樣、也提到每個目標，但結束碼是 0：這是讀取，不是被擋。
-  const reading = targets.map(target => JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command: `rg "permission denied" ${target}`, aggregated_output: 'permission denied', exit_code: 0 } })).join('\n');
+  const reading = targets.map(target => JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command: `rg "permission denied" ${target}`, aggregated_output: `permission denied ${target}`, exit_code: 0 } })).join('\n');
   check('讀取指令含 read-only 字樣不算', !pass(probeEvidence(reading, '', targets)));
   check('只提到 read-only 這個詞不算拒絕', !pass(probeEvidence(targets.map(target => JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command: `write ${target}`, aggregated_output: 'read-only rejected', exit_code: 1 } })).join('\n'), '', targets)));
   check('模型自己說被拒絕不算', !pass(probeEvidence(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'blocked by policy' } }), '其他訊息 blocked by policy', targets)));
-  const denied = target => JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command: `touch ${target}`, aggregated_output: 'Read-only file system', exit_code: 1 } });
+  const denied = target => JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command: `touch ${target}`, aggregated_output: `Read-only file system ${target}`, exit_code: 1 } });
   check('有 OS 沙箱的平台，每個目標都失敗才通過', pass(probeEvidence(targets.map(denied).join('\n'), '', targets)));
 }
 {
