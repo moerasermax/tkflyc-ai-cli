@@ -20,8 +20,11 @@ const { realWorkspace } = await load('workspace');
 const { checkCitations } = await load('verdict');
 const { buildContract } = await load('templates');
 const { buildWorkerPrompt } = await load('plan');
-const { hasProbeEvidenceFormat, probeResultLabel, judgeFinishedProbe, claudeInitEvent, NO_EVIDENCE_FORMAT_HINT, boundaryKey, boundaryStatus, loadProbeRecord, readProbeRecord, runBoundaryProbe, judgeUnfinishedProbe } = await load('probe');
-const { RunStore, newRunId, kernelRunDir, kernelStateDir, releaseActiveLock } = await load('journal');
+const { hasProbeEvidenceFormat, probeResultLabel, judgeFinishedProbe, claudeInitEvent, claudeToolEvidence, NO_EVIDENCE_FORMAT_HINT, boundaryKey, boundaryStatus, loadProbeRecord, readProbeRecord, runBoundaryProbe, judgeUnfinishedProbe, combineClaudeProbe, PROBE_MODELS, PROBE_CAPABILITIES, DECIDE_CAPABILITIES } = await load('probe');
+const { RunStore, newRunId, kernelRunDir, kernelStateDir, releaseActiveLock, digestText } = await load('journal');
+const loadCore = name => import(pathToFileURL(join(ROOT, source ? 'src' : 'dist', 'core', `${name}.${source ? 'ts' : 'js'}`)).href);
+const { buildCliCommand } = await loadCore('command-builder');
+const { resolveAllCliPaths } = await loadCore('doctor');
 const { runKernelLoop } = await load('loop');
 const { aiCliKernelStatus, aiCliKernelApprove } = await load('api');
 const { aiCliKernelHandleTool } = await load('mcp-tools');
@@ -667,6 +670,118 @@ try {
       assert.equal(unknown.status, 'UNKNOWN');
       assert.equal(boundaryStatus('codex'), 'UNKNOWN', '沒結論的重跑也要蓋掉損毀紀錄');
     } finally { k3SetProbe(null); }
+  });
+
+  // M3：kernel 的 decide 只給 analysis/produce；Claude 對應零工具的 --tools=，和探針驗的唯讀組不同，要另外驗。
+  // 假 executor 依 action.kind 寫入合成的 stream-json 到 job 紀錄目錄（AI_CLI_STATE_DIR 是暫存目錄），不啟動任何 CLI。
+  let m3Seq = 0;
+  const m3Executor = ({ worker, decide, decidePoll }) => {
+    const ex = {
+      started: [],
+      async start(action) {
+        ex.started.push(action);
+        const jobId = `m3-${++m3Seq}-${action.kind}`;
+        const stdout = action.kind === 'decide' ? decide : worker;
+        mkdirSync(join(process.env.AI_CLI_STATE_DIR, 'jobs', jobId), { recursive: true });
+        writeFileSync(join(process.env.AI_CLI_STATE_DIR, 'jobs', jobId, 'stdout.log'), stdout ?? '');
+        writeFileSync(join(process.env.AI_CLI_STATE_DIR, 'jobs', jobId, 'stderr.log'), '');
+        return { jobId, pid: 0, kind: action.kind };
+      },
+      async poll(job) {
+        if (job.kind === 'decide' && decidePoll) return decidePoll(job);
+        return { state: 'finished', result: { status: 'completed', exitCode: 0, message: '', rawTail: '', usage: null } };
+      },
+      async find() { return null; }, async kill() { return true; }, async isGone() { return true; },
+    };
+    return ex;
+  };
+  const m3ReadOnly = claudeStream(claudeInit(['Glob', 'Grep', 'Read']), claudeResult);
+  const m3Claude = async (opts) => {
+    const executor = m3Executor({ worker: m3ReadOnly, ...opts });
+    try { return { record: await runBoundaryProbe('claude', { executor, timeoutMs: 1000, pollMs: 5 }), executor, gate: boundaryStatus('claude') }; }
+    finally { rmSync(m1RecordFile('claude'), { force: true }); }
+  };
+  // 改前的 key 算法：只有這六格，args 是探針能力的 strict argv 摘要。
+  const m3OldArgsDigest = (agent, capabilities) => {
+    const profile = PROBE_MODELS[agent];
+    const built = buildCliCommand({ prompt: 'probe', workFolder: tmpdir(), model: profile.model, capabilities: [...capabilities], cliPaths: resolveAllCliPaths(), ...(profile.effort ? { reasoning_effort: profile.effort } : {}) });
+    return digestText(JSON.stringify(built.args.map((arg, index, all) => all[index - 1] === '--prompt-file' ? '<prompt-file>' : arg).filter(arg => arg !== 'probe')));
+  };
+  const m3OldKey = parts => digestText(JSON.stringify({ schema: parts.schema, agent: parts.agent, platform: parts.platform, version: parts.version, binary: parts.binary, args: parts.args })).slice(0, 32);
+  await check('M3 Claude 零工具組 tools 為空、沒有 MCP → 整體 PASS，兩組各跑一個 job', async () => {
+    const zeroPass = claudeToolEvidence(claudeStream(claudeInit([]), claudeResult), []);
+    assert.equal(zeroPass.status, 'PASS'); assert.equal(zeroPass.evidence, '[]');
+    const { record, executor, gate } = await m3Claude({ decide: claudeStream(claudeInit([]), assistantText('PROBE_DONE'), claudeResult) });
+    assert.deepEqual(executor.started.map(action => action.kind), ['worker', 'decide']);
+    assert.notEqual(executor.started[0].marker, executor.started[1].marker);
+    assert.ok(!executor.started[1].marker.includes(executor.started[0].marker), '零工具組的 marker 不能被唯讀組的 marker 命中');
+    assert.equal(record.status, 'PASS', record.detail); assert.equal(gate, 'PASS');
+    assert.match(record.detail, /唯讀組/); assert.match(record.detail, /零工具組/);
+    assert.match(record.evidence, /零工具組 \[\]/);
+    assert.equal(record.jobId, `m3-${m3Seq - 1}-worker`); assert.equal(record.zeroToolsJobId, `m3-${m3Seq}-decide`);
+  });
+  await check('M3 Claude 零工具組 tools 含任何工具或有 MCP server → 判定不通過，detail 寫明零工具組與工具', async () => {
+    for (const [tools, servers, expected] of [[['Read'], [], /Read/], [['Glob', 'Grep', 'Read'], [], /Glob、Grep、Read/], [['WebFetch'], [], /WebFetch/], [[], [{ name: 'fixture-server' }], /fixture-server/]]) {
+      const label = JSON.stringify({ tools, servers });
+      const direct = claudeToolEvidence(claudeStream(claudeInit(tools, servers), claudeResult), []);
+      assert.equal(direct.status, 'FAIL', label); assert.match(direct.detail, expected, label);
+      const { record, gate } = await m3Claude({ decide: claudeStream(claudeInit(tools, servers), claudeResult) });
+      assert.equal(record.status, 'FAIL', `${label}: ${record.detail}`); assert.equal(gate, 'FAIL', label);
+      assert.match(record.detail, /^零工具組：/, label); assert.match(record.detail, expected, label);
+    }
+    // 唯讀組照舊：同一份唯讀工具清單在預設允許清單下仍是 PASS。
+    assert.equal(claudeToolEvidence(m3ReadOnly).status, 'PASS');
+  });
+  await check('M3 Claude 零工具組沒有 init 或沒有正常結束 → 整體 UNKNOWN', async () => {
+    for (const opts of [
+      { decide: claudeStream(assistantText(claudeInit([])), claudeResult) },
+      { decide: '' },
+      { decide: claudeStream(claudeInit([]), claudeResult), decidePoll: () => ({ state: 'missing' }) },
+      { decide: claudeStream(claudeInit([]), claudeResult), decidePoll: () => ({ state: 'finished', result: { status: 'failed', exitCode: 1, message: '', rawTail: '', usage: null } }) },
+    ]) {
+      const { record, gate } = await m3Claude(opts);
+      assert.equal(record.status, 'UNKNOWN', record.detail); assert.equal(gate, 'UNKNOWN');
+      assert.match(record.detail, /零工具組：/);
+    }
+  });
+  await check('M3 Claude 唯讀組不通過時不再跑零工具組，detail 標明唯讀組', async () => {
+    const executor = m3Executor({ worker: claudeStream(claudeInit(['Read', 'Write']), claudeResult), decide: claudeStream(claudeInit([]), claudeResult) });
+    try {
+      const record = await runBoundaryProbe('claude', { executor, timeoutMs: 1000, pollMs: 5 });
+      assert.equal(record.status, 'FAIL'); assert.match(record.detail, /^唯讀組：.*Write/); assert.equal(executor.started.length, 1);
+      assert.equal(record.zeroToolsJobId, null);
+    } finally { rmSync(m1RecordFile('claude'), { force: true }); }
+    // 唯讀組 UNKNOWN、零工具組 PASS 仍是 UNKNOWN；合成函式本身也照這個規則。
+    const base = { agent: 'claude', model: 'm', key: 'k', parts: {}, at: 'now', targets: {}, evidence: null, jobId: 'a' };
+    assert.equal(combineClaudeProbe({ ...base, status: 'UNKNOWN', detail: 'x' }, { ...base, status: 'PASS', detail: 'y', jobId: 'b' }).status, 'UNKNOWN');
+    assert.equal(combineClaudeProbe({ ...base, status: 'UNKNOWN', detail: 'x' }, { ...base, status: 'FAIL', detail: 'y', jobId: 'b' }).status, 'FAIL');
+  });
+  await check('M3 兩組 argv 相同的家（codex）或組不出零工具指令的家（grok），key 和改前算法一致', () => m1WithGrok(async () => {
+    for (const agent of ['codex', 'grok']) {
+      const { key, parts } = boundaryKey(agent);
+      assert.deepEqual(Object.keys(parts), ['schema', 'agent', 'platform', 'version', 'binary', 'args'], agent);
+      assert.equal(parts.args, m3OldArgsDigest(agent, PROBE_CAPABILITIES), agent);
+      assert.equal(key, m3OldKey(parts), agent);
+    }
+    assert.equal(m3OldArgsDigest('codex', DECIDE_CAPABILITIES), m3OldArgsDigest('codex', PROBE_CAPABILITIES), 'codex 兩組 argv 相同');
+    assert.throws(() => m3OldArgsDigest('grok', DECIDE_CAPABILITIES), /零工具/, 'grok 的 strict builder 拒絕零工具，decide 根本派不出去');
+    // codex 的探針仍只跑唯讀組；沒有拒絕紀錄照舊是 noAttempt，重跑一次。
+    const executor = m3Executor({ worker: '' });
+    try {
+      const record = await runBoundaryProbe('codex', { executor, timeoutMs: 1000, pollMs: 5 });
+      assert.equal(record.status, 'UNKNOWN'); assert.ok(record.noAttempt);
+      assert.deepEqual(executor.started.map(action => action.kind), ['worker', 'worker']);
+      assert.equal(record.zeroToolsJobId, undefined);
+    } finally { rmSync(m1RecordFile('codex'), { force: true }); }
+  }));
+  await check('M3 Claude 兩組 argv 不同時，key 隨零工具 argv 改變', () => {
+    const { key, parts } = boundaryKey('claude');
+    assert.equal(parts.args, m3OldArgsDigest('claude', PROBE_CAPABILITIES));
+    assert.equal(parts.decideArgs, m3OldArgsDigest('claude', DECIDE_CAPABILITIES));
+    assert.notEqual(parts.decideArgs, parts.args);
+    assert.equal(key, digestText(JSON.stringify(parts)).slice(0, 32));
+    assert.notEqual(key, m3OldKey(parts), '零工具 argv 要進 key');
+    assert.notEqual(key, digestText(JSON.stringify({ ...parts, decideArgs: digestText('其他零工具 argv') })).slice(0, 32));
   });
 } finally { rmSync(temp, { recursive: true, force: true }); }
 assert.ok(passed + failed > 0, 'refuse an empty test selection');

@@ -5297,8 +5297,8 @@
   {
     "name": "kernel K2：Claude init 從輸出尾端找",
     "file": "src/ai-cli_kernel/probe.ts",
-    "from": "if (agent === 'claude') return claudeToolEvidence(probe.log('stdout', 'head'));",
-    "to": "if (agent === 'claude') return claudeToolEvidence(probe.log('stdout', 'tail'));",
+    "from": "if (agent === 'claude') return claudeToolEvidence(probe.log('stdout', 'head'), claudeAllowed);",
+    "to": "if (agent === 'claude') return claudeToolEvidence(probe.log('stdout', 'tail'), claudeAllowed);",
     "script": "verify-ai-cli_kernel-evidence.mjs",
     "expect": "K2 Claude init 只有 Read／Glob／Grep"
   },
@@ -6149,5 +6149,53 @@
     "to": "      if (boundary === 'UNREADABLE' && !view.overrides.has('boundary_unverified')) {",
     "script": "verify-ai-cli_kernel.mjs",
     "expect": "M2 loop：探針紀錄不是 JSON"
+  },
+  {
+    "name": "kernel M3：零工具組沿用唯讀允許清單",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "marker: zeroMarker }, []);",
+    "to": "marker: zeroMarker }, CLAUDE_READ_ONLY_TOOLS);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M3 Claude 零工具組 tools 含任何工具或有 MCP server"
+  },
+  {
+    "name": "kernel M3：Claude 不跑零工具組",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "    if (agent !== 'claude') return readOnly;",
+    "to": "    if (agent !== 'claude' || readOnly.jobId !== '') return readOnly;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M3 Claude 零工具組 tools 為空"
+  },
+  {
+    "name": "kernel M3：零工具組判定不通過被吞成 UNKNOWN",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "  if (zero?.status === 'FAIL') return",
+    "to": "  if (zero?.status === 'FAIL' && zero.jobId === '') return",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M3 Claude 零工具組 tools 含任何工具或有 MCP server"
+  },
+  {
+    "name": "kernel M3：零工具組沒結論也算通過",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "if (readOnly.status === 'PASS' && zero?.status === 'PASS') return",
+    "to": "if (readOnly.status === 'PASS' && zero !== null) return",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M3 Claude 零工具組沒有 init"
+  },
+  {
+    "name": "kernel M3：零工具 argv 不進探針 key",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "if (decideArgs && decideArgs !== parts.args) parts.decideArgs = decideArgs;",
+    "to": "if (decideArgs && decideArgs === '') parts.decideArgs = decideArgs;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M3 Claude 兩組 argv 不同時"
+  },
+  {
+    "name": "kernel M3：argv 相同也改動探針 key",
+    "file": "src/ai-cli_kernel/probe.ts",
+    "from": "if (decideArgs && decideArgs !== parts.args) parts.decideArgs = decideArgs;",
+    "to": "if (decideArgs || parts.args) parts.decideArgs = decideArgs;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "M3 兩組 argv 相同的家"
   }
 ]
