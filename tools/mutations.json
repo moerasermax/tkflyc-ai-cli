@@ -6285,5 +6285,325 @@
     "to": "  // 明確違規優先判不通過，沒有違規才把 tools 證據缺漏判為 UNKNOWN。\n  if ((false as boolean)) return { status: 'UNKNOWN',",
     "script": "verify-ai-cli_kernel-evidence.mjs",
     "expect": "F1 Claude tools 缺欄位或混型別但沒有違規能力"
+  },
+  {
+    "name": "kernel AUTO：Claude 已用百分比直接當剩餘",
+    "file": "src/ai-cli_kernel/runtime.ts",
+    "from": "  if (agent === 'claude') return usage.percentBasis === 'used' && valid(usage.weekAllModelsPercent) ? 100 - usage.weekAllModelsPercent : null;",
+    "to": "  if (agent === 'claude') return usage.percentBasis === 'used' && valid(usage.weekAllModelsPercent) ? usage.weekAllModelsPercent : null;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 額度方向：Claude 的已用百分比換算成剩餘後才判合格"
+  },
+  {
+    "name": "kernel AUTO：Codex 已用百分比直接當剩餘",
+    "file": "src/ai-cli_kernel/runtime.ts",
+    "from": "    if (weekly.basis === 'used' && valid(weekly.percentUsed)) return 100 - weekly.percentUsed;",
+    "to": "    if (weekly.basis === 'used' && valid(weekly.percentUsed)) return weekly.percentUsed;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 額度方向：Codex 依 basis 換算"
+  },
+  {
+    "name": "kernel AUTO：專屬週額度的已用百分比直接當剩餘",
+    "file": "src/ai-cli_kernel/runtime.ts",
+    "from": "    return 100 - rows[0].percentUsed;",
+    "to": "    return rows[0].percentUsed;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 最高難度的首選要兩個額度都達門檻才進池"
+  },
+  {
+    "name": "kernel AUTO：額度快照不濾掉不合法的數字",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "    return validPercent(value) ? value : null;",
+    "to": "    return value as number | null;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 額度方向：Codex 依 basis 換算"
+  },
+  {
+    "name": "kernel AUTO：剛好在門檻的那家被排除",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "  if (quotas.claude < min) return `Claude 週額度剩 ${quotas.claude}% < ${min}%`;",
+    "to": "  if (quotas.claude <= min) return `Claude 週額度剩 ${quotas.claude}% < ${min}%`;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 門檻：剩餘剛好等於門檻就進池"
+  },
+  {
+    "name": "kernel AUTO：差一點到門檻的那家也進池",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "    return quotas.codex >= min ? null : `Codex 週額度剩 ${quotas.codex}% < ${min}%`;",
+    "to": "    return quotas.codex >= min - 1 ? null : `Codex 週額度剩 ${quotas.codex}% < ${min}%`;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 門檻：剩餘剛好等於門檻就進池"
+  },
+  {
+    "name": "kernel AUTO：最高難度首選不看專屬額度",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "  if (!entry.needsFable) return null;",
+    "to": "  if (entry.family === 'claude') return null;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 最高難度的首選要兩個額度都達門檻才進池"
+  },
+  {
+    "name": "kernel AUTO：還有合格候選時備援也進池",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "        if (qualified.length > before) { drop('備援：還有其他合格候選，不進池'); continue; }",
+    "to": "        if ((false as boolean)) { drop('備援：還有其他合格候選，不進池'); continue; }",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 備援只在 routine 而且其他候選都不合格時進池"
+  },
+  {
+    "name": "kernel AUTO：難度不是 routine 也用備援",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "        if (ceiling.difficulty !== 'routine') { drop('備援只用在難度上限是 routine 的 run'); continue; }",
+    "to": "        if ((false as boolean)) { drop('備援只用在難度上限是 routine 的 run'); continue; }",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 備援只在 routine 而且其他候選都不合格時進池"
+  },
+  {
+    "name": "kernel AUTO：routine 候選的 effort 調高",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "    { model: 'gpt-6.1-sol', effort: 'medium', family: 'codex' },",
+    "to": "    { model: 'gpt-6.1-sol', effort: 'high', family: 'codex' },",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO routine 的池只有 routine 候選"
+  },
+  {
+    "name": "kernel AUTO：候選表出現高於 high 的 effort",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "    { model: 'fable', effort: 'high', family: 'claude', needsFable: true },",
+    "to": "    { model: 'fable', effort: 'max', family: 'claude', needsFable: true },",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 自動路徑的 effort 最高到 high"
+  },
+  {
+    "name": "kernel AUTO：指名的決策模型也被改派",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "  return !!selection && selection.pool.length > 0 && (kind === 'decide' ? selection.auto.decide : selection.auto.worker);",
+    "to": "  return !!selection && selection.pool.length > 0 && (kind === 'decide' ? true : selection.auto.worker);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 只指定一邊時指定的那邊不動"
+  },
+  {
+    "name": "kernel AUTO：兩邊都指名仍然去讀額度",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "  const quotas = needsQuotaSnapshot(input) ? await readQuotaSnapshot(deps.quota ?? readQuota) : undefined;",
+    "to": "  const quotas = await readQuotaSnapshot(deps.quota ?? readQuota);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 明示模型在額度歸零時照指名"
+  },
+  {
+    "name": "kernel AUTO：指名的決策模型被換成 worker 的",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "    decide = { model: input.decideModel ?? worker.model, effort: input.decideEffort ?? input.workerEffort ?? 'medium' };",
+    "to": "    decide = { model: worker.model, effort: input.decideEffort ?? input.workerEffort ?? 'medium' };",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 只指定一邊時指定的那邊不動"
+  },
+  {
+    "name": "kernel AUTO：候選池不和 workerModels 相交",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "      pool = qualified.filter(entry => wanted.has(entry.model));",
+    "to": "      pool = qualified;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO workerModels 和合格候選沒有交集就拒絕建立"
+  },
+  {
+    "name": "kernel AUTO：沒有合格候選時不拒絕",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "    if (qualified.length === 0) {",
+    "to": "    if ((false as boolean)) {",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 兩家都不合格就拒絕建立"
+  },
+  {
+    "name": "kernel AUTO：預設 worker 不是池的第一個",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "    const first = entriesForLevel(pool, ceiling.difficulty, input.workerEffort !== undefined)[0];",
+    "to": "    const first = entriesForLevel(pool, ceiling.difficulty, input.workerEffort !== undefined).at(-1)!;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 候選池凍結在委任書"
+  },
+  {
+    "name": "kernel AUTO：決策模型不挑 Claude 家",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "    const claude = (plan.workerAuto ? pool : qualified).find(entry => entry.family === 'claude');",
+    "to": "    const claude = (plan.workerAuto ? pool : qualified).find(entry => entry.family === 'codex');",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 候選池凍結在委任書"
+  },
+  {
+    "name": "kernel AUTO：difficulty 不驗證內容",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "  if (typeof value !== 'string' || !(DIFFICULTIES as readonly string[]).includes(value)) throw new Error(`difficulty 必須是 ${DIFFICULTIES.join('、')} 其中之一`);",
+    "to": "  if (typeof value !== 'string') throw new Error(`difficulty 必須是 ${DIFFICULTIES.join('、')} 其中之一`);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 候選池凍結在委任書"
+  },
+  {
+    "name": "kernel AUTO：decide 指定池外的模型也放行",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "    if (step.model !== undefined && !contract.allowedWorkerModels.includes(step.model)) {",
+    "to": "    if ((false as boolean)) {",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO decide 只能在凍結池內選"
+  },
+  {
+    "name": "kernel AUTO：步驟 effort 超過上限也放行",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "      if (effortExceeds(step.effort, ceiling)) throw new Error(",
+    "to": "      if ((false as boolean)) throw new Error(",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO decide 指定的步驟 effort 超過該步驟難度的上限就拒收"
+  },
+  {
+    "name": "kernel AUTO：唯讀步驟的難度跟著上限走",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "  return contract.develop && mode !== 'write' ? 'routine' : selection.difficulty;",
+    "to": "  return selection.difficulty;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO decide 指定的步驟 effort 超過該步驟難度的上限就拒收"
+  },
+  {
+    "name": "kernel AUTO：改派到目前不合格的模型",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "    return left !== null && left >= min && left >= gate;",
+    "to": "    return left !== null;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 中途改派只在凍結池內"
+  },
+  {
+    "name": "kernel AUTO：額度量不到就立刻改派，不管未知次數上限",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "  const blocked = remaining === null ? state.unknownExhausted : remaining < gate;",
+    "to": "  const blocked = remaining === null ? true : remaining < gate;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 中途改派只在凍結池內"
+  },
+  {
+    "name": "kernel AUTO：低一級的步驟沿用高一級的 effort",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "  for (const entry of pool) add(keepEffort || !effortExceeds(entry.effort, ceiling) ? entry : { ...entry, effort: ceiling });",
+    "to": "  for (const entry of pool) add(entry);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 改派後的 effort 不高於該步驟難度的上限"
+  },
+  {
+    "name": "kernel AUTO：明示的委任書也去讀全部額度",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "    if (!selection) return spec;",
+    "to": "    if ((false as boolean)) return spec;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 舊委任書沒有選擇紀錄就當明示"
+  },
+  {
+    "name": "kernel AUTO：改派沒寫進意圖",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "    return { ...spec, model: choice.model, ...(choice.effort ? { effort: choice.effort } : {}), reroute: choice.reroute };",
+    "to": "    return { ...spec, model: choice.model, ...(choice.effort ? { effort: choice.effort } : {}) };",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO loop：原定那家額度不足時改派池內目前合格的模型"
+  },
+  {
+    "name": "kernel AUTO：沒有合格候選時把剩餘報成足夠",
+    "file": "src/ai-cli_kernel/model-select.ts",
+    "from": "  if (!alternative) return { ...planned, remaining };",
+    "to": "  if (!alternative) return { ...planned, remaining: 100 };",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO loop：池內沒有目前合格的模型時照舊停下等人"
+  },
+  {
+    "name": "kernel AUTO：派工閘不用選定模型的剩餘",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "    const remaining = routed?.actionId === spec.actionId ? routed.remaining : await deps.quota(agent).catch(() => null);",
+    "to": "    const remaining = routed?.actionId === spec.actionId ? await deps.quota(agent).catch(() => null) : await deps.quota(agent).catch(() => null);",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO loop：最高難度首選的專屬額度不足時"
+  },
+  {
+    "name": "kernel AUTO：decide 提示不帶目前額度",
+    "file": "src/ai-cli_kernel/plan.ts",
+    "from": "  const models = pooled ? describeSelectionForDecide(contract, pooled, data.quotas) : contract.allowedWorkerModels.length > 1",
+    "to": "  const models = pooled ? describeSelectionForDecide(contract, pooled) : contract.allowedWorkerModels.length > 1",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO decide 的提示列出凍結的池"
+  },
+  {
+    "name": "kernel AUTO：loop 沒把當下額度交給 decide",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "    const quotas = selection ? await quotaSnapshot() : undefined;",
+    "to": "    const quotas = undefined as QuotaSnapshot | undefined;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO decide 的提示列出凍結的池"
+  },
+  {
+    "name": "kernel AUTO：status 不帶選擇紀錄",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "    modelSelection: contract.modelSelection ?? null,",
+    "to": "    modelSelection: null,",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO status 印出自動選了什麼與原因"
+  },
+  {
+    "name": "kernel AUTO：status 文字不印選擇紀錄",
+    "file": "src/ai-cli_kernel/cli.ts",
+    "from": "    ...(status.modelSelection?.mode === 'auto' ? describeSelection(status.modelSelection)",
+    "to": "    ...(status.modelSelection?.mode === 'explicit' ? describeSelection(status.modelSelection)",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO status 印出自動選了什麼與原因"
+  },
+  {
+    "name": "kernel AUTO：created 事件不記選擇結果",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "from": "    const selection = contract.modelSelection?.mode === 'auto' ? contract.modelSelection : null;",
+    "to": "    const selection = contract.modelSelection?.mode === 'explicit' ? contract.modelSelection : null;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO status 印出自動選了什麼與原因"
+  },
+  {
+    "name": "kernel AUTO：CLI 沒把 difficulty 傳下去",
+    "file": "src/ai-cli_kernel/cli.ts",
+    "from": "      difficulty: stringFlag(flags, 'difficulty'),",
+    "to": "      difficulty: undefined,",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO status 印出自動選了什麼與原因"
+  },
+  {
+    "name": "kernel AUTO：MCP 沒把 difficulty 傳下去",
+    "file": "src/ai-cli_kernel/mcp-tools.ts",
+    "from": "          difficulty: optionalString(args, 'difficulty'),",
+    "to": "          difficulty: undefined,",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO status 印出自動選了什麼與原因"
+  },
+  {
+    "name": "kernel AUTO：範本存下當下選出的 worker 模型",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "    model: auto.worker ? AUTO_MODEL : contract.worker.model,",
+    "to": "    model: contract.worker.model,",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 範本存 auto 而不是當下選出的模型"
+  },
+  {
+    "name": "kernel AUTO：範本不放行 difficulty 欄位",
+    "file": "src/ai-cli_kernel/mandates.ts",
+    "from": "'decideModel', 'decideEffort', 'difficulty', 'testCommand',",
+    "to": "'decideModel', 'decideEffort', 'testCommand',",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 範本存 auto 而不是當下選出的模型"
+  },
+  {
+    "name": "kernel AUTO：觸發不讀當下額度",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "    const quotas = needsQuotaSnapshot(mandate.input) ? await readQuotaSnapshot(deps.quota ?? readQuota, () => new Date(now)) : undefined;",
+    "to": "    const quotas = needsQuotaSnapshot(mandate.input) ? { claude: 100, codex: 100, fable: 100, readAt: new Date(now).toISOString() } : undefined;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 範本存 auto 而不是當下選出的模型"
+  },
+  {
+    "name": "kernel AUTO：觸發時沒有合格候選不記成跳過",
+    "file": "src/ai-cli_kernel/triggers.ts",
+    "from": "      return record(result('skipped', 'no_eligible_model', error.message));",
+    "to": "      throw error;",
+    "script": "verify-ai-cli_kernel-evidence.mjs",
+    "expect": "AUTO 範本存 auto 而不是當下選出的模型"
   }
 ]

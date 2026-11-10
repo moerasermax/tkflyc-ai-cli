@@ -13,7 +13,11 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url))), source = process.
 const load = name => import(pathToFileURL(join(ROOT, source ? 'src' : 'dist', 'ai-cli_kernel', `${name}.${source ? 'ts' : 'js'}`)).href);
 const { RunStore, kernelRunDir, kernelStateDir, newRunId, acquireActiveLock, releaseActiveLock } = await load('journal');
 const { admitRun, readActiveRuns, validateConcurrencyConfig, normalizedOrigin, claimRunnerSlot, ensureLegacyMarker, startLegacyMarkerWatch, LegacyMarkerReplaceFailed, releaseRunSlot } = await load('admission');
-const { buildContract } = await load('templates');
+// 這支測的不是選模型：沒寫模型的 fixture 一律明示成同一個模型，和自動選模型上線前的預設相同。
+const EXPLICIT_MODEL = 'gpt-6.1-sol';
+const explicitModels = input => ({ ...input, model: input.model ?? EXPLICIT_MODEL, decideModel: input.decideModel ?? input.model ?? EXPLICIT_MODEL });
+const { buildContract: buildContractRaw } = await load('templates');
+const buildContract = (input, ...rest) => buildContractRaw(explicitModels(input), ...rest);
 const { remainingPercentFromUsage } = await load('runtime');
 const { replayJournal, activeMinutes } = await load('replay');
 const { waitForTestLock, releaseStoppedTestLock } = await load('test-lock');
@@ -391,7 +395,7 @@ try {
     const holder = fresh(); await admit(holder);
     const name = 'concurrency-quota';
     api.aiCliKernelTriggersSetEnabled(true);
-    api.aiCliKernelMandateSave({ name, input: { goal: 'trigger admission fixture', workFolder: folder(), allowUnverifiedBoundary: true }, maxRunsPerDay: 10, maxInputTokensPerDay: 1000 });
+    api.aiCliKernelMandateSave({ name, input: explicitModels({ goal: 'trigger admission fixture', workFolder: folder(), allowUnverifiedBoundary: true }), maxRunsPerDay: 10, maxInputTokensPerDay: 1000 });
     api.aiCliKernelMandateApprove({ name, acknowledgeUnisolated: true });
     for (const agent of ['claude', 'codex']) {
       let launched = false;

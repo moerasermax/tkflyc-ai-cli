@@ -8,7 +8,8 @@
 import { z } from 'zod';
 import { aiCliKernelMemoryText, aiCliKernelUntrustedText, type KernelMemory } from './memory.js';
 import { activeMinutes, type RunView } from './replay.js';
-import { workDirOf, type KernelContract, type PlanStep } from './types.js';
+import { workDirOf, type KernelContract, type PlanStep, type QuotaSnapshot } from './types.js';
+import { autoSelection, describeSelectionForDecide, effortExceeds, stepLevel } from './model-select.js';
 import { boundedList, changeLabel, FILE_LIST_CHARS, testSummary, type ReviewEvidence } from './evidence.js';
 
 const StepSchema = z.object({
@@ -17,6 +18,7 @@ const StepSchema = z.object({
   prompt: z.string().min(1).max(12000),
   model: z.string().max(80).optional(),
   mode: z.enum(['read', 'write']).optional(),
+  effort: z.string().max(16).optional(),
 }).strict();
 
 const LessonsSchema = z.array(z.string().trim().min(1).max(500)).max(3).optional();
@@ -90,6 +92,14 @@ export function parseDecision(text: string, contract: KernelContract, planIndex:
       throw new Error(`模型 ${step.model} 不在委任書允許的清單內`);
     }
     if (step.mode === 'write' && !contract.develop) throw new Error(`範本 ${contract.template} 不能派會寫檔的步驟`);
+    if (step.effort !== undefined) {
+      // 步驟的 effort 只有自動選模型的委任書能寫，而且不能超過該步驟難度的上限；難度本身沒有欄位可以調。
+      const selection = autoSelection(contract);
+      if (!selection?.auto.worker || selection.workerEffortExplicit) throw new Error(`步驟 ${step.id} 不能指定 effort：這份委任書的 worker effort 是明示的（${contract.worker.effort}）`);
+      const level = stepLevel(contract, step.mode ?? (contract.develop ? 'write' : 'read'));
+      const ceiling = selection.effortCeilings[level];
+      if (effortExceeds(step.effort, ceiling)) throw new Error(`步驟 ${step.id} 的 effort ${quoted(step.effort)} 超過難度 ${level} 的上限 ${ceiling}`);
+    }
   }
   // 加上段落編號，不同計畫段重複使用 s1 時才不會互相覆蓋。
   const prefix = `p${planIndex}-`;
@@ -109,6 +119,8 @@ export function actionMarker(runId: string, actionId: string): string {
 
 /** decide 格式規格裡關於步驟鍵的一句（issue #23）。測試直接比對這句。 */
 export const DECIDE_STEP_KEYS_RULE = 'report_step 只放在最外層；steps 裡每個物件只能有 id、title、prompt、model、mode。';
+/** 自動選模型的委任書才附在上面那句後面。 */
+export const DECIDE_STEP_EFFORT_RULE = '例外：這份委任書自動選模型，步驟另外可以有 effort，上限見「範圍」。';
 /** 重試時送回 decide 的拒收原因上限（字元）。 */
 export const REJECTION_CHARS = 500;
 /** 拒收原因可能含模型輸出的鍵名或字串，先截斷再跳脫，送回 decide 時當不可信資料。 */
@@ -118,7 +130,7 @@ export function aiCliKernelRejectionText(reason: string): string {
   return aiCliKernelUntrustedText(cut);
 }
 
-export function buildDecidePrompt(contract: KernelContract, view: RunView, marker: string, now: number, data: { memories?: KernelMemory[]; paths?: string[]; context?: string } = {}): string {
+export function buildDecidePrompt(contract: KernelContract, view: RunView, marker: string, now: number, data: { memories?: KernelMemory[]; paths?: string[]; context?: string; quotas?: QuotaSnapshot } = {}): string {
   const { budget } = contract;
   const memoryText = aiCliKernelMemoryText(data.memories ?? [], contract.template, data.paths ?? contract.develop?.allowedPaths ?? []);
   const reference = `${memoryText ? `\n<memory untrusted="true">\n${memoryText}\n</memory>\n` : ''}${data.context !== undefined ? `\n<context untrusted="true">\n${aiCliKernelUntrustedText(data.context.slice(0, 8000))}\n</context>\n` : ''}`;
@@ -142,7 +154,10 @@ export function buildDecidePrompt(contract: KernelContract, view: RunView, marke
 - 只有「有改動、最新 commit 通過測試、報告通過驗收」才算完成。${develop.allowedPaths.length ? `
 - 只能改這些路徑（相對 repo 根目錄）：${develop.allowedPaths.join('、')}。改到其他地方這一步就不算通過。` : ''}` : `- 工作目錄：${contract.workFolder}
 - 所有 worker 都是唯讀的，只能回報文字，不能改檔。`;
-  const models = contract.allowedWorkerModels.length > 1
+  // 自動選模型：給 decide 看凍結的池、每級上限和目前各家剩餘，它只能在池內選。明示的委任書照舊。
+  const selection = autoSelection(contract);
+  const pooled = selection?.auto.worker ? selection : null;
+  const models = pooled ? describeSelectionForDecide(contract, pooled, data.quotas) : contract.allowedWorkerModels.length > 1
     ? `\n- 可用的 worker 模型：${contract.allowedWorkerModels.join('、')}。用 step 的 model 指定，不寫就是 ${contract.worker.model}。重要的改動可以派另一個模型做唯讀審查。` : '';
   const verification = view.verification
     ? `\n## 最新一次測試\ncommit ${view.verification.commit.slice(0, 10)}：${view.verification.passed ? '通過' : `未通過（${view.verification.timedOut ? '逾時' : `exit ${view.verification.exitCode}`}，累計失敗 ${view.testFailures} 次）`}\n<test_output untrusted="true">\n${view.verification.tail}\n</test_output>\n` : '';
@@ -174,7 +189,7 @@ ${verification}${acceptance}${notes}${rejected}${reference}
 - plan 或 finish 可附 lessons 字串陣列，最多 3 條，每條最多 500 字元；只存 candidate，必須由人 promote 才會提供給未來 decide。不能要求 active 或修改記憶狀態。
 - worker 看不到這段對話，prompt 要寫完整。
 - report_step 是產出最終報告的步驟。它通過驗收後 run 就會結束，不必再回來問你。
-- ${DECIDE_STEP_KEYS_RULE}
+- ${DECIDE_STEP_KEYS_RULE}${pooled && !pooled.workerEffortExplicit ? DECIDE_STEP_EFFORT_RULE : ''}
 - 最終報告的格式由 kernel 附加，你不用寫。`;
 }
 

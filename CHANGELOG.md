@@ -60,6 +60,13 @@
 
 - `ai-cli kernel dashboard` 全螢幕終端機控制面板與 `actions <run> --json` 共用純操作規則：完整目標、中文顯示寬度、5／30 秒單飛刷新、完整報告捲動、所有變更先確認並重查 run／測試 commit，放行取得可靠 id 才執行且不重試不明結果。退出清理 alternate screen、游標、raw mode、timer／listener 並排空 stdout；worker 與非 TTY 拒絕。`--new-tab` 僅支援 Windows Terminal，以無 shell 參數陣列定位目前 Node／CLI 入口；新增注入測試及安全突變。既有 kernel 真實 CLI 只在 Windows 用過，此次 dashboard 未做真人 TTY／Windows Terminal 驗證，其他平台尚未實跑。（@moerasermax）
 
+- ai-cli-jobs 面板 0.2.0 顯示 kernel run 的狀態與進度。原因：kernel 跑很久卻看不出進行到哪——面板只認得 ai-cli job，kernel 自己的階段（等核准、等測試鎖、驗收 npm test、waiting_human、完成待審）都不是 job，2026-11-10 一個 run 在 13:05 完成，到 18:44 才有人發現。job 表格下方多一個 kernel 區塊：專案、run 末 4 碼、狀態、目前階段（decide／步驟 i/n＋標題／等測試鎖／setup／驗收測試）、本階段時間、總計／預算分鐘；進行中與等人處理一律顯示，完成待審、失敗、預算用完顯示 24 小時或歸檔即消失，最多 4 列。kernel 派出的 job 改顯示成 `kernel <末4碼> · 步驟`；轉成等你核准／等你處理／中斷／過期／完成待審／失敗／預算用完時跳一次 toast。只用 `$.fs` 讀檔、journal 以大小＋mtime 快取，讀不到只影響那一列。實作 Claude opus、審查 Grok；`claude plugin test` 26 pass，尚未在真的 Claude Code 裡載入驗證。（@moerasermax）
+
+### 變更
+
+- **ai-cli_kernel：委任書沒指定模型時，從固定 `gpt-6.1-sol`·medium 改成依週額度與任務難度自動選。** 原因：預設寫死 Codex，而決定當天 Claude 週額度已用 18%、Codex 已用 80%，固定派 Codex 正好和額度狀況相反（使用者 2026-11-10 決定）。行為：`model`／`decideModel` 省略或寫 `auto` 就是自動；指名的模型與 effort 照舊，不看額度、不改派。新增可選的 `difficulty`（CLI `--difficulty`、MCP `difficulty`）：routine／elevated／critical，是上限；沒給時 readonly-audit 是 routine，develop 的寫入步驟是 elevated、唯讀步驟是 routine。候選依序為 routine：`gpt-6.1-sol`·medium → `sonnet`·medium → `grok-4.7`·medium（備援，只有前兩者都不合格才用）；elevated：`opus`·medium → `gpt-6.1-sol`·high；critical：`fable`·high → `opus`·high → `gpt-6-astra`·high。自動路徑不發出 xhigh／max／ultra。合格＝那一家週額度剩 25% 以上，fable 另外要 Fable 自己的週額度也達標，量不到一律不合格；沒有合格候選就拒絕建立 run。候選池在建立委任書時凍結並寫進 `modelSelection`（digest 涵蓋，`status` 會印出選了什麼、當時額度、排除了誰）；派工前原定模型那家額度不足時只在池內改派目前合格的模型，紀錄寫在 `action_intent` 的 `reroute`，池內沒有合格的就照舊停在 `quota_low`／`quota_unknown`。decide 只能挑池內的模型，步驟的 `effort` 不能超過該難度的上限。只指名 `model`、難度又是 routine 時，決策和 worker 同一個，和以前相同；其他只指名一邊的情況，沒指名的那邊自動。`mandate save` 對沒指定的模型存 `auto`，每次觸發依當下額度重選，沒有合格候選記成 `skipped`／`no_eligible_model`。相容：新欄位都可選、`schemaVersion` 不變；沒有 `modelSelection` 的舊委任書與存了具體模型的舊範本都當明示，行為不變。既有檢查（名額、並行額度閘、25% 派工閘、額度未知次數上限、探針、核准）沒有放寬。驗證：`verify-ai-cli_kernel-evidence.mjs` 新增 23 支 AUTO 斷言，用假執行器與額度快照；真的額度查詢與真機 `start` 沒有實測。（@moerasermax）
+- 派工政策 `tools/hooks/aicli-model-policy.py` 升為 v2.4：第 2 條改成依額度與難度選模型（表同上，指名照指名），第 11 條改成「剩不到 25% 或量不到的那一家不派，改派另一家合格的候選；沒有合格候選就停」，保留「剩不到 20% 不同時跑兩個 Codex 工作」。只改 repo 內的正典；`~/.claude/scripts/` 的副本要另外同步，同步前 SessionStart 會提示兩份不一致。`verify-ai-cli_kernel-policy.mjs` 跟著放行這三處。（@moerasermax）
+
 ## [7.0.0] - 2026-11-07
 
 > 文件與版本號已準備；**尚未發佈到 npm**，本次未打 tag 或 publish。現階段使用 GitHub 原始碼安裝。

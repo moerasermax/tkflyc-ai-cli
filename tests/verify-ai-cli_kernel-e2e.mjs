@@ -74,7 +74,9 @@ function json(args, env) {
   return jsonResult(result);
 }
 const logCount = kind => existsSync(LOG) ? readFileSync(LOG, 'utf8').split('\n').filter(line => line === kind).length : 0;
-const START = ['start', '--goal', '檢查 README', '--cwd', WORK, '--max-steps', '3', '--max-decides', '3'];
+// 這支測的不是選模型：一律明示模型，和自動選模型上線前的預設相同（明示的模型不查額度）。
+const EXPLICIT_FLAGS = ['--model', 'gpt-6.1-sol', '--decide-model', 'gpt-6.1-sol'];
+const START = ['start', '--goal', '檢查 README', '--cwd', WORK, ...EXPLICIT_FLAGS, '--max-steps', '3', '--max-decides', '3'];
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 try {
@@ -279,9 +281,9 @@ try {
   git(REPO, 'commit', '-q', '-m', 'init');
   const baseHead = git(REPO, 'rev-parse', 'HEAD');
   const TEST = `node -e "process.exit(require('fs').readFileSync('feature.txt','utf8').trim()==='good'?0:1)"`;
-  const DEV = ['start', '--template', 'develop', '--goal', '加 feature.txt', '--cwd', REPO, '--test', TEST, '--max-steps', '4', '--max-decides', '4'];
+  const DEV = ['start', '--template', 'develop', '--goal', '加 feature.txt', '--cwd', REPO, ...EXPLICIT_FLAGS, '--test', TEST, '--max-steps', '4', '--max-decides', '4'];
 
-  const noTest = cli(['start', '--template', 'develop', '--goal', 'x', '--cwd', REPO]);
+  const noTest = cli(['start', '--template', 'develop', '--goal', 'x', '--cwd', REPO, ...EXPLICIT_FLAGS]);
   check('develop 沒給測試指令就建不了委任書', noTest.code === 1 && noTest.err.includes('testCommand'), noTest.out + noTest.err);
   const devCreated = cli(DEV);
   check('委任書講清楚未隔離、分支和測試', devCreated.code === 0 && devCreated.out.includes('未隔離') && devCreated.out.includes('ai-cli_kernel/') && devCreated.out.includes('--acknowledge-unisolated'), devCreated.out + devCreated.err);
@@ -300,7 +302,7 @@ try {
   check('只有 write 步驟拿到全權限旗標', logCount('args:write:bypass') === argsBefore.write + 1 && logCount('args:decide:strict') === argsBefore.decide + 1 && logCount('args:decide:bypass') === 0 && logCount('args:worker:bypass') === 0, readFileSync(LOG, 'utf8').slice(-400));
   const devResult = json(['result', devId]);
   check('報告附上 kernel 產生的交付段落', (devResult.data?.report ?? '').includes('交付（由 kernel 產生）') && (devResult.data?.verdict?.develop?.testPassedOn ?? 'x') === git(REPO, 'rev-parse', devSpec?.branch), devResult.out);
-  const running = cli(['cleanup', json(['start', '--goal', '檢查', '--cwd', WORK]).data?.runId]);
+  const running = cli(['cleanup', json(['start', '--goal', '檢查', '--cwd', WORK, ...EXPLICIT_FLAGS]).data?.runId]);
   check('唯讀的 run 沒有 worktree 可以清', running.code === 1 && running.err.includes('develop'), running.err);
   const cleaned = cli(['cleanup', devId]);
   check('清理移除 worktree，沒合併的分支留著', cleaned.code === 0 && cleaned.out.includes('留著') && !existsSync(devSpec?.worktree ?? 'x') && git(REPO, 'rev-parse', devSpec?.branch).length > 0, cleaned.out + cleaned.err);
@@ -352,7 +354,7 @@ try {
   check('接回後改動只 commit 一次', git(REPO, 'rev-list', '--count', `${baseHead}..${reattachedDone.data?.develop?.branch}`) === '1');
 
   const toolText = reply => reply?.result?.content?.[0]?.text ?? JSON.stringify(reply ?? null);
-  const [viaMcp] = await callMcp({}, [{ method: 'tools/call', params: { name: 'ai-cli_kernel_start', arguments: { goal: '加 feature.txt', workFolder: REPO, template: 'develop', testCommand: TEST, allowedPaths: ['feature.txt'], workerModels: ['sonnet'] } } }]);
+  const [viaMcp] = await callMcp({}, [{ method: 'tools/call', params: { name: 'ai-cli_kernel_start', arguments: { goal: '加 feature.txt', workFolder: REPO, template: 'develop', model: 'gpt-6.1-sol', decideModel: 'gpt-6.1-sol', testCommand: TEST, allowedPaths: ['feature.txt'], workerModels: ['sonnet'] } } }]);
   const mcpRun = /kr-\d{8}-\d{6}-[0-9a-f]{4}/.exec(toolText(viaMcp))?.[0];
   const mcpStatus = json(['status', mcpRun]).data;
   check('MCP 帶得到 develop 的參數', mcpStatus?.develop?.testCommand === TEST && mcpStatus?.develop?.allowedPaths?.join() === 'feature.txt' && mcpStatus?.models?.allowedWorkers?.includes('sonnet'), toolText(viaMcp));

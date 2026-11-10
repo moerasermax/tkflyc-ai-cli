@@ -24,7 +24,12 @@ class Runaway extends Error {}
 const runKernelLoop = deps => rawLoop(deps).catch(error => { if (error instanceof Runaway) return 'runaway'; throw error; });
 const { classifyJobResult, checkCitations, evaluateChecks, gitSnapshot, snapshotsEqual } = await load('verdict');
 const { parseDecision, buildDecidePrompt, actionMarker } = await load('plan');
-const { buildContract, DEFAULT_BUDGET } = await load('templates');
+// 這支測的不是選模型：沒寫模型的 fixture 一律明示成同一個模型，和自動選模型上線前的預設相同。
+const EXPLICIT_MODEL = 'gpt-6.1-sol';
+const explicitModels = input => ({ ...input, model: input.model ?? EXPLICIT_MODEL, decideModel: input.decideModel ?? input.model ?? EXPLICIT_MODEL });
+const { buildContract: buildContractRaw, DEFAULT_BUDGET } = await load('templates');
+const buildContract = (input, ...rest) => buildContractRaw(explicitModels(input), ...rest);
+const EXPLICIT_FLAGS = ['--model', EXPLICIT_MODEL, '--decide-model', EXPLICIT_MODEL];
 const { cancelWithoutRunner, aiCliKernelRollback, aiCliKernelStatus, aiCliKernelReleaseCreate, aiCliKernelReleaseRun } = await load('api');
 const { aiCliKernelCreateRelease, aiCliKernelRunRelease } = await load('loop');
 const { aiCliKernelReplayReleases } = await load('replay');
@@ -1946,15 +1951,15 @@ const referenceBody = (prompt, tag) => prompt.match(new RegExp(`<${tag} untruste
   check('L5 memory CLI：revoke', await cli(['memory', 'revoke', id, '--cwd', repo, '--json']) === 0 && JSON.parse(out).status === 'revoked');
   for (const args of [['memory'], ['memory', 'write'], ['memory', 'add'], ['memory', 'promote'], ['memory', 'list', '--text', 'x'], ['memory', 'promote', 'unknown']]) check(`L5 memory CLI：非法輸入拒絕 ${args.join(' ')}`, await cli([...args, '--cwd', repo]) === 1 && err.length > 0);
   for (const args of [['knowledge', 'write'], ['planner', 'write'], ['context', 'run']]) check(`L5 唯讀介面：CLI 不提供遠端寫入或獨立執行 ${args.join(' ')}`, await cli(args) === 1);
-  check('L5 context CLI：start 保存命令不執行且在委任書可見', await cli(['start', '--goal', 'g', '--cwd', repo, '--context-command', 'never-execute-context', '--json']) === 0 && JSON.parse(out).contextCommand === 'never-execute-context' && JSON.parse(out).context === null);
-  check('L5 context CLI：mandate save 沿用選項', await cli(['mandate', 'save', 'memory-context-cli', '--goal', 'g', '--cwd', repo, '--context-command', 'never-execute-context', '--json']) === 0 && JSON.parse(out).input.contextCommand === 'never-execute-context');
+  check('L5 context CLI：start 保存命令不執行且在委任書可見', await cli(['start', '--goal', 'g', '--cwd', repo, ...EXPLICIT_FLAGS, '--context-command', 'never-execute-context', '--json']) === 0 && JSON.parse(out).contextCommand === 'never-execute-context' && JSON.parse(out).context === null);
+  check('L5 context CLI：mandate save 沿用選項', await cli(['mandate', 'save', 'memory-context-cli', '--goal', 'g', '--cwd', repo, ...EXPLICIT_FLAGS, '--context-command', 'never-execute-context', '--json']) === 0 && JSON.parse(out).input.contextCommand === 'never-execute-context');
   const { aiCliKernelMandateApprove, aiCliKernelMandateShow, aiCliKernelMandateDigest } = await load('mandates');
   const approved = aiCliKernelMandateApprove({ name: 'memory-context-cli' });
   const changed = { ...approved, input: { ...approved.input, contextCommand: 'changed-command' } };
   check('L5 context：命令參與範本 digest 不可沿用舊核准', aiCliKernelMandateDigest(changed) !== approved.approval.digest && aiCliKernelMandateShow({ name: approved.name }).input.contextCommand === 'never-execute-context');
   check('L5 context：空值非字串和過長命令拒絕', ['', ' ', 1, 'x'.repeat(8001), 'x\0y'].every(contextCommand => !!failing(buildContract, { goal: 'g', workFolder: WORK, contextCommand })));
   process.env.AI_CLI_KERNEL = 'on';
-  const status = await memoryHandleTool('ai-cli_kernel_start', { goal: 'g', workFolder: repo, contextCommand: 'never-execute-mcp' });
+  const status = await memoryHandleTool('ai-cli_kernel_start', explicitModels({ goal: 'g', workFolder: repo, contextCommand: 'never-execute-mcp' }));
   check('L5 context MCP：通用命令進委任書，不直接執行', status.contextCommand === 'never-execute-mcp' && status.context === null && aiCliKernelToolDefinitions().find(tool => tool.name === 'ai-cli_kernel_start').inputSchema.properties.contextCommand.type === 'string');
   for (const tool of ['knowledge_write', 'planner_session_append', 'ai-cli_kernel_knowledge_write', 'ai-cli_kernel_planner_write', 'ai-cli_kernel_memory_promote', 'ai-cli_kernel_context_run']) check(`L5 唯讀介面：不暴露寫入或直接執行工具 ${tool}`, !!await rejecting(memoryHandleTool(tool, { text: 'payload' })) && !aiCliKernelToolDefinitions().some(item => item.name === tool));
   delete process.env.AI_CLI_KERNEL;
@@ -2090,7 +2095,7 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   const { aiCliKernelHandleTool } = await load('mcp-tools');
   const namesBefore = listRunIds().join();
   check('委任範本：空列表不建立狀態目錄', list().length === 0 && !existsSync(join(kernelStateDir(), 'mandates')));
-  const input = { goal: '  唯讀查核  ', workFolder: WORK };
+  const input = explicitModels({ goal: '  唯讀查核  ', workFolder: WORK });
   const first = save({ name: 'audit', input });
   const file = name => join(kernelStateDir(), 'mandates', `${name}.json`);
   const raw = name => JSON.parse(readFileSync(file(name), 'utf8'));
@@ -2177,9 +2182,9 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   } finally { renameSync(actualDir, linkedDir); }
   let out = '', err = '';
   const cli = async args => { out = ''; err = ''; return runKernelCli(args, { stdout: text => out += text, stderr: text => err += text }); };
-  const options = ['--goal', 'CLI goal', '--cwd', WORK, '--max-runs-per-day', '2', '--max-tokens-per-day', '123', '--json'];
+  const options = ['--goal', 'CLI goal', '--cwd', WORK, ...EXPLICIT_FLAGS, '--max-runs-per-day', '2', '--max-tokens-per-day', '123', '--json'];
   check('委任範本 CLI：save JSON 與 start 共用輸入', await cli(['mandate', 'save', 'cli-audit', ...options]) === 0 && JSON.parse(out).limits.maxInputTokensPerDay === 123);
-  check('委任範本 CLI：develop 完整選項不執行指令', await cli(['mandate', 'save', 'cli-dev', '--goal', 'dev', '--cwd', repo, '--template', 'develop', '--test', 'never-run-test', '--setup', 'never-run-setup', '--allow-path', 'src', '--worker-models', 'sonnet', '--mandate-hours', '2', '--checkpoint', 'local', '--max-test-failures', '2', '--json']) === 0 && JSON.parse(out).input.testCommand === 'never-run-test' && JSON.parse(out).input.setupCommand === 'never-run-setup' && JSON.parse(out).input.allowedPaths.join() === 'src' && JSON.parse(out).input.budget.maxTestFailures === 2 && JSON.parse(out).input.mandateHours === 2);
+  check('委任範本 CLI：develop 完整選項不執行指令', await cli(['mandate', 'save', 'cli-dev', '--goal', 'dev', '--cwd', repo, ...EXPLICIT_FLAGS, '--template', 'develop', '--test', 'never-run-test', '--setup', 'never-run-setup', '--allow-path', 'src', '--worker-models', 'sonnet', '--mandate-hours', '2', '--checkpoint', 'local', '--max-test-failures', '2', '--json']) === 0 && JSON.parse(out).input.testCommand === 'never-run-test' && JSON.parse(out).input.setupCommand === 'never-run-setup' && JSON.parse(out).input.allowedPaths.join() === 'src' && JSON.parse(out).input.budget.maxTestFailures === 2 && JSON.parse(out).input.mandateHours === 2);
   check('委任範本 CLI：approve JSON', await cli(['mandate', 'approve', 'cli-audit', '--days', '2', '--json']) === 0 && JSON.parse(out).status === 'approved');
   check('委任範本 CLI：show 文字含完整輸入與期限', await cli(['mandate', 'show', 'cli-audit']) === 0 && out.includes('CLI goal') && out.includes('expiresAt') && out.includes('approved'));
   check('委任範本 CLI：list JSON', await cli(['mandate', 'list', '--json']) === 0 && JSON.parse(out).some(m => m.name === 'cli-audit'));
@@ -2210,7 +2215,7 @@ function fakeContext(output = 'read-only-context', exitCode = 0, extra = {}) {
   const mandatePath = name => join(kernelStateDir(), 'mandates', `${name}.json`);
   const ledger = () => readFileSync(ledgerPath, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
   const clear = async () => { rmSync(ledgerPath, { force: true }); if (readActiveRun()) await releaseActiveLock(readActiveRun()); };
-  const input = { goal: 'trigger test', workFolder: WORK, allowUnverifiedBoundary: true };
+  const input = explicitModels({ goal: 'trigger test', workFolder: WORK, allowUnverifiedBoundary: true });
   const saveApproved = (name = 'trigger-audit', limits = {}, overrides = {}) => {
     save({ name, input: { ...input, ...overrides }, maxRunsPerDay: 10, maxInputTokensPerDay: 1000, ...limits });
     return approve({ name, acknowledgeUnisolated: true });
@@ -2627,7 +2632,7 @@ const { aiCliKernelArchiveList: archiveList, aiCliKernelArchiveShow: archiveShow
   // F1：檢查之後才撤銷或關掉。
   const { aiCliKernelMandateSave: save, aiCliKernelMandateApprove: approve, aiCliKernelMandateRevoke: revoke, aiCliKernelTrigger: trigger, aiCliKernelTriggersSetEnabled: setEnabled } = await load('api');
   const repo = newRepo();
-  const input = { goal: '檢查', workFolder: repo, template: 'develop', testCommand: 'node -e "0"', checkpoint: 'local' };
+  const input = explicitModels({ goal: '檢查', workFolder: repo, template: 'develop', testCommand: 'node -e "0"', checkpoint: 'local' });
   const fresh = () => { save({ name: 'recheck', input, maxRunsPerDay: 99 }); approve({ name: 'recheck', acknowledgeUnisolated: true }); setEnabled(true); };
   let launches = 0;
   const launch = async () => { launches += 1; };

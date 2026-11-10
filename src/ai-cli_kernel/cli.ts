@@ -12,6 +12,7 @@ import {
   aiCliKernelStart, aiCliKernelStatus, aiCliKernelTemplates, aiCliKernelWait, aiCliKernelRollback, aiCliKernelReleaseCreate, aiCliKernelReleaseRun, type KernelRunStatus,
 } from './api.js';
 import type { KernelStartInput } from './templates.js';
+import { describeSelection } from './model-select.js';
 import type { KernelMandateView } from './mandates.js';
 import type { KernelScheduleDeps } from './schedule.js';
 
@@ -28,7 +29,13 @@ readonly-audit（預設）只讀不改。develop 會在獨立的 worktree 和分
   start --goal <文字> --cwd <路徑>       建立委任書，先不執行
       [--goal-file <檔案>] [--template readonly-audit|develop]
       [--model <模型>] [--effort <等級>] [--decide-model <模型>] [--decide-effort <等級>]
-      [--worker-models <a,b>]            另外允許 decide 挑選的 worker 模型
+                                         模型不給或寫 auto＝依週額度與難度自動選（剩不到 25% 或
+                                         量不到的那家不選；都不合格就不建立）。指名就照指名，不看額度
+      [--difficulty routine|elevated|critical]
+                                         自動選模型的難度上限；不給時 readonly-audit 是 routine、
+                                         develop 是 elevated（寫入步驟）
+      [--worker-models <a,b>]            指名 --model 時：另外允許 decide 挑選的 worker 模型；
+                                         自動選時：候選池只留清單內的模型
       [--max-steps <數>] [--max-decides <數>] [--max-minutes <數>] [--max-tokens <數>]
       [--allow-unverified]               探針沒過也照跑，標籤會寫「未驗證」
       [--context-command <唯讀指令>]     核准後開工前讀一次外部資料；以本人權限執行，不受 AI hook 限制
@@ -143,6 +150,7 @@ function startInput(flags: Map<string, string | true>): KernelStartInput {
       checkpoint: stringFlag(flags, 'checkpoint'),
       baseRef: stringFlag(flags, 'base-ref'),
       contextCommand: stringFlag(flags, 'context-command'),
+      difficulty: stringFlag(flags, 'difficulty'),
     }),
   };
 }
@@ -166,6 +174,8 @@ export function formatStatus(status: KernelRunStatus): string {
     ...(status.contextCommand ? [`外部資料 ${status.contextCommand}（以本人權限執行，不受 AI hook 限制；請只接唯讀命令）`, ...(status.context ? [`讀取結果 ${status.context.ok ? '成功' : `失敗（不阻擋開工）：${status.context.detail}`}`] : [])] : []),
     `模型     決策 ${status.models.decide.model}（${status.models.decide.effort}）、worker ${status.models.worker.model}（${status.models.worker.effort}）`,
     ...(status.models.allowedWorkers.length > 1 ? [`可用模型 ${status.models.allowedWorkers.join('、')}`] : []),
+    // 自動選模型時把「選了什麼、為什麼」印出來，核准的人看得到。明示模型（含舊委任書）沒有這一段。
+    ...(status.modelSelection?.mode === 'auto' ? describeSelection(status.modelSelection).map(line => `${line.label.padEnd(line.label === 'effort' ? 9 : 9 - line.label.length)}${line.text}`) : []),
     `權限     ${status.boundaryLabel}${Object.keys(status.boundary).length ? `（${Object.entries(status.boundary).map(([agent, state]) => `${agent}: ${state}`).join('、')}）` : ''}`,
     ...(status.develop ? [
       `來源     ${status.develop.repoRoot}（這裡不會被改動）`,
@@ -278,7 +288,7 @@ export async function runKernelCli(argv: string[], io: Io, deps: { schedule?: Ke
         const [operation, name] = positionals;
         if (!['save', 'approve', 'list', 'show', 'revoke'].includes(operation) ||
           positionals.length !== (operation === 'list' ? 1 : 2)) throw new Error('用法：mandate save|approve|show|revoke <name>，或 mandate list');
-        const startFlags = ['goal', 'goal-file', 'cwd', 'template', 'model', 'effort', 'decide-model', 'decide-effort', 'worker-models', 'test', 'setup', 'allow-path', 'mandate-hours', 'checkpoint', 'max-steps', 'max-decides', 'max-minutes', 'max-tokens', 'max-test-failures', 'allow-unverified', 'context-command'];
+        const startFlags = ['goal', 'goal-file', 'cwd', 'template', 'model', 'effort', 'decide-model', 'decide-effort', 'difficulty', 'worker-models', 'test', 'setup', 'allow-path', 'mandate-hours', 'checkpoint', 'max-steps', 'max-decides', 'max-minutes', 'max-tokens', 'max-test-failures', 'allow-unverified', 'context-command'];
         const allowed = operation === 'save' ? [...startFlags, 'max-runs-per-day', 'max-tokens-per-day', 'json']
           : operation === 'approve' ? ['acknowledge-unisolated', 'days', 'json'] : ['json'];
         for (const flag of flags.keys()) if (!allowed.includes(flag)) throw new Error(`mandate ${operation} 不接受 --${flag}`);

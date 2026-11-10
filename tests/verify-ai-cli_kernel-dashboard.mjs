@@ -461,7 +461,7 @@ await test('new-tab worker 不繞過，非 Windows Terminal、wt 缺失、入口
 });
 await test('真實 CLI actions JSON 與 dashboard launcher 檢查次序', async () => {
   const api = await load('api');
-  const created = await api.aiCliKernelStart({ goal: 'dashboard actions JSON fixture', workFolder: ROOT });
+  const created = await api.aiCliKernelStart({ goal: 'dashboard actions JSON fixture', workFolder: ROOT, model: 'gpt-6.1-sol', decideModel: 'gpt-6.1-sol' });
   let stdout = '', stderr = ''; const io = { stdout:s=>{stdout+=s;}, stderr:s=>{stderr+=s;} };
   assert.equal(await runKernelCli(['actions',created.runId,'--json'],io),0);
   const actions = JSON.parse(stdout); assert.equal(actions[0].id,'approve');

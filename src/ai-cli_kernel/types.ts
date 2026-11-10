@@ -24,6 +24,39 @@ export function isTerminalState(state: RunState): state is TerminalState {
 
 export interface ModelChoice { model: string; effort?: string }
 
+/** 任務難度。呼叫端填的是天花板；decide 不能往上調。 */
+export type KernelDifficulty = 'routine' | 'elevated' | 'critical';
+
+/** 週額度剩餘百分比的快照。null＝量不到（unknown），不是「還夠」。fable 是 Fable 自己的週額度。 */
+export interface QuotaSnapshot { claude: number | null; codex: number | null; fable: number | null; readAt: string }
+
+/** 凍結池裡的一筆候選。level 是它所屬的難度；needsFable＝另外要看 Fable 自己的週額度；fallback＝沒有額度資料的備援。 */
+export interface PoolEntry { model: string; effort: string; family: string; level: KernelDifficulty; needsFable?: true; fallback?: true; reason?: string }
+
+/**
+ * 自動選模型的紀錄。寫進委任書，核准時看得到「選了什麼、為什麼」，digest 也涵蓋它。
+ * 沒有這一格的委任書（含所有舊的）一律是明示：行為和以前一樣。
+ */
+export interface ModelSelection {
+  mode: 'auto' | 'explicit';
+  /** 哪一邊是自動選的。明示的那一邊不看額度、不改派。 */
+  auto: { worker: boolean; decide: boolean };
+  /** 呼叫端明示了 worker effort：池內每一筆都用它，decide 不能在步驟上改。 */
+  workerEffortExplicit?: true;
+  difficulty: KernelDifficulty;
+  difficultySource: 'caller' | 'template';
+  /** 開工當下的額度與讀取時間。 */
+  quotas: QuotaSnapshot;
+  /** 合格門檻（剩餘百分比）。 */
+  minRemainingPercent: number;
+  /** 開工時凍結的候選池，順序就是優先序。之後只能在這裡面選，不會再加別人。 */
+  pool: PoolEntry[];
+  selected: { decide: ModelChoice; worker: ModelChoice; allowedWorkerModels: string[] };
+  excluded: Array<{ model: string; effort: string; level: KernelDifficulty; reason: string }>;
+  /** 每一級難度的 effort 上限。 */
+  effortCeilings: Record<KernelDifficulty, string>;
+}
+
 export interface KernelBudget {
   /** 最多派幾個 worker（有開始執行才算；確定沒啟動的會退回）。 */
   maxWorkerSteps: number;
@@ -153,10 +186,22 @@ export interface KernelContract {
   allowUnverifiedBoundary: boolean;
   /** 只有 develop 範本才有。沒有這一格的 run 不可能派出能寫檔的 worker。 */
   develop?: DevelopSpec;
+  /** 自動選模型才有。沒有這一格就是明示模型，舊委任書都屬於這種。 */
+  modelSelection?: ModelSelection;
   createdAt: string;
 }
 
-export interface PlanStep { id: string; title: string; prompt: string; model?: string; mode?: StepMode }
+/** effort 只有自動選模型的委任書能在步驟上指定，而且不能超過該步驟難度的上限。 */
+export interface PlanStep { id: string; title: string; prompt: string; model?: string; mode?: StepMode; effort?: string }
+
+/** 派工前在凍結池內改派的紀錄，跟著 action_intent 落盤。 */
+export interface DispatchReroute {
+  fromModel: string;
+  fromEffort?: string;
+  reason: string;
+  /** 改派當下的額度。 */
+  quotas: QuotaSnapshot;
+}
 
 export interface ActionSpec {
   actionId: string;
@@ -173,6 +218,8 @@ export interface ActionSpec {
   cwd?: string;
   /** 派工當下工作目錄是乾淨的。唯讀步驟跑完才分得出是不是它改的。 */
   cleanAtStart?: boolean;
+  /** 自動選模型：原定模型那家額度不足，改派池內另一個合格模型時才有。 */
+  reroute?: DispatchReroute;
 }
 
 /** startedAt 是 job 真正啟動的時間。接回時用它算時限，不會重新起算。 */
@@ -206,7 +253,7 @@ export const NEEDS_HUMAN_FAILURES: readonly FailureClass[] = ['rate_limited', 'q
 export interface StopDecision { state: 'waiting_human' | 'failed'; reason: string; detail: string }
 
 export type KernelEventBody =
-  | { type: 'created'; contractDigest: string }
+  | { type: 'created'; contractDigest: string; modelSelection?: { mode: 'auto'; difficulty: KernelDifficulty; decide: ModelChoice; worker: ModelChoice; allowedWorkerModels: string[]; quotas: QuotaSnapshot } }
   | { type: 'approved'; contractDigest: string; kind: 'contract' | 'continue'; note?: string; overrides?: string[] }
   | { type: 'runner_started'; pid: number; versionId: string; token: string }
   | { type: 'baseline'; git: GitSnapshot | null }

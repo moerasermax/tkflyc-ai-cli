@@ -5,11 +5,12 @@ import { existsSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { KNOWN_BAD_MODELS, isKnownModelTarget, isRemovedModel, removedModelMessage, resolveAgentIdForModel, resolveModelAlias } from '../models/catalog.js';
 import { ALLOWED_REASONING_EFFORTS } from '../core/reasoning.js';
-import { KERNEL_SCHEMA_VERSION, type DevelopSpec, type KernelBudget, type KernelContract } from './types.js';
+import { KERNEL_SCHEMA_VERSION, type DevelopSpec, type KernelBudget, type KernelContract, type ModelChoice, type ModelSelection, type QuotaSnapshot } from './types.js';
+import { autoPlan, isAutoModel, parseDifficulty, selectModels } from './model-select.js';
 import { aiCliKernelCheckpointSpec, aiCliKernelResolveBaseRef, describeRepo, normalizeAllowedPaths } from './workspace.js';
 import { hasProbeEvidenceFormat, probeResultLabel } from './probe.js';
 
-export const DEFAULT_MODEL = 'gpt-6.1-sol';
+/** 明示模型但沒給 effort 時用它。沒指定模型時不再有固定的預設模型，改由 model-select.ts 依額度與難度選。 */
 export const DEFAULT_EFFORT = 'medium';
 
 export const DEFAULT_BUDGET: KernelBudget = {
@@ -28,13 +29,17 @@ export interface KernelStartInput {
   goal: string;
   workFolder: string;
   template?: string;
+  /** 不給或寫 auto＝依額度與難度自動選。指名就照指名，不看額度。 */
   model?: string;
   effort?: string;
+  /** 同 model：不給或寫 auto＝自動。 */
   decideModel?: string;
   decideEffort?: string;
+  /** 難度上限 routine／elevated／critical，只影響自動選模型。不給時 readonly-audit 是 routine、develop 是 elevated。 */
+  difficulty?: string;
   budget?: Partial<KernelBudget>;
   allowUnverifiedBoundary?: boolean;
-  /** 另外允許 decide 挑選的 worker 模型。model 那個一定在裡面。 */
+  /** 明示 model 時：另外允許 decide 挑選的 worker 模型，model 那個一定在裡面。自動選時：候選池先和它相交，交集空就拒絕。 */
   workerModels?: string[];
   /** develop 範本必填：kernel 自己跑的驗收指令。 */
   testCommand?: string;
@@ -147,7 +152,24 @@ function buildDevelopSpec(input: KernelStartInput, workFolder: string, now: Date
   };
 }
 
-export function buildContract(input: KernelStartInput, now = new Date(), context?: BuildContractContext): KernelContract {
+/** 這份輸入建立委任書時要不要先讀額度：有一邊模型要自動選才需要。 */
+export function needsQuotaSnapshot(input: KernelStartInput): boolean {
+  return autoPlan({
+    template: input.template ?? 'readonly-audit', difficulty: parseDifficulty(input.difficulty),
+    workerModel: isAutoModel(input.model) ? undefined : input.model, decideModel: isAutoModel(input.decideModel) ? undefined : input.decideModel,
+  }).needsQuotas;
+}
+
+/** 候選表裡的名稱也要過同一道檢查；不能派的回原因，由選擇邏輯記成排除。 */
+function unusableReason(model: string): string | null {
+  try { return assertDispatchableModel(model) === model ? null : `${model} 在這台機器被設定成別的模型的別名`; }
+  catch (error) { return (error as Error).message; }
+}
+
+/**
+ * quotas 是呼叫端先讀好的額度快照；只有模型要自動選時才用得到。這個函式本身不查額度。
+ */
+export function buildContract(input: KernelStartInput, now = new Date(), context?: BuildContractContext, quotas?: QuotaSnapshot): KernelContract {
   const templateName = input.template ?? 'readonly-audit';
   if (!Object.hasOwn(TEMPLATES, templateName)) throw new Error(`沒有這個範本：${templateName}。目前可用：${Object.keys(TEMPLATES).join('、')}`);
   const template = TEMPLATES[templateName as KernelTemplateName];
@@ -163,25 +185,42 @@ export function buildContract(input: KernelStartInput, now = new Date(), context
   if (!isDevelop && (input.baseRef !== undefined || input.checkpoint !== undefined || input.testCommand !== undefined || input.setupCommand !== undefined || input.allowedPaths !== undefined || input.mandateHours !== undefined)) {
     throw new Error(`baseRef、testCommand、setupCommand、allowedPaths、mandateHours 只有 develop 範本能用，${templateName} 不會改檔`);
   }
-  const workerModel = assertDispatchableModel(input.model ?? DEFAULT_MODEL);
-  const decideModel = assertDispatchableModel(input.decideModel ?? input.model ?? DEFAULT_MODEL);
-  // effort 一律明確帶上：gpt-6.1-sol 的 CLI 預設是 low，省略不等於 medium。
-  const workerEffort = input.effort ?? DEFAULT_EFFORT;
-  const decideEffort = input.decideEffort ?? input.effort ?? DEFAULT_EFFORT;
-  assertEffort(workerEffort); assertEffort(decideEffort);
+  const difficulty = parseDifficulty(input.difficulty);
+  // 指名的模型照指名：不看額度，也不會被自動改掉。沒給或寫 auto 才自動選。
+  const explicitWorker = isAutoModel(input.model) ? undefined : assertDispatchableModel(input.model!);
+  const explicitDecide = isAutoModel(input.decideModel) ? undefined : assertDispatchableModel(input.decideModel!);
+  if (input.effort !== undefined) assertEffort(input.effort);
+  if (input.decideEffort !== undefined) assertEffort(input.decideEffort);
   const budget = { ...DEFAULT_BUDGET, ...(isDevelop ? DEVELOP_BUDGET : {}), ...input.budget };
   for (const [name, value] of Object.entries(budget)) positive(name, value);
   const checks = template.build();
-  const allowedWorkerModels = [...new Set([workerModel, ...(input.workerModels ?? []).map(assertDispatchableModel)])];
+  const workerModels = input.workerModels?.map(assertDispatchableModel);
+  const plan = autoPlan({ template: templateName, difficulty, workerModel: explicitWorker, decideModel: explicitDecide });
+  let worker: ModelChoice, decide: ModelChoice, allowedWorkerModels: string[];
+  let modelSelection: ModelSelection | undefined;
+  if (!plan.needsQuotas) {
+    // effort 一律明確帶上：gpt-6.1-sol 的 CLI 預設是 low，省略不等於 medium。
+    worker = { model: explicitWorker!, effort: input.effort ?? DEFAULT_EFFORT };
+    decide = { model: explicitDecide ?? explicitWorker!, effort: input.decideEffort ?? input.effort ?? DEFAULT_EFFORT };
+    allowedWorkerModels = [...new Set([explicitWorker!, ...(workerModels ?? [])])];
+  } else {
+    if (!quotas) throw new Error('沒有指定模型時要依額度自動選，建立委任書的呼叫端必須先讀額度快照（ai-cli kernel start 與主動觸發會自己讀）；或明確指定 model 與 decideModel');
+    const selected = selectModels({
+      template: templateName, difficulty, workerModel: explicitWorker, workerEffort: input.effort,
+      decideModel: explicitDecide, decideEffort: input.decideEffort, workerModels, minQuotaRemainingPercent: budget.minQuotaRemainingPercent,
+    }, quotas, { usable: unusableReason });
+    ({ worker, decide, allowedWorkerModels, modelSelection } = selected);
+  }
   return {
     schemaVersion: KERNEL_SCHEMA_VERSION, template: templateName, goal, workFolder,
     ...(input.contextCommand !== undefined ? { contextCommand: input.contextCommand.trim() } : {}),
-    decide: { model: decideModel, effort: decideEffort }, worker: { model: workerModel, effort: workerEffort },
+    decide, worker,
     allowedWorkerModels, budget, stepChecks: checks.stepChecks, acceptance: checks.acceptance,
     reportInstructions: template.reportInstructions,
     // 只有字面值 true 才算，比照 exec 的 authority：未知值不能當成沒寫。
     allowUnverifiedBoundary: input.allowUnverifiedBoundary === true,
     ...(isDevelop ? { develop: buildDevelopSpec(input, workFolder, now, allowedWorkerModels, context) } : {}),
+    ...(modelSelection ? { modelSelection } : {}),
     createdAt: now.toISOString(),
   };
 }

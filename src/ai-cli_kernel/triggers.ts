@@ -6,8 +6,10 @@ import { atomicWrite, kernelRunDir, kernelStateDir, newRunId, RunStore } from '.
 import { aiCliKernelMandateShow } from './mandates.js';
 import { replayJournal } from './replay.js';
 import { AdmissionBlocked } from './admission.js';
-import { agentForModel } from './runtime.js';
-import { buildContract } from './templates.js';
+import { agentForModel, readQuota } from './runtime.js';
+import { buildContract, needsQuotaSnapshot } from './templates.js';
+import { NoEligibleModelError, readQuotaSnapshot } from './model-select.js';
+import type { KernelContract } from './types.js';
 import { describeRepo } from './workspace.js';
 
 export interface KernelTriggerResult {
@@ -17,6 +19,8 @@ interface TriggerRecord extends KernelTriggerResult { at: string; day: string; e
 export interface KernelTriggerDeps {
   now(): number;
   approveAndStart(store: RunStore, note: string, beforeStart: () => void): Promise<unknown>;
+  /** 週額度剩餘；不給就用真的查詢。只有範本的模型要自動選時才會讀。 */
+  quota?(agent: string): Promise<number | null>;
   /** 測試用：在最後一次授權檢查之前插入事件。 */
   beforeStart?(): void;
 }
@@ -113,10 +117,20 @@ export async function aiCliKernelRunTrigger(name: string, deps: KernelTriggerDep
     const usage = dailyUsage(name, aiCliKernelTriggerDay(now));
     if (usage.runs >= mandate.limits.maxRunsPerDay) return record(result('skipped', 'daily_runs_limit'));
     if (usage.tokens >= mandate.limits.maxInputTokensPerDay) return record(result('skipped', 'daily_tokens_limit'));
+    // 範本存的是 auto 時，每次觸發都依當下額度重新選；範本裡明示的模型不重算。
+    const quotas = needsQuotaSnapshot(mandate.input) ? await readQuotaSnapshot(deps.quota ?? readQuota, () => new Date(now)) : undefined;
     runId = newRunId(new Date(now));
-    const contract = buildContract({ ...mandate.input, budget: { ...mandate.input.budget,
-      maxInputTokens: Math.min(mandate.input.budget?.maxInputTokens ?? Infinity, mandate.limits.maxInputTokensPerDay - usage.tokens),
-    } }, new Date(now), { runId, worktree: join(kernelRunDir(runId), 'wt') });
+    let contract: KernelContract;
+    try {
+      contract = buildContract({ ...mandate.input, budget: { ...mandate.input.budget,
+        maxInputTokens: Math.min(mandate.input.budget?.maxInputTokens ?? Infinity, mandate.limits.maxInputTokensPerDay - usage.tokens),
+      } }, new Date(now), { runId, worktree: join(kernelRunDir(runId), 'wt') }, quotas);
+    } catch (error) {
+      // 沒有合格的模型：不建立 run、不佔名額，記下原因（含各家剩餘）就結束。
+      if (!(error instanceof NoEligibleModelError)) throw error;
+      runId = null;
+      return record(result('skipped', 'no_eligible_model', error.message));
+    }
     contract.origin = { kind: 'trigger', mandate: name, digest: mandate.digest };
     if (contract.develop?.checkpoint?.mode === 'off') { runId = null; return record(result('skipped', 'checkpoint_off_forbidden')); }
     // Create before admission: a crash can never leave a slot pointing at a missing run.

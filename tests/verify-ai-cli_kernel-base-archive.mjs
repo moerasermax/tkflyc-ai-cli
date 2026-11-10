@@ -15,7 +15,12 @@ const stub = join(ROOT, 'tools/stubs', process.platform === 'win32' ? 'kernel-ag
 process.env.CODEX_CLI_NAME = stub; process.env.CLAUDE_CLI_NAME = stub; process.env.AI_CLI_KERNEL = 'on';
 const api = await load('api');
 const { RunStore, kernelRunDir, newRunId, listRunIds } = await load('journal');
-const { buildContract } = await load('templates');
+// 這支測的不是選模型：沒寫模型的 fixture 一律明示成同一個模型，和自動選模型上線前的預設相同。
+const EXPLICIT_MODEL = 'gpt-6.1-sol';
+const explicitModels = input => ({ ...input, model: input.model ?? EXPLICIT_MODEL, decideModel: input.decideModel ?? input.model ?? EXPLICIT_MODEL });
+const { buildContract: buildContractRaw } = await load('templates');
+const buildContract = (input, ...rest) => buildContractRaw(explicitModels(input), ...rest);
+const EXPLICIT_FLAGS = ['--model', EXPLICIT_MODEL, '--decide-model', EXPLICIT_MODEL];
 const { realWorkspace, aiCliKernelResolveBaseRef, aiCliKernelRepoIdentity } = await load('workspace');
 const { runKernelCli, formatStatus } = await load('cli');
 const { aiCliKernelHandleTool: mcp, aiCliKernelToolDefinitions } = await load('mcp-tools');
@@ -41,7 +46,7 @@ async function check(name, fn) {
   try { await fn(); passed++; console.log(`PASS ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}\n${e.stack}`); }
 }
 async function start(folder, input = {}) {
-  const status = await api.aiCliKernelStart({ goal: 'B fixture', workFolder: folder, template: 'develop', testCommand: 'fixture-test', checkpoint: 'local', ...input });
+  const status = await api.aiCliKernelStart(explicitModels({ goal: 'B fixture', workFolder: folder, template: 'develop', testCommand: 'fixture-test', checkpoint: 'local', ...input }));
   const store = new RunStore(kernelRunDir(status.runId)); return { status, store, contract: store.readContract() };
 }
 async function cli(args) {
@@ -133,9 +138,9 @@ try {
     for (const ref of ['', ' ', '--help', '-c', 'topic\0x', 'topic\n', 'missing', 'HEAD~1', 'topic^{commit}', tree, blob, tagObject, 'light-tag', 'annotated-tag', '0'.repeat(12), '0'.repeat(40), 3, null]) assert.throws(() => aiCliKernelResolveBaseRef(r.folder, ref), undefined, String(ref));
     writeFileSync(join(other.folder, 'foreign.txt'), 'foreign\n'); git(other.folder, 'add', '.'); git(other.folder, 'commit', '-qm', 'foreign');
     assert.throws(() => aiCliKernelResolveBaseRef(r.folder, git(other.folder, 'rev-parse', 'HEAD')));
-    await assert.rejects(api.aiCliKernelStart({ goal: 'readonly', workFolder: r.folder, baseRef: 'topic' }), /只有 develop/);
-    assert.equal((await cli(['start', '--goal', 'bad', '--cwd', r.folder, '--base-ref', 'topic'])).code, 1);
-    await assert.rejects(mcp('ai-cli_kernel_start', { goal: 'bad', workFolder: r.folder, template: 'develop', testCommand: 'fake', baseRef: 3 }));
+    await assert.rejects(api.aiCliKernelStart(explicitModels({ goal: 'readonly', workFolder: r.folder, baseRef: 'topic' })), /只有 develop/);
+    assert.equal((await cli(['start', '--goal', 'bad', '--cwd', r.folder, ...EXPLICIT_FLAGS, '--base-ref', 'topic'])).code, 1);
+    await assert.rejects(mcp('ai-cli_kernel_start', explicitModels({ goal: 'bad', workFolder: r.folder, template: 'develop', testCommand: 'fake', baseRef: 3 })));
   });
   const selected = await start(r.folder, { baseRef: 'topic' });
   await check('B2 委任書顯示輸入與解析 commit，worktree／回復點綁 commit，主目錄保持原樣', async () => {
@@ -147,9 +152,9 @@ try {
     realWorkspace.prepare(spec); assert.equal(git(spec.worktree, 'rev-parse', 'HEAD'), r.base);
     assert.ok(!existsSync(join(spec.worktree, 'main.txt'))); assert.ok(!existsSync(join(spec.worktree, 'uncommitted.txt')));
     assert.equal(git(r.folder, 'rev-parse', 'HEAD'), r.head); assert.ok(existsSync(join(r.folder, 'uncommitted.txt')));
-    const fromCli = await cli(['start', '--goal', 'cli', '--cwd', r.folder, '--template', 'develop', '--test', 'fake', '--base-ref', r.base, '--json']);
+    const fromCli = await cli(['start', '--goal', 'cli', '--cwd', r.folder, ...EXPLICIT_FLAGS, '--template', 'develop', '--test', 'fake', '--base-ref', r.base, '--json']);
     assert.equal(fromCli.code, 0, fromCli.err); assert.equal(JSON.parse(fromCli.out).develop.baseCommit, r.base); assert.equal(JSON.parse(fromCli.out).develop.baseRef, r.base);
-    const fromMcp = await mcp('ai-cli_kernel_start', { goal: 'mcp', workFolder: r.folder, template: 'develop', testCommand: 'fake', baseRef: 'topic' });
+    const fromMcp = await mcp('ai-cli_kernel_start', explicitModels({ goal: 'mcp', workFolder: r.folder, template: 'develop', testCommand: 'fake', baseRef: 'topic' }));
     assert.equal(fromMcp.develop.baseCommit, r.base); assert.equal(fromMcp.develop.baseRef, 'topic');
   });
   await check('B2 分支在首次 runner 前移動，ref 閘仍綁建立時 commit', async () => {

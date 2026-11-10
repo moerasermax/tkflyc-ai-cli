@@ -19,14 +19,15 @@ import { classifyJobResult, evaluateChecks, snapshotsEqual } from './verdict.js'
 import type { RunStore } from './journal.js';
 import { outOfScope } from './workspace.js';
 import { kernelTestInventory } from './evidence.js';
-import { workDirOf, type ActionOutcome, type ActionSpec, type BoundaryStatus, type FailureClass, type GitSnapshot, type JobRef, type KernelContract, type KernelEventBody, type KernelExecutor, type PlanStep, type RawJobResult, type RunState, type WorkspaceOps, type WorkspaceState } from './types.js';
+import { workDirOf, type ActionOutcome, type ActionSpec, type BoundaryStatus, type FailureClass, type GitSnapshot, type JobRef, type KernelContract, type KernelEventBody, type KernelExecutor, type PlanStep, type QuotaSnapshot, type RawJobResult, type RunState, type WorkspaceOps, type WorkspaceState } from './types.js';
+import { autoSelection, plannedDispatch, readQuotaSnapshot, selectDispatch, type DispatchRequest } from './model-select.js';
 
 export interface KernelLoopDeps {
   store: RunStore;
   contract: KernelContract;
   executor: KernelExecutor;
   boundary(agent: string): Promise<BoundaryStatus>;
-  /** 週額度剩餘百分比；量不到回 null。 */
+  /** 週額度剩餘百分比；量不到回 null。agent 也可能是 FABLE_QUOTA_KEY（Fable 自己的週額度），只有自動選模型的委任書會問。 */
   quota(agent: string): Promise<number | null>;
   agentFor(model: string): string;
   versionId(): string;
@@ -645,6 +646,30 @@ ${stat}
     setState('completed', 'delivered', warnings.join(' '));
   };
 
+  /** 自動選模型的委任書才有；明示的（含所有舊委任書）是 null，下面的改派整段不會動到它們。 */
+  const selection = autoSelection(contract);
+  const quotaSnapshot = (): Promise<QuotaSnapshot> => readQuotaSnapshot(agent => deps.quota(agent), () => new Date(deps.now()));
+  const requestFor = (step?: PlanStep): DispatchRequest => step
+    ? { kind: 'worker', mode: step.mode ?? 'read', ...(step.model !== undefined ? { model: step.model } : {}), ...(step.effort !== undefined ? { effort: step.effort } : {}) }
+    : { kind: 'decide' };
+  /** routeDispatch 算好的「選定模型目前剩餘」，交給同一個動作的派工閘用（Fable 要看兩個額度，閘自己查不到）。 */
+  let routedQuota: { actionId: string; remaining: number | null } | null = null;
+  /**
+   * 自動選的那一邊，派工前先看額度：原定模型那家不足、而凍結池內有目前合格的模型，就在池內改派，
+   * 原模型、當時剩餘與理由跟著 action_intent 落盤。池內沒有合格的就照原定，由下面的閘照舊停下等人。
+   */
+  const routeDispatch = async (spec: ActionSpec, request: DispatchRequest, known?: QuotaSnapshot): Promise<ActionSpec> => {
+    routedQuota = null;
+    if (!selection) return spec;
+    const view = read();
+    const unknownExhausted = view.counters.quotaUnknownDispatches >= contract.budget.quotaUnknownMaxDispatches && !view.overrides.has('quota_unknown');
+    const choice = selectDispatch(contract, known ?? await quotaSnapshot(), request, { unknownExhausted });
+    if (!choice.auto) return spec;
+    routedQuota = { actionId: spec.actionId, remaining: choice.remaining ?? null };
+    if (!choice.reroute) return spec;
+    return { ...spec, model: choice.model, ...(choice.effort ? { effort: choice.effort } : {}), reroute: choice.reroute };
+  };
+
   /** 閘：派工前最後一關。回傳 false 表示暫停。 */
   const gateDispatch = async (spec: ActionSpec): Promise<boolean> => {
     const view = read();
@@ -677,7 +702,8 @@ ${stat}
         return false;
       }
     }
-    const remaining = await deps.quota(agent).catch(() => null);
+    const routed = routedQuota as { actionId: string; remaining: number | null } | null;
+    const remaining = routed?.actionId === spec.actionId ? routed.remaining : await deps.quota(agent).catch(() => null);
     if (remaining === null) {
       // 未知不等於還夠：只能在委任書事先核准的保守上限內繼續。
       if (view.counters.quotaUnknownDispatches >= contract.budget.quotaUnknownMaxDispatches && !view.overrides.has('quota_unknown')) {
@@ -692,7 +718,8 @@ ${stat}
     return true;
   };
 
-  const dispatch = async (spec: ActionSpec): Promise<boolean> => {
+  const dispatch = async (planned: ActionSpec, request: DispatchRequest, quotas?: QuotaSnapshot): Promise<boolean> => {
+    const spec = await routeDispatch(planned, request, quotas);
     if (!await gateDispatch(spec)) return false;
     // 探針和額度查詢可能花掉不少時間，派工前再確認一次：這段時間可能已經被取消或超時。
     const fresh = read();
@@ -711,20 +738,22 @@ ${stat}
     return waitAndRecord(spec, job, deps.now());
   };
 
-  const makeSpec = (view: RunView, kind: 'decide' | 'worker', step?: PlanStep): ActionSpec => {
+  const makeSpec = (view: RunView, kind: 'decide' | 'worker', step?: PlanStep, quotas?: QuotaSnapshot): ActionSpec => {
     const actionId = `a${view.actions.size + 1}`;
     const marker = actionMarker(store.runId, actionId);
     const placement = develop ? { cwd: workDir } : {};
     if (kind === 'decide') {
       const context = view.context?.ok && view.context.outputFile ? store.readOutput(view.context.outputFile) : undefined;
-      return { actionId, kind, model: contract.decide.model, ...(contract.decide.effort ? { effort: contract.decide.effort } : {}), marker, prompt: buildDecidePrompt(contract, view, marker, deps.now(), { memories: deps.memory?.read(), paths: deps.memory?.paths, context }), ...placement };
+      return { actionId, kind, model: contract.decide.model, ...(contract.decide.effort ? { effort: contract.decide.effort } : {}), marker, prompt: buildDecidePrompt(contract, view, marker, deps.now(), { memories: deps.memory?.read(), paths: deps.memory?.paths, context, ...(quotas ? { quotas } : {}) }), ...placement };
     }
     const isReport = view.plan?.reportStep === step!.id;
     const mode = step!.mode ?? 'read';
     const review = develop && (mode !== 'write' || isReport) ? { verification: view.verification, ...ws!.reviewEvidence(develop, REVIEW_DIFF_CHARS) } : undefined;
+    // 步驟沒寫模型時由純函式決定：明示的委任書就是委任書的 worker，自動的依步驟難度取池內第一個。
+    const planned = plannedDispatch(contract, requestFor(step));
     return {
-      actionId, kind, stepId: step!.id, model: step!.model ?? contract.worker.model,
-      ...(contract.worker.effort ? { effort: contract.worker.effort } : {}), marker, prompt: buildWorkerPrompt(contract, step!, marker, isReport, review),
+      actionId, kind, stepId: step!.id, model: planned.model,
+      ...(planned.effort ? { effort: planned.effort } : {}), marker, prompt: buildWorkerPrompt(contract, step!, marker, isReport, review),
       ...placement, ...(develop ? { mode, cleanAtStart: ws!.inspect(develop).dirty.length === 0 } : {}),
     };
   };
@@ -812,11 +841,13 @@ ${stat}
     const step = nextStep(view);
     if (step) {
       if (view.counters.workerSteps >= budget.maxWorkerSteps) { setState('budget_exhausted', 'worker_steps', `已派滿 ${budget.maxWorkerSteps} 個 worker`); return 'budget_exhausted'; }
-      if (!await dispatch(makeSpec(view, 'worker', step))) return read().state;
+      if (!await dispatch(makeSpec(view, 'worker', step), requestFor(step))) return read().state;
       continue;
     }
     if (view.counters.decides >= budget.maxDecides) { setState('budget_exhausted', 'decides', `已決策滿 ${budget.maxDecides} 次`); return 'budget_exhausted'; }
-    if (!await dispatch(makeSpec(view, 'decide'))) return read().state;
+    // 自動選模型：決策前先讀一次額度，給 decide 看目前各家剩餘，同一份也拿來判斷要不要改派。
+    const quotas = selection ? await quotaSnapshot() : undefined;
+    if (!await dispatch(makeSpec(view, 'decide', undefined, quotas), requestFor(), quotas)) return read().state;
   }
   } catch (error) {
     if (error instanceof SupersededError) return read().state;

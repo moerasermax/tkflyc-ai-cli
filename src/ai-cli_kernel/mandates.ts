@@ -5,7 +5,16 @@
 import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWrite, digestText, kernelStateDir } from './journal.js';
-import { buildContract, DEFAULT_BUDGET, type KernelStartInput } from './templates.js';
+import { assertDispatchableModel, buildContract as buildStartContract, DEFAULT_BUDGET, type BuildContractContext, type KernelStartInput } from './templates.js';
+import { AUTO_MODEL } from './model-select.js';
+import type { QuotaSnapshot } from './types.js';
+
+/**
+ * 範本只驗證輸入，這裡建出來的委任書會丟掉。模型要自動選的範本用「每一家都合格」的假額度走一遍驗證，
+ * 真正的選擇留到觸發當下依實際額度做。這份假額度不能拿去建立真的 run。
+ */
+const VALIDATION_ONLY_QUOTAS: QuotaSnapshot = { claude: 100, codex: 100, fable: 100, readAt: new Date(0).toISOString() };
+const buildContract = (input: KernelStartInput, now: Date, context: BuildContractContext) => buildStartContract(input, now, context, VALIDATION_ONLY_QUOTAS);
 
 export interface KernelMandate {
   name: string;
@@ -32,7 +41,7 @@ function keys(value: Record<string, unknown>, allowed: string[]): void {
 }
 function inputShape(input: unknown): asserts input is KernelStartInput {
   if (!plain(input)) throw new Error('委任範本 input 必須是物件');
-  const strings = ['goal', 'workFolder', 'template', 'model', 'effort', 'decideModel', 'decideEffort', 'testCommand', 'setupCommand', 'checkpoint', 'contextCommand'];
+  const strings = ['goal', 'workFolder', 'template', 'model', 'effort', 'decideModel', 'decideEffort', 'difficulty', 'testCommand', 'setupCommand', 'checkpoint', 'contextCommand'];
   keys(input, [...strings, 'workerModels', 'allowedPaths', 'budget', 'allowUnverifiedBoundary', 'mandateHours']);
   if (typeof input.goal !== 'string' || !input.goal.trim() || typeof input.workFolder !== 'string' || !input.workFolder) throw new Error('委任範本缺少 goal 或 workFolder');
   for (const key of strings) if (input[key] !== undefined && typeof input[key] !== 'string') throw new Error(`${key} 必須是字串`);
@@ -124,11 +133,20 @@ export function aiCliKernelMandateSave(request: { name: string; input: KernelSta
   inputShape(request.input);
   // 使用既有驗證與預設值，但不保存 run 專用的分支、回復點 ref 或到期時間。
   const contract = buildContract(request.input, new Date(), { runId: 'kr-20000101-000000-0000', worktree: join(directory(), 'validation-only') });
+  // 自動選的那一邊存 auto，不存今天解析出來的模型：否則今天的額度狀況會變成範本的長期設定。
+  // 明示的那一邊照舊存解析後的值。effort 與 workerModels 只有呼叫端真的給了才跟著 auto 存。
+  const auto = contract.modelSelection?.mode === 'auto' ? contract.modelSelection.auto : { worker: false, decide: false };
+  const given = request.input;
   const input: KernelStartInput = {
     goal: contract.goal, workFolder: contract.workFolder, template: contract.template,
     ...(contract.contextCommand ? { contextCommand: contract.contextCommand } : {}),
-    model: contract.worker.model, effort: contract.worker.effort, decideModel: contract.decide.model, decideEffort: contract.decide.effort,
-    workerModels: contract.allowedWorkerModels, budget: contract.budget, allowUnverifiedBoundary: contract.allowUnverifiedBoundary,
+    model: auto.worker ? AUTO_MODEL : contract.worker.model,
+    ...(!auto.worker ? { effort: contract.worker.effort } : given.effort !== undefined ? { effort: given.effort } : {}),
+    decideModel: auto.decide ? AUTO_MODEL : contract.decide.model,
+    ...(!auto.decide ? { decideEffort: contract.decide.effort } : given.decideEffort !== undefined ? { decideEffort: given.decideEffort } : {}),
+    ...(!auto.worker ? { workerModels: contract.allowedWorkerModels } : given.workerModels !== undefined ? { workerModels: given.workerModels.map(assertDispatchableModel) } : {}),
+    ...(given.difficulty !== undefined ? { difficulty: given.difficulty } : {}),
+    budget: contract.budget, allowUnverifiedBoundary: contract.allowUnverifiedBoundary,
     ...(contract.develop ? {
       testCommand: contract.develop.testCommand,
       ...(contract.develop.setupCommand ? { setupCommand: contract.develop.setupCommand } : {}),

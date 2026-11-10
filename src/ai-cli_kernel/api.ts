@@ -19,9 +19,10 @@ import type { MutexRetryDeps } from './process-mutex.js';
 import { atomicWrite, kernelRunDir, listRunIds, newRunId, recordSlotReleaseFailed, releaseActiveLock, RunStore, SLOT_RELEASE_DEFERRED_NOTE, SLOT_RELEASE_MARKER_NOTE } from './journal.js';
 import { boundaryKey, boundaryStatus, hasProbeEvidenceFormat, probeResultLabel, probeRerunHint, runBoundaryProbe, type ProbeRecord } from './probe.js';
 import { activeMinutes, nextStep, openActions, replayJournal, unprocessedActions, type RunView } from './replay.js';
-import { agentForModel } from './runtime.js';
-import { buildContract, TEMPLATES, type KernelStartInput } from './templates.js';
-import { isTerminalState, workDirOf, type ActionOutcome, type BoundaryStatus, type DevelopSpec, type KernelContract, type KernelExecutor, type RunState } from './types.js';
+import { agentForModel, readQuota } from './runtime.js';
+import { buildContract, needsQuotaSnapshot, TEMPLATES, type KernelStartInput } from './templates.js';
+import { readQuotaSnapshot } from './model-select.js';
+import { isTerminalState, workDirOf, type ActionOutcome, type BoundaryStatus, type DevelopSpec, type KernelContract, type KernelExecutor, type ModelSelection, type RunState } from './types.js';
 import { aiCliKernelRepoIdentity, aiCliKernelResolveBaseRef, aiCliKernelRestoreCheckpointBranch, cleanupWorkspace, describeRepo, realWorkspace } from './workspace.js';
 import { AiCliKernelMemoryStore, aiCliKernelMemoryRepo, type KernelMemory } from './memory.js';
 import { aiCliKernelArchiveSummary, aiCliKernelBuildArchivePacket, type KernelArchiveMark, type KernelArchivePacket, type KernelArchiveSummary } from './archive.js';
@@ -95,6 +96,8 @@ export interface KernelRunStatus {
   workFolder: string;
   template: string;
   models: { decide: KernelContract['decide']; worker: KernelContract['worker']; allowedWorkers: string[] };
+  /** 自動選模型的紀錄：選了什麼、當時各家剩餘、排除了誰。明示模型（含舊委任書）是 null。 */
+  modelSelection: ModelSelection | null;
   /** develop 範本才有。委任書要讓人看清楚的東西都在這裡。 */
   develop: (Pick<DevelopSpec, 'repoRoot' | 'branch' | 'baseCommit' | 'baseRef' | 'baseRefRef' | 'dependsOnRunId' | 'worktree' | 'testCommand' | 'setupCommand' | 'allowedPaths' | 'dirtyAtStart' | 'expiresAt' | 'notices' | 'checkpoint'> & { testFailures: number; verifiedCommit: string | null; checkpointResult: RunView['checkpoint']; checkpointPrepared: RunView['checkpointPrepared']; checkpointMode: string | null }) | null;
   contractDigest: string | null;
@@ -200,6 +203,7 @@ async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRun
     runId: store.runId, state: view.state, effectiveState, stateLabel: view.testLockWaiting ? `等測試鎖（被 ${view.testLockWaiting} 佔用）` : STATE_LABELS[effectiveState],
     reason: view.reason ?? null, detail: view.detail ?? null, goal: contract.goal, workFolder: contract.develop ? workDirOf(contract.develop) : contract.workFolder, template: contract.template,
     models: { decide: contract.decide, worker: contract.worker, allowedWorkers: contract.allowedWorkerModels }, contractDigest: view.contractDigest, boundary,
+    modelSelection: contract.modelSelection ?? null,
     develop: contract.develop ? {
       repoRoot: contract.develop.repoRoot, branch: contract.develop.branch, baseCommit: contract.develop.baseCommit, worktree: contract.develop.worktree, testCommand: contract.develop.testCommand,
       ...(contract.develop.baseRef !== undefined ? { baseRef: contract.develop.baseRef, baseRefRef: contract.develop.baseRefRef, dependsOnRunId: contract.develop.dependsOnRunId } : {}),
@@ -259,10 +263,13 @@ async function spawnRunner(store: RunStore): Promise<void> {
 }
 
 /* ---- 對外動作 ---- */
-export async function aiCliKernelStart(input: KernelStartInput): Promise<KernelRunStatus> {
+/** deps.quota 只供測試注入；MCP／CLI 只傳 input，用真的額度查詢。 */
+export async function aiCliKernelStart(input: KernelStartInput, deps: { quota?(agent: string): Promise<number | null> } = {}): Promise<KernelRunStatus> {
   assertCanStartJob(); // worker 不能再開 run，防止遞迴。
+  // 有一邊模型沒指定才讀額度；兩邊都指名就照指名，不查也不看。選擇邏輯本身是純函式，額度在這裡先讀好。
+  const quotas = needsQuotaSnapshot(input) ? await readQuotaSnapshot(deps.quota ?? readQuota) : undefined;
   const runId = newRunId();
-  const contract = buildContract(input, new Date(), { runId, worktree: join(kernelRunDir(runId), 'wt') });
+  const contract = buildContract(input, new Date(), { runId, worktree: join(kernelRunDir(runId), 'wt') }, quotas);
   const spec = contract.develop;
   const dependencyId = spec?.baseRefRef?.match(/^refs\/heads\/ai-cli_kernel\/(kr-[0-9]{8}-[0-9]{6}-[0-9a-f]{4})$/)?.[1];
   let dependency: RunStore | null = null;
@@ -602,6 +609,7 @@ export { aiCliKernelMandateSave, aiCliKernelMandateApprove, aiCliKernelMandateLi
 export function aiCliKernelTrigger(input: { name: string }, deps: AdmissionDeps & { now?: KernelTriggerDeps['now']; launch?: (store: RunStore) => Promise<void>; beforeStart?: () => void } = {}) {
   return aiCliKernelRunTrigger(input.name, {
     now: deps.now ?? Date.now,
+    ...(deps.quota ? { quota: deps.quota } : {}),
     ...(deps.beforeStart ? { beforeStart: deps.beforeStart } : {}),
     approveAndStart: (store, note, beforeStart) => aiCliKernelApprove({ runId: store.runId, acknowledgeUnisolated: true, note }, { launch: deps.launch, quota: deps.quota, agentFor: deps.agentFor, beforeStart }),
   });

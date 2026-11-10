@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { commandResult, jsonResult, approvalDiagnostic } from './helpers/kernel-e2e-diagnostics.mjs';
+import { installClaudeQuotaStub } from './helpers/claude-quota-stub.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 // --source 配合 node --import tsx，讓 worker 不必重建 dist 也能驗證相同測試。
@@ -18,7 +19,11 @@ process.env.CLAUDE_CLI_NAME = stub;
 const { parseNameStatusZ, isTestPath, changedBaselineTests, boundedList, boundedStat, segmentedDiff, testSummary, kernelTestInventory, STAT_CHARS, FILE_LIST_CHARS, TEST_SUMMARY_CHARS } = await load('evidence');
 const { realWorkspace } = await load('workspace');
 const { checkCitations } = await load('verdict');
-const { buildContract } = await load('templates');
+// 這支測的不是選模型：沒寫模型的 fixture 一律明示成同一個模型，和自動選模型上線前的預設相同。
+const EXPLICIT_MODEL = 'gpt-6.1-sol';
+const explicitModels = input => ({ ...input, model: input.model ?? EXPLICIT_MODEL, decideModel: input.decideModel ?? input.model ?? EXPLICIT_MODEL });
+const { buildContract: buildContractRaw, needsQuotaSnapshot } = await load('templates');
+const buildContract = (input, ...rest) => buildContractRaw(explicitModels(input), ...rest);
 const { buildWorkerPrompt, buildDecidePrompt, parseDecision, DECIDE_STEP_KEYS_RULE, REJECTION_CHARS } = await load('plan');
 const { hasProbeEvidenceFormat, probeResultLabel, judgeFinishedProbe, claudeInitEvent, claudeToolEvidence, NO_EVIDENCE_FORMAT_HINT, boundaryKey, boundaryStatus, loadProbeRecord, readProbeRecord, runBoundaryProbe, judgeUnfinishedProbe, combineClaudeProbe, PROBE_MODELS, PROBE_CAPABILITIES, DECIDE_CAPABILITIES } = await load('probe');
 const { RunStore, newRunId, kernelRunDir, kernelStateDir, releaseActiveLock, digestText } = await load('journal');
@@ -894,6 +899,472 @@ try {
     for (const contract of [m4Contract, buildContract({ goal: 'M4 develop', workFolder: m4Folder, template: 'develop', testCommand: 'fixture', checkpoint: 'off' }, new Date(), { runId: newRunId(), worktree: join(temp, 'm4-wt') })]) {
       assert.ok(buildDecidePrompt(contract, replayJournal([]), 'K-m4', Date.now()).includes(`- ${DECIDE_STEP_KEYS_RULE}`), contract.template);
     }
+  });
+
+  // AUTO：依額度與難度自動選模型。選擇邏輯是純函式，額度用快照餵進去；loop 與觸發用假執行器，不啟動任何模型。
+  const { selectDispatch, plannedDispatch, readQuotaSnapshot, entriesForLevel, AUTO_CANDIDATES, EFFORT_CEILINGS, NoEligibleModelError, FABLE_QUOTA_KEY } = await load('model-select');
+  const { remainingPercentFromUsage, agentForModel } = await load('runtime');
+  const { aiCliKernelStart } = await load('api');
+  const { formatStatus } = await load('cli');
+  const { DECIDE_STEP_EFFORT_RULE } = await load('plan');
+  const { listRunIds } = await load('journal');
+  // 這一組不該走到真的額度查詢。萬一程式壞掉走到了（例如指名了模型仍去讀額度），只會叫到立刻結束的替身：
+  // 斷言照常失敗，測試行程不會卡在等不到回應的 PTY 上。
+  const autoQuotaStub = installClaudeQuotaStub('auto-quota');
+  process.env.CODEX_CLI_NAME = autoQuotaStub.path;
+  process.env.AI_CLI_KERNEL_QUOTA_TIMEOUT_MS = '5000';
+  const autoFolder = repo('auto');
+  const Q = (claude, codex, fable = null) => ({ claude, codex, fable, readAt: '2026-11-10T00:00:00.000Z' });
+  let autoSeq = 0;
+  const autoContext = () => ({ runId: newRunId(), worktree: join(temp, `auto-wt-${++autoSeq}`) });
+  const autoDev = { template: 'develop', testCommand: 'fixture', checkpoint: 'off' };
+  const autoContract = (input, quotas) => buildContractRaw({ goal: 'auto', workFolder: autoFolder, ...input }, new Date(), input.template === 'develop' ? autoContext() : undefined, quotas);
+  const families = contract => [...new Set(contract.modelSelection.pool.map(entry => entry.family))].join();
+  const poolModels = contract => [...new Set(contract.modelSelection.pool.map(entry => entry.model))];
+  const AUTO_EFFORTS = ['low', 'medium', 'high'];
+  const routineModels = AUTO_CANDIDATES.routine.map(candidate => candidate.model);
+  const topModel = AUTO_CANDIDATES.critical.at(-1).model;
+  const backup = AUTO_CANDIDATES.routine.find(candidate => candidate.fallback).model;
+  const claudeUsage = used => ({ status: 'ok', usage: { percentBasis: 'used', weekAllModelsPercent: used } });
+
+  await check('AUTO 額度方向：Claude 的已用百分比換算成剩餘後才判合格', () => {
+    const remaining = remainingPercentFromUsage('claude', claudeUsage(18));
+    assert.equal(remaining, 82, '已用 18 就是剩 82，不是剩 18');
+    const contract = autoContract({}, Q(remaining, null));
+    assert.equal(families(contract), 'claude');
+    assert.equal(contract.modelSelection.quotas.claude, 82);
+    // 已用 80＝剩 20：低於門檻，而另一家量不到，所以沒有任何候選（難度不是 routine 就沒有備援）。
+    const low = Q(remainingPercentFromUsage('claude', claudeUsage(80)), null);
+    assert.equal(low.claude, 20);
+    assert.throws(() => autoContract({ difficulty: 'elevated' }, low), NoEligibleModelError);
+    assert.ok(autoContract({}, low).modelSelection.pool.every(entry => entry.fallback), 'routine 只剩備援，不會把剩 20 的那家選進來');
+    assert.equal(remainingPercentFromUsage('claude', { status: 'ok', usage: { weekAllModelsPercent: 18 } }), null, '沒有 basis 不猜方向');
+  });
+  await check('AUTO 額度方向：Codex 依 basis 換算，矛盾、缺欄、非數字都當量不到而不合格', async () => {
+    const codexOf = usage => remainingPercentFromUsage('codex', { status: 'ok', usage });
+    assert.equal(codexOf({ weekly: { basis: 'used', percentUsed: 30 } }), 70);
+    assert.equal(codexOf({ weekly: { basis: 'left', percentRemaining: 30 } }), 30);
+    assert.equal(families(autoContract({}, Q(null, codexOf({ weekly: { basis: 'used', percentUsed: 30 } })))), 'codex');
+    assert.throws(() => autoContract({ difficulty: 'elevated' }, Q(null, codexOf({ weekly: { basis: 'used', percentUsed: 80 } }))), NoEligibleModelError, '已用 80 是剩 20，不能當成剩 80');
+    const bad = [{ raw: 'Weekly limit: 30% used, 30% left' }, { weekly: { basis: 'used' } }, { weekly: { percentUsed: 30 } }, { weekly: { basis: 'used', percentUsed: Number.NaN } }, {}];
+    for (const usage of bad) {
+      assert.equal(codexOf(usage), null, JSON.stringify(usage));
+      const snapshot = await readQuotaSnapshot(async agent => agent === 'codex' ? codexOf(usage) : 80);
+      const contract = autoContract({}, snapshot);
+      assert.equal(families(contract), 'claude', JSON.stringify(usage));
+      assert.ok(contract.modelSelection.excluded.some(item => /Codex 週額度量不到/.test(item.reason)));
+    }
+    const garbage = await readQuotaSnapshot(async agent => agent === 'codex' ? Number.NaN : agent === 'claude' ? 140 : -3);
+    assert.deepEqual([garbage.claude, garbage.codex, garbage.fable], [null, null, null], '不是 0～100 的有限數字一律量不到');
+    const failing = await readQuotaSnapshot(async () => { throw new Error('quota query broke'); });
+    assert.deepEqual([failing.claude, failing.codex, failing.fable], [null, null, null]);
+  });
+  await check('AUTO 門檻：剩餘剛好等於門檻就進池，差一點就排除', () => {
+    const codexOnly = autoContract({}, Q(24.9, 25));
+    assert.equal(families(codexOnly), 'codex');
+    assert.ok(codexOnly.modelSelection.excluded.some(item => item.reason.includes('24.9%')));
+    assert.equal(families(autoContract({}, Q(25, 24.9))), 'claude');
+    assert.equal(codexOnly.modelSelection.minRemainingPercent, 25);
+    // 委任書把派工閘門檻調高時，合格門檻跟著提高，不會選到一派就被閘擋下的模型。
+    const strict = autoContract({ budget: { minQuotaRemainingPercent: 40 } }, Q(39, 40));
+    assert.equal(families(strict), 'codex'); assert.equal(strict.modelSelection.minRemainingPercent, 40);
+  });
+  await check('AUTO 最高難度的首選要兩個額度都達門檻才進池', () => {
+    const first = AUTO_CANDIDATES.critical.find(candidate => candidate.needsFable).model;
+    const critical = quotas => autoContract({ difficulty: 'critical' }, quotas);
+    const both = critical(Q(80, 80, 80));
+    assert.equal(both.worker.model, first); assert.equal(both.modelSelection.pool[0].needsFable, true);
+    for (const quotas of [Q(80, 80, 24.9), Q(80, 80, null), Q(24.9, 80, 90)]) {
+      const contract = critical(quotas);
+      assert.ok(!poolModels(contract).includes(first), JSON.stringify(quotas));
+      assert.ok(contract.modelSelection.excluded.some(item => item.model === first));
+    }
+    assert.match(critical(Q(80, 80, 24.9)).modelSelection.excluded.find(item => item.model === first).reason, /Fable/);
+    assert.equal(remainingPercentFromUsage(FABLE_QUOTA_KEY, { status: 'ok', usage: { percentBasis: 'used', additionalLimits: [{ label: 'Fable', basis: 'used', percentUsed: 60, percentRemaining: 40 }] } }), 40);
+    assert.equal(remainingPercentFromUsage(FABLE_QUOTA_KEY, claudeUsage(18)), null, '畫面沒有這一列就是量不到，不沿用整體額度');
+  });
+  await check('AUTO 備援只在 routine 而且其他候選都不合格時進池', () => {
+    const only = autoContract({}, Q(null, null));
+    assert.deepEqual(poolModels(only), [backup]); assert.equal(only.modelSelection.pool[0].fallback, true);
+    assert.equal(only.worker.model, backup); assert.equal(only.decide.model, backup);
+    for (const quotas of [Q(80, null), Q(null, 80), Q(80, 80)]) assert.ok(!poolModels(autoContract({}, quotas)).includes(backup), JSON.stringify(quotas));
+    // 難度不是 routine 的 run 不用備援：寧可不建立。
+    for (const input of [{ difficulty: 'elevated' }, { difficulty: 'critical' }, autoDev]) assert.throws(() => autoContract(input, Q(null, null)), NoEligibleModelError, JSON.stringify(input));
+    assert.ok(!poolModels(autoContract(autoDev, Q(80, 80))).includes(backup));
+  });
+  await check('AUTO routine 的池只有 routine 候選，沒有最高階模型也沒有 high', () => {
+    const contract = autoContract({}, Q(80, 80, 80));
+    assert.ok(poolModels(contract).every(model => routineModels.includes(model)));
+    assert.ok(!poolModels(contract).includes(topModel));
+    assert.ok(contract.modelSelection.pool.every(entry => entry.effort === 'medium' && entry.level === 'routine'));
+    assert.equal(contract.worker.effort, 'medium'); assert.equal(contract.decide.effort, 'medium');
+    assert.equal(contract.modelSelection.difficulty, 'routine'); assert.equal(contract.modelSelection.difficultySource, 'template');
+  });
+  await check('AUTO 自動路徑的 effort 最高到 high，不發出更高的等級', () => {
+    for (const level of Object.keys(AUTO_CANDIDATES)) for (const candidate of AUTO_CANDIDATES[level]) assert.ok(AUTO_EFFORTS.includes(candidate.effort), `${level} ${candidate.model}`);
+    assert.ok(Object.values(EFFORT_CEILINGS).every(effort => AUTO_EFFORTS.includes(effort)));
+    for (const template of [{}, autoDev]) for (const difficulty of [undefined, 'routine', 'elevated', 'critical']) for (const quotas of [Q(80, 80, 80), Q(80, null, 80), Q(null, 80)]) {
+      const contract = autoContract({ ...template, ...(difficulty ? { difficulty } : {}) }, quotas);
+      const efforts = [contract.worker.effort, contract.decide.effort, ...contract.modelSelection.pool.map(entry => entry.effort)];
+      assert.ok(efforts.every(effort => AUTO_EFFORTS.includes(effort)), `${JSON.stringify(template)} ${difficulty} ${efforts.join()}`);
+      for (const mode of ['read', 'write']) for (const now of [quotas, Q(10, 80, 10), Q(80, 10, 80)]) {
+        assert.ok(AUTO_EFFORTS.includes(selectDispatch(contract, now, { kind: 'worker', mode }, { unknownExhausted: true }).effort));
+      }
+    }
+  });
+  await check('AUTO 明示模型在額度歸零時照指名，不讀額度也不留選擇紀錄', async () => {
+    const named = { goal: 'explicit', workFolder: autoFolder, model: routineModels[0], decideModel: routineModels[1], effort: 'max', decideEffort: 'low' };
+    assert.equal(needsQuotaSnapshot(named), false);
+    for (const quotas of [Q(0, 0, 0), undefined]) {
+      const contract = buildContractRaw(named, new Date(), undefined, quotas);
+      assert.deepEqual(contract.worker, { model: routineModels[0], effort: 'max' });
+      assert.deepEqual(contract.decide, { model: routineModels[1], effort: 'low' });
+      assert.deepEqual(contract.allowedWorkerModels, [routineModels[0]]);
+      assert.ok(!('modelSelection' in contract));
+      assert.deepEqual(selectDispatch(contract, Q(0, 0, 0), { kind: 'worker', mode: 'read' }, { unknownExhausted: true }), { model: routineModels[0], effort: 'max', auto: false });
+    }
+    // routine 只指名 worker：決策和 worker 同一個，和以前一樣，不需要額度。
+    const workerOnly = { goal: 'explicit', workFolder: autoFolder, model: routineModels[1] };
+    assert.equal(needsQuotaSnapshot(workerOnly), false);
+    const same = buildContractRaw(workerOnly);
+    assert.equal(same.decide.model, routineModels[1]); assert.ok(!('modelSelection' in same));
+    let asked = 0;
+    const status = await aiCliKernelStart(named, { quota: async () => { asked++; return 0; } });
+    assert.equal(asked, 0, '兩邊都指名就不查額度');
+    assert.equal(status.modelSelection, null); assert.equal(status.models.worker.model, routineModels[0]);
+    assert.ok(!formatStatus(status).includes('選模型'));
+    // 沒指定模型又沒給快照：不能悄悄退回固定模型。
+    assert.throws(() => buildContractRaw({ goal: 'auto', workFolder: autoFolder }), /額度快照/);
+    assert.equal(needsQuotaSnapshot({ goal: 'auto', workFolder: autoFolder }), true);
+    assert.equal(needsQuotaSnapshot({ goal: 'auto', workFolder: autoFolder, model: 'auto', decideModel: 'auto' }), true);
+  });
+  await check('AUTO workerModels 和合格候選沒有交集就拒絕建立', () => {
+    assert.throws(() => autoContract({ workerModels: [backup] }, Q(80, 80)), error => error instanceof NoEligibleModelError && /沒有交集/.test(error.message));
+    assert.throws(() => autoContract({ workerModels: [topModel] }, Q(80, 80)), NoEligibleModelError);
+    const narrowed = autoContract({ workerModels: [routineModels[1]] }, Q(80, 80));
+    assert.deepEqual(poolModels(narrowed), [routineModels[1]]);
+    assert.deepEqual(narrowed.allowedWorkerModels, [routineModels[1]]);
+    assert.equal(narrowed.worker.model, routineModels[1]);
+    assert.ok(narrowed.modelSelection.excluded.some(item => item.model === routineModels[0] && /workerModels/.test(item.reason)));
+  });
+  await check('AUTO 兩家都不合格就拒絕建立，訊息寫出各家剩餘或量不到', async () => {
+    assert.throws(() => autoContract(autoDev, Q(10, null)), error => error instanceof NoEligibleModelError && /Claude 剩 10%/.test(error.message) && /Codex 量不到/.test(error.message));
+    assert.throws(() => autoContract({ difficulty: 'elevated' }, Q(24, 24.9)), error => /Claude 剩 24%/.test(error.message) && /Codex 剩 24\.9%/.test(error.message));
+    const before = listRunIds().length;
+    await assert.rejects(aiCliKernelStart({ goal: 'auto', workFolder: autoFolder, difficulty: 'elevated' }, { quota: async () => null }), /沒有合格的模型/);
+    assert.equal(listRunIds().length, before, '被拒絕就不留下 run');
+  });
+  await check('AUTO 候選池凍結在委任書：預設 worker 是池的第一個、允許清單就是這個池、決策依難度選', () => {
+    const routine = autoContract({}, Q(80, 80));
+    assert.deepEqual(routine.worker, { model: routine.modelSelection.pool[0].model, effort: routine.modelSelection.pool[0].effort });
+    assert.deepEqual(routine.decide, routine.worker, 'routine 的決策和 worker 同一個');
+    assert.deepEqual(routine.allowedWorkerModels, poolModels(routine));
+    assert.deepEqual(routine.modelSelection.selected, { decide: routine.decide, worker: routine.worker, allowedWorkerModels: routine.allowedWorkerModels });
+    assert.deepEqual(routine.modelSelection.auto, { worker: true, decide: true });
+    const develop = autoContract(autoDev, Q(80, 80));
+    assert.equal(develop.modelSelection.difficulty, 'elevated'); assert.equal(develop.modelSelection.difficultySource, 'template');
+    assert.equal(develop.worker.model, AUTO_CANDIDATES.elevated[0].model);
+    assert.deepEqual(develop.allowedWorkerModels, poolModels(develop));
+    assert.deepEqual([...new Set(develop.modelSelection.pool.map(entry => entry.level))], ['elevated', 'routine'], 'develop 的唯讀步驟走 routine');
+    const firstClaude = develop.modelSelection.pool.find(entry => entry.family === 'claude').model;
+    assert.deepEqual(develop.decide, { model: firstClaude, effort: 'medium' });
+    assert.deepEqual(develop.develop.notices.filter(notice => /沒有第二個模型/.test(notice)), []);
+    const noClaude = autoContract(autoDev, Q(null, 80));
+    assert.deepEqual(noClaude.decide, { model: noClaude.worker.model, effort: 'medium' }, '池內沒有 Claude 家就和 worker 同一個');
+    const asked = autoContract({ difficulty: 'critical' }, Q(80, 80, 80));
+    assert.equal(asked.modelSelection.difficulty, 'critical'); assert.equal(asked.modelSelection.difficultySource, 'caller');
+    assert.ok(asked.modelSelection.pool.every(entry => entry.level === 'critical'));
+    assert.match(asked.modelSelection.pool.find(entry => entry.model === topModel).reason, /2～5 倍週額度/);
+    assert.match(develop.modelSelection.pool.find(entry => entry.level === 'elevated' && entry.family === 'codex').reason, /高風險／跨模組／架構／develop 寫入/);
+    assert.throws(() => autoContract({ difficulty: 'urgent' }, Q(80, 80)), /difficulty/);
+    assert.equal(routine.schemaVersion, 1);
+  });
+  await check('AUTO 只指定一邊時指定的那邊不動，沒指定的那邊才自動', () => {
+    const decideNamed = autoContract({ decideModel: topModel, decideEffort: 'max' }, Q(80, 80));
+    assert.deepEqual(decideNamed.decide, { model: topModel, effort: 'max' });
+    assert.deepEqual(decideNamed.modelSelection.auto, { worker: true, decide: false });
+    assert.ok(!decideNamed.allowedWorkerModels.includes(topModel), '指名的決策模型不會因此變成 worker 候選');
+    assert.deepEqual(selectDispatch(decideNamed, Q(80, 0), { kind: 'decide' }, { unknownExhausted: true }), { model: topModel, effort: 'max', auto: false }, '指名的決策模型那家額度歸零也不改派');
+    const workerNamed = autoContract({ ...autoDev, model: backup, effort: 'xhigh', workerModels: [routineModels[0]] }, Q(80, 80));
+    assert.deepEqual(workerNamed.worker, { model: backup, effort: 'xhigh' });
+    assert.deepEqual(workerNamed.allowedWorkerModels, [backup, routineModels[0]]);
+    assert.deepEqual(workerNamed.modelSelection.auto, { worker: false, decide: true });
+    assert.deepEqual(workerNamed.modelSelection.pool, []);
+    assert.equal(workerNamed.decide.effort, 'medium');
+    assert.equal(workerNamed.decide.model, AUTO_CANDIDATES.elevated.find(candidate => candidate.family === 'claude').model);
+    // 指名的 worker 就算那家額度是 0 也不改派。
+    assert.deepEqual(selectDispatch(workerNamed, Q(0, 0, 0), { kind: 'worker', mode: 'write' }, { unknownExhausted: true }), { model: backup, effort: 'xhigh', auto: false });
+    // worker 自動但 effort 是呼叫端給的：照給的，decide 不能在步驟上改。
+    const effortNamed = autoContract({ effort: 'max' }, Q(80, 80));
+    assert.equal(effortNamed.worker.effort, 'max'); assert.equal(effortNamed.modelSelection.workerEffortExplicit, true);
+    assert.throws(() => parseDecision(JSON.stringify({ action: 'plan', steps: [{ id: 's1', title: 't', prompt: 'p', effort: 'low' }] }), effortNamed, 1), /明示/);
+  });
+  const autoPlanText = step => JSON.stringify({ action: 'plan', steps: [{ id: 's1', title: 't', prompt: 'p', ...step }], report_step: 's1' });
+  await check('AUTO decide 只能在凍結池內選：池外的模型被拒收', () => {
+    const routine = autoContract({}, Q(80, 80));
+    for (const model of [topModel, backup, AUTO_CANDIDATES.elevated[0].model]) assert.throws(() => parseDecision(autoPlanText({ model }), routine, 1), /不在委任書允許的清單內/, model);
+    const kept = parseDecision(autoPlanText({ model: routineModels[1] }), routine, 1);
+    assert.equal(kept.steps[0].model, routineModels[1]);
+    // 省略步驟模型：由純函式決定，取池內第一個。
+    assert.deepEqual(plannedDispatch(routine, { kind: 'worker', mode: 'read' }), { model: routine.modelSelection.pool[0].model, effort: 'medium', auto: true });
+    const develop = autoContract(autoDev, Q(80, 80));
+    assert.equal(plannedDispatch(develop, { kind: 'worker', mode: 'write' }).model, AUTO_CANDIDATES.elevated[0].model);
+    assert.deepEqual(plannedDispatch(develop, { kind: 'worker', mode: 'read' }), { model: routineModels[0], effort: 'medium', auto: true });
+    assert.deepEqual(plannedDispatch(develop, { kind: 'decide' }), { ...develop.decide, auto: true });
+  });
+  await check('AUTO decide 指定的步驟 effort 超過該步驟難度的上限就拒收', () => {
+    const routine = autoContract({}, Q(80, 80));
+    for (const effort of ['high', 'xhigh', 'max', 'ultra', 'turbo']) assert.throws(() => parseDecision(autoPlanText({ effort }), routine, 1), /超過難度 routine 的上限 medium/, effort);
+    for (const effort of ['low', 'medium']) assert.equal(parseDecision(autoPlanText({ effort }), routine, 1).steps[0].effort, effort);
+    const develop = autoContract(autoDev, Q(80, 80));
+    assert.equal(parseDecision(autoPlanText({ mode: 'write', effort: 'high' }), develop, 1).steps[0].effort, 'high');
+    assert.equal(parseDecision(autoPlanText({ effort: 'high' }), develop, 1).steps[0].mode, 'write');
+    assert.throws(() => parseDecision(autoPlanText({ mode: 'write', effort: 'xhigh' }), develop, 1), /超過難度 elevated 的上限 high/);
+    assert.throws(() => parseDecision(autoPlanText({ mode: 'read', effort: 'high' }), develop, 1), /超過難度 routine 的上限 medium/, '唯讀步驟是 routine，decide 不能靠 effort 往上調');
+    assert.equal(plannedDispatch(develop, { kind: 'worker', mode: 'write', effort: 'low' }).effort, 'low');
+    // 步驟沒有難度欄位：想加就是格式不符。
+    assert.throws(() => parseDecision(autoPlanText({ difficulty: 'critical' }), develop, 1), /格式不符/);
+    // 明示的委任書不能在步驟上指定 effort。
+    assert.throws(() => parseDecision(autoPlanText({ effort: 'low' }), buildContract({ goal: 'explicit', workFolder: autoFolder }), 1), /明示/);
+  });
+  await check('AUTO 中途改派只在凍結池內，而且只改到目前合格的模型', () => {
+    const routine = autoContract({}, Q(80, 80));
+    const [first, second] = routine.modelSelection.pool;
+    const worker = (contract, quotas, unknownExhausted = false, request = { kind: 'worker', mode: 'read' }) => selectDispatch(contract, quotas, request, { unknownExhausted });
+    assert.deepEqual(worker(routine, Q(80, 80)), { model: first.model, effort: 'medium', auto: true, remaining: 80 });
+    const moved = worker(routine, Q(60, 10));
+    assert.equal(moved.model, second.model); assert.equal(moved.remaining, 60);
+    assert.equal(moved.reroute.fromModel, first.model); assert.equal(moved.reroute.fromEffort, 'medium');
+    assert.deepEqual([moved.reroute.quotas.claude, moved.reroute.quotas.codex], [60, 10]);
+    assert.match(moved.reroute.reason, /剩 10% < 25%/);
+    // 另一家也不合格（太低、剛好差一點、量不到）：不改派，回原定模型交給派工閘停下。
+    for (const quotas of [Q(10, 10), Q(24.9, 10), Q(null, 10)]) {
+      const stay = worker(routine, quotas);
+      assert.equal(stay.model, first.model, JSON.stringify(quotas)); assert.equal(stay.reroute, undefined); assert.equal(stay.remaining, 10);
+    }
+    // 量不到：還在未知次數上限內照原定；用完才看池內有沒有合格的。
+    assert.equal(worker(routine, Q(80, null), false).model, first.model);
+    assert.equal(worker(routine, Q(80, null), false).remaining, null);
+    const unknownMoved = worker(routine, Q(80, null), true);
+    assert.equal(unknownMoved.model, second.model); assert.match(unknownMoved.reroute.reason, /量不到/);
+    // 開工時只有一家進池：之後另一家額度恢復也不會被加回來。
+    const single = autoContract({}, Q(null, 80));
+    assert.equal(single.modelSelection.pool.length, 1);
+    const stuck = worker(single, Q(90, 10));
+    assert.equal(stuck.model, single.worker.model); assert.equal(stuck.reroute, undefined);
+    // 備援不是改派的對象，原定是備援時也不會被換成池外的模型。
+    const onlyBackup = autoContract({}, Q(null, null));
+    assert.equal(worker(onlyBackup, Q(90, 90), true).model, backup);
+    // decide 指定了池內的模型，那家不足時一樣在池內改派。
+    assert.equal(worker(routine, Q(10, 80), false, { kind: 'worker', mode: 'read', model: second.model }).model, first.model);
+    // 決策模型也在池內改派，effort 用委任書的決策 effort。
+    const develop = autoContract(autoDev, Q(80, 80));
+    const decideMoved = selectDispatch(develop, Q(10, 80), { kind: 'decide' }, { unknownExhausted: false });
+    assert.equal(decideMoved.reroute.fromModel, develop.decide.model); assert.equal(decideMoved.effort, develop.decide.effort);
+    assert.ok(poolModels(develop).includes(decideMoved.model));
+    assert.equal(develop.modelSelection.pool.find(entry => entry.model === decideMoved.model).family, 'codex');
+  });
+  await check('AUTO 改派後的 effort 不高於該步驟難度的上限', () => {
+    const develop = autoContract(autoDev, Q(80, 80));
+    const write = selectDispatch(develop, Q(10, 80), { kind: 'worker', mode: 'write' }, { unknownExhausted: false });
+    assert.equal(write.reroute.fromModel, AUTO_CANDIDATES.elevated[0].model);
+    assert.deepEqual([write.model, write.effort], [AUTO_CANDIDATES.elevated[1].model, 'high']);
+    const read = selectDispatch(develop, Q(80, 10), { kind: 'worker', mode: 'read' }, { unknownExhausted: false });
+    assert.equal(read.reroute.fromModel, routineModels[0]);
+    assert.deepEqual([read.model, read.effort], [routineModels[1], 'medium'], '唯讀步驟改派後仍是 routine 的 medium');
+    // 只在高一級出現的模型拿來做低一級的步驟時，effort 壓到那一級的上限。
+    const critical = autoContract({ ...autoDev, difficulty: 'critical', workerModels: [AUTO_CANDIDATES.critical[1].model] }, Q(80, 80, 80));
+    assert.deepEqual(entriesForLevel(critical.modelSelection.pool, 'routine').map(entry => entry.effort), ['medium']);
+    assert.equal(plannedDispatch(critical, { kind: 'worker', mode: 'read' }).effort, 'medium');
+    assert.equal(plannedDispatch(critical, { kind: 'worker', mode: 'write' }).effort, 'high');
+    // 最高難度的首選只差自己的額度不足：改派同一家、不需要那份額度的模型。
+    const top = autoContract({ difficulty: 'critical' }, Q(80, 80, 80));
+    const fableLow = selectDispatch(top, Q(80, 80, 10), { kind: 'worker', mode: 'read' }, { unknownExhausted: false });
+    assert.equal(fableLow.reroute.fromModel, top.worker.model); assert.equal(fableLow.model, AUTO_CANDIDATES.critical[1].model); assert.equal(fableLow.effort, 'high');
+  });
+  const legacyContract = () => ({
+    schemaVersion: 1, template: 'readonly-audit', goal: 'legacy', workFolder: autoFolder,
+    decide: { model: routineModels[0], effort: 'medium' }, worker: { model: routineModels[0], effort: 'medium' }, allowedWorkerModels: [routineModels[0], routineModels[1]],
+    budget: { maxWorkerSteps: 6, maxDecides: 5, maxWallMinutes: 90, maxActionMinutes: 30, maxInputTokens: 1500000, quotaUnknownMaxDispatches: 2, minQuotaRemainingPercent: 25, maxTestFailures: 4 },
+    stepChecks: [{ type: 'message_nonempty' }, { type: 'no_refusal' }],
+    acceptance: [{ type: 'message_nonempty' }, { type: 'no_refusal' }, { type: 'min_length', chars: 80 }, { type: 'required_sections', patterns: ['^#{1,4}\\s*結論', '^#{1,4}\\s*發現', '^#{1,4}\\s*尚待確認'] }, { type: 'citations_resolve', minCount: 1 }],
+    reportInstructions: 'fixture', allowUnverifiedBoundary: false, createdAt: '2026-11-01T00:00:00.000Z',
+  });
+  const autoLoopRun = contract => {
+    const store = new RunStore(kernelRunDir(newRunId())); const digest = store.create(contract);
+    store.append({ type: 'approved', contractDigest: digest, kind: 'contract' });
+    store.append({ type: 'state', state: 'running' });
+    return store;
+  };
+  const autoLoopDeps = (store, contract, executor, quota) => ({ ...k3LoopDeps(store, contract, executor, 'PASS'), quota, agentFor: agentForModel });
+  const intents = store => store.read().filter(event => event.type === 'action_intent').map(event => event.action);
+  await check('AUTO 舊委任書沒有選擇紀錄就當明示：不改派、提示與日誌照舊、額度不足照舊停下等人', async () => {
+    const contract = legacyContract();
+    assert.deepEqual(selectDispatch(contract, Q(0, 90), { kind: 'worker', mode: 'read' }, { unknownExhausted: true }), { model: routineModels[0], effort: 'medium', auto: false });
+    assert.deepEqual(selectDispatch(contract, Q(90, 0), { kind: 'worker', mode: 'read', model: routineModels[1] }, { unknownExhausted: true }), { model: routineModels[1], effort: 'medium', auto: false });
+    assert.deepEqual(selectDispatch(contract, Q(90, 0), { kind: 'decide' }, { unknownExhausted: true }), { model: routineModels[0], effort: 'medium', auto: false });
+    const prompt = buildDecidePrompt(contract, replayJournal([]), 'K-legacy', Date.now());
+    assert.ok(prompt.includes(`可用的 worker 模型：${routineModels[0]}、${routineModels[1]}`)); assert.ok(!prompt.includes('凍結'));
+    assert.ok(prompt.includes(`- ${DECIDE_STEP_KEYS_RULE}\n`), '舊委任書的步驟鍵規則後面沒有 effort 例外');
+    assert.equal(parseDecision(autoPlanText({ model: routineModels[1] }), contract, 1).steps[0].model, routineModels[1]);
+    const store = autoLoopRun(contract);
+    const created = store.read()[0];
+    assert.deepEqual(Object.keys(created).sort(), ['at', 'contractDigest', 'seq', 'type'], '舊委任書的 created 事件不多欄位');
+    assert.equal(created.contractDigest, digestText(JSON.stringify(contract, null, 2) + '\n'));
+    assert.equal((await aiCliKernelStatus({ runId: store.runId })).modelSelection, null);
+    // 這一家只剩 10%、另一家有 90%：明示的委任書不換家，照舊停在 quota_low。
+    const executor = k3Executor(); const asked = [];
+    const state = await runKernelLoop(autoLoopDeps(store, contract, executor, async agent => { asked.push(agent); return agent === 'codex' ? 10 : 90; }));
+    assert.equal(state, 'waiting_human'); assert.equal(replayJournal(store.read()).reason, 'quota_low');
+    assert.equal(executor.started.length, 0); assert.deepEqual(asked, ['codex'], '明示的委任書只查自己那一家');
+  });
+  await check('AUTO loop：原定那家額度不足時改派池內目前合格的模型，意圖記下原模型、當時額度與理由', async () => {
+    const contract = autoContract({}, Q(80, 80));
+    const [first, second] = contract.modelSelection.pool;
+    const store = autoLoopRun(contract); const executor = k3Executor();
+    const state = await runKernelLoop(autoLoopDeps(store, contract, executor, async agent => agent === 'codex' ? 10 : 70));
+    assert.equal(state, 'completed', JSON.stringify(replayJournal(store.read()).detail));
+    assert.ok(executor.started.length >= 2);
+    assert.ok(executor.started.every(action => action.model === second.model && action.effort === 'medium'), executor.started.map(action => action.model).join());
+    for (const action of intents(store)) {
+      assert.equal(action.reroute.fromModel, first.model, action.kind);
+      assert.deepEqual([action.reroute.quotas.claude, action.reroute.quotas.codex], [70, 10]);
+      assert.match(action.reroute.reason, /改派凍結池內目前合格的/);
+    }
+    assert.ok(!store.read().some(event => event.type === 'quota_unknown'));
+    // 額度都夠就照原定，意圖裡沒有改派紀錄。
+    const calm = autoLoopRun(contract); const calmExecutor = k3Executor();
+    assert.equal(await runKernelLoop(autoLoopDeps(calm, contract, calmExecutor, async () => 80)), 'completed');
+    assert.ok(calmExecutor.started.every(action => action.model === first.model));
+    assert.ok(intents(calm).every(action => !('reroute' in action)));
+  });
+  await check('AUTO loop：池內沒有目前合格的模型時照舊停下等人，不派池外的模型', async () => {
+    const contract = autoContract({}, Q(80, 80));
+    const low = autoLoopRun(contract); const lowExecutor = k3Executor();
+    assert.equal(await runKernelLoop(autoLoopDeps(low, contract, lowExecutor, async () => 10)), 'waiting_human');
+    assert.equal(replayJournal(low.read()).reason, 'quota_low'); assert.equal(lowExecutor.started.length, 0);
+    // 量不到：先在未知次數上限內照原定派，用完而池內沒有合格的就停在 quota_unknown。
+    const unknown = autoContract({ budget: { quotaUnknownMaxDispatches: 1 } }, Q(80, 80));
+    const store = autoLoopRun(unknown); const executor = k3Executor();
+    assert.equal(await runKernelLoop(autoLoopDeps(store, unknown, executor, async () => null)), 'waiting_human');
+    assert.equal(replayJournal(store.read()).reason, 'quota_unknown');
+    assert.equal(executor.started.length, 1); assert.equal(replayJournal(store.read()).counters.quotaUnknownDispatches, 1);
+    assert.ok(executor.started.every(action => poolModels(unknown).includes(action.model)));
+    // 備援沒有額度資料：一樣受未知次數上限控制，沒有因此多派。
+    const backupOnly = autoContract({ budget: { quotaUnknownMaxDispatches: 1 }, allowUnverifiedBoundary: true }, Q(null, null));
+    const backupStore = autoLoopRun(backupOnly); const backupExecutor = k3Executor();
+    assert.equal(await runKernelLoop(autoLoopDeps(backupStore, backupOnly, backupExecutor, async () => 90)), 'waiting_human');
+    assert.equal(replayJournal(backupStore.read()).reason, 'quota_unknown');
+    assert.equal(backupExecutor.started.length, 1); assert.equal(backupExecutor.started[0].model, backup);
+  });
+  await check('AUTO loop：最高難度首選的專屬額度不足時，派工閘不放行原定模型而是改派', async () => {
+    const contract = autoContract({ difficulty: 'critical' }, Q(80, 80, 80));
+    const store = autoLoopRun(contract); const executor = k3Executor();
+    const quota = async agent => agent === FABLE_QUOTA_KEY ? 10 : 80;
+    assert.equal(await runKernelLoop(autoLoopDeps(store, contract, executor, quota)), 'completed');
+    assert.ok(executor.started.every(action => action.model !== contract.worker.model && poolModels(contract).includes(action.model)));
+    // 只剩首選一個候選時沒得改派：專屬額度不足就停下，不會因為整體額度還夠而照派。
+    const alone = autoContract({ difficulty: 'critical', workerModels: [contract.worker.model] }, Q(80, 80, 80));
+    const aloneStore = autoLoopRun(alone); const aloneExecutor = k3Executor();
+    assert.equal(await runKernelLoop(autoLoopDeps(aloneStore, alone, aloneExecutor, quota)), 'waiting_human');
+    assert.equal(replayJournal(aloneStore.read()).reason, 'quota_low'); assert.equal(aloneExecutor.started.length, 0);
+  });
+  await check('AUTO decide 的提示列出凍結的池、每級 effort 上限與目前各家剩餘', async () => {
+    const contract = autoContract(autoDev, Q(80, 80));
+    const prompt = buildDecidePrompt(contract, replayJournal([]), 'K-auto', Date.now(), { quotas: Q(61, 33, null) });
+    for (const entry of contract.modelSelection.pool) assert.ok(prompt.includes(`${entry.model}·${entry.effort}（${entry.level}`), entry.model);
+    assert.ok(prompt.includes('每級 effort 上限：routine medium、elevated high、critical high'));
+    assert.ok(prompt.includes('目前週額度：Claude 剩 61%、Codex 剩 33%、Fable 量不到（unknown）'));
+    assert.ok(prompt.includes('你不能調高難度，也不能加模型'));
+    assert.ok(prompt.includes('write 步驟的難度是 elevated、read 步驟是 routine'));
+    assert.ok(prompt.includes(`- ${DECIDE_STEP_KEYS_RULE}${DECIDE_STEP_EFFORT_RULE}`));
+    assert.ok(buildDecidePrompt(contract, replayJournal([]), 'K-auto', Date.now()).includes('開工時週額度：Claude 剩 80%、Codex 剩 80%'), '沒給目前額度就標明是開工時的');
+    // loop 真的把當下讀到的額度交給 decide。
+    const routine = autoContract({}, Q(80, 80));
+    const store = autoLoopRun(routine); const executor = k3Executor();
+    assert.equal(await runKernelLoop(autoLoopDeps(store, routine, executor, async agent => agent === 'codex' ? 47 : 52)), 'completed');
+    const decide = executor.started.find(action => action.kind === 'decide');
+    assert.ok(decide.prompt.includes('目前週額度：Claude 剩 52%、Codex 剩 47%'), decide.prompt.slice(0, 600));
+  });
+  await check('AUTO status 印出自動選了什麼與原因，CLI 與 MCP 都接受 difficulty', async () => {
+    const asked = [];
+    const status = await aiCliKernelStart({ goal: 'auto status', workFolder: autoFolder, difficulty: 'elevated' }, { quota: async agent => { asked.push(agent); return agent === 'codex' ? 20 : 82; } });
+    assert.deepEqual(asked.sort(), ['claude', FABLE_QUOTA_KEY, 'codex'].sort());
+    assert.equal(status.state, 'awaiting_approval');
+    const selection = status.modelSelection;
+    assert.equal(selection.mode, 'auto'); assert.equal(selection.difficulty, 'elevated'); assert.equal(selection.difficultySource, 'caller');
+    assert.deepEqual([selection.quotas.claude, selection.quotas.codex], [82, 20]); assert.ok(Number.isFinite(Date.parse(selection.quotas.readAt)));
+    assert.deepEqual(selection.selected, { decide: status.models.decide, worker: status.models.worker, allowedWorkerModels: status.models.allowedWorkers });
+    assert.ok(selection.excluded.some(item => /Codex 週額度剩 20% < 25%/.test(item.reason)));
+    assert.deepEqual(selection.effortCeilings, { routine: 'medium', elevated: 'high', critical: 'high' });
+    assert.deepEqual((await aiCliKernelStatus({ runId: status.runId })).modelSelection, selection, 'MCP status 回傳同一份');
+    const text = formatStatus(status);
+    for (const part of ['選模型   自動（決策與 worker 都自動）；難度上限 elevated（呼叫端指定）', 'Claude 剩 82%、Codex 剩 20%', '門檻 25%', `選中     決策 ${status.models.decide.model}`, '候選池   ', '排除     ', 'Codex 週額度剩 20% < 25%', 'effort   上限 routine medium、elevated high、critical high']) assert.ok(text.includes(part), `${part}\n${text}`);
+    // 委任書檔案、digest 與 created 事件都帶著這次的選擇。
+    const store = new RunStore(kernelRunDir(status.runId));
+    assert.deepEqual(store.readContract().modelSelection, selection);
+    assert.equal(status.contractDigest, digestText(readFileSync(store.contractPath, 'utf8')));
+    const created = store.read()[0];
+    assert.deepEqual(created.modelSelection, { mode: 'auto', difficulty: 'elevated', decide: status.models.decide, worker: status.models.worker, allowedWorkerModels: status.models.allowedWorkers, quotas: selection.quotas });
+    // 參數真的接到：亂寫的 difficulty 兩個入口都拒絕。
+    let err = '';
+    const explicitFlags = ['--model', routineModels[0], '--decide-model', routineModels[0]];
+    assert.equal(await runKernelCli(['start', '--goal', 'g', '--cwd', autoFolder, ...explicitFlags, '--difficulty', 'urgent'], { stdout() {}, stderr: text => { err += text; } }), 1);
+    assert.match(err, /difficulty 必須是/);
+    let out = '';
+    assert.equal(await runKernelCli(['start', '--goal', 'g', '--cwd', autoFolder, ...explicitFlags, '--difficulty', 'critical', '--json'], { stdout: text => { out += text; }, stderr() {} }), 0);
+    assert.equal(JSON.parse(out).modelSelection, null, '兩邊都指名時 difficulty 沒有作用');
+    const previous = process.env.AI_CLI_KERNEL;
+    process.env.AI_CLI_KERNEL = 'on';
+    try {
+      await assert.rejects(aiCliKernelHandleTool('ai-cli_kernel_start', explicitModels({ goal: 'g', workFolder: autoFolder, difficulty: 'urgent' })), /difficulty 必須是/);
+      const { aiCliKernelToolDefinitions } = await load('mcp-tools');
+      const schema = aiCliKernelToolDefinitions().find(tool => tool.name === 'ai-cli_kernel_start').inputSchema.properties;
+      assert.deepEqual(schema.difficulty.enum, ['routine', 'elevated', 'critical']);
+      assert.match(schema.model.description, /auto/);
+    } finally { if (previous === undefined) delete process.env.AI_CLI_KERNEL; else process.env.AI_CLI_KERNEL = previous; }
+  });
+  await check('AUTO 範本存 auto 而不是當下選出的模型；觸發時依當下額度重選，寫進委任書與日誌', async () => {
+    const api = await load('api');
+    const folder = repo('auto-mandate');
+    const saved = api.aiCliKernelMandateSave({ name: 'auto-audit', input: { goal: 'auto mandate', workFolder: folder, difficulty: 'routine', allowUnverifiedBoundary: true }, maxRunsPerDay: 5 });
+    assert.equal(saved.input.model, 'auto'); assert.equal(saved.input.decideModel, 'auto'); assert.equal(saved.input.difficulty, 'routine');
+    for (const key of ['effort', 'decideEffort', 'workerModels']) assert.ok(!(key in saved.input), `${key} 沒給就不存，否則下次會被當成明示`);
+    const narrowed = api.aiCliKernelMandateSave({ name: 'auto-narrow', input: { goal: 'auto mandate', workFolder: folder, model: 'auto', effort: 'low', workerModels: [routineModels[1]] } });
+    assert.deepEqual([narrowed.input.model, narrowed.input.effort, narrowed.input.workerModels.join()], ['auto', 'low', routineModels[1]]);
+    // 明示的範本照舊存解析後的模型，不重算。
+    const named = api.aiCliKernelMandateSave({ name: 'named-audit', input: explicitModels({ goal: 'named mandate', workFolder: folder }) });
+    assert.deepEqual([named.input.model, named.input.decideModel, named.input.effort, named.input.workerModels.join()], [EXPLICIT_MODEL, EXPLICIT_MODEL, 'medium', EXPLICIT_MODEL]);
+    assert.throws(() => api.aiCliKernelMandateSave({ name: 'bad-difficulty', input: { goal: 'g', workFolder: folder, difficulty: 'urgent' } }), /difficulty/);
+    assert.throws(() => api.aiCliKernelMandateSave({ name: 'bad-field', input: { goal: 'g', workFolder: folder, difficulti: 'routine' } }), /未知欄位/);
+    api.aiCliKernelMandateApprove({ name: 'auto-audit' });
+    const wasEnabled = api.aiCliKernelTriggersEnabled();
+    api.aiCliKernelTriggersSetEnabled(true);
+    try {
+      let launched = 0;
+      const launch = async store => { launched++; store.append({ type: 'state', state: 'completed' }); await releaseActiveLock(store.runId); };
+      // 觸發當下 Codex 不合格：選到的是 Claude 家，不是存檔那天的結果。
+      const first = await api.aiCliKernelTrigger({ name: 'auto-audit' }, { launch, quota: async agent => agent === 'codex' ? 12 : 77 });
+      assert.equal(first.status, 'started', JSON.stringify(first)); assert.equal(launched, 1);
+      const store = new RunStore(kernelRunDir(first.runId));
+      const contract = store.readContract();
+      assert.equal(contract.origin.mandate, 'auto-audit');
+      assert.equal(families(contract), 'claude'); assert.deepEqual([contract.modelSelection.quotas.claude, contract.modelSelection.quotas.codex], [77, 12]);
+      assert.equal(contract.worker.model, routineModels[1]);
+      assert.deepEqual(store.read()[0].modelSelection.worker, contract.worker);
+      assert.equal(replayJournal(store.read()).approvedDigest, store.contractDigest(), '觸發的核准流程照舊，核准的就是這份含選擇結果的委任書');
+      // 下一次觸發額度反過來：重新選，不沿用上一次。
+      const second = await api.aiCliKernelTrigger({ name: 'auto-audit' }, { launch, quota: async agent => agent === 'codex' ? 66 : 20 });
+      assert.equal(second.status, 'started', JSON.stringify(second));
+      assert.equal(new RunStore(kernelRunDir(second.runId)).readContract().worker.model, routineModels[0]);
+      // 都不合格（routine 以外的難度沒有備援）：跳過、不建立 run、不啟動。
+      api.aiCliKernelMandateSave({ name: 'auto-elevated', input: { goal: 'auto mandate', workFolder: folder, difficulty: 'elevated', allowUnverifiedBoundary: true }, maxRunsPerDay: 5 });
+      api.aiCliKernelMandateApprove({ name: 'auto-elevated' });
+      const runsBefore = listRunIds().length;
+      const none = await api.aiCliKernelTrigger({ name: 'auto-elevated' }, { launch, quota: async () => null });
+      assert.deepEqual([none.status, none.reason, none.runId], ['skipped', 'no_eligible_model', null]); assert.match(none.detail, /量不到/);
+      assert.equal(launched, 2); assert.equal(listRunIds().length, runsBefore);
+    } finally { api.aiCliKernelTriggersSetEnabled(wasEnabled); }
   });
 } finally { rmSync(temp, { recursive: true, force: true }); }
 assert.ok(passed + failed > 0, 'refuse an empty test selection');

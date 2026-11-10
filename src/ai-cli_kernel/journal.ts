@@ -90,7 +90,11 @@ export class RunStore {
     const text = JSON.stringify(contract, null, 2) + '\n';
     atomicWrite(this.contractPath, text);
     const digest = digestText(text);
-    this.append({ type: 'created', contractDigest: digest });
+    // 自動選模型的結果也記進日誌：之後就算委任書檔案被動過，當初選了什麼還查得到。
+    const selection = contract.modelSelection?.mode === 'auto' ? contract.modelSelection : null;
+    this.append({ type: 'created', contractDigest: digest, ...(selection ? { modelSelection: {
+      mode: 'auto' as const, difficulty: selection.difficulty, decide: contract.decide, worker: contract.worker, allowedWorkerModels: contract.allowedWorkerModels, quotas: selection.quotas,
+    } } : {}) });
     return digest;
   }
 
