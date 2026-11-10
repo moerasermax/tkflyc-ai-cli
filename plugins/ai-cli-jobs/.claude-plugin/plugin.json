@@ -1,7 +1,7 @@
 {
   "name": "ai-cli-jobs",
-  "version": "0.1.5",
-  "description": "Show ai-cli jobs above the prompt as a table: this session's (polling MCP every 0.5 seconds) and every other session's on this machine (read from the job store every 5 seconds), with a one-line summary below it, without model tokens.",
+  "version": "0.2.0",
+  "description": "Show ai-cli jobs above the prompt as a table: this session's (polling MCP every 0.5 seconds) and every other session's on this machine (read from the job store every 5 seconds), plus the ai-cli kernel runs that are running or wait for you (read from the kernel's run folders, with a toast when one needs you), with a one-line summary below it, without model tokens.",
   "author": { "name": "YC (moerasermax)" },
   "types": "./types/index.d.ts"
 }

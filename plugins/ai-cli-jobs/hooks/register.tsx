@@ -1,10 +1,17 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, EngineInterface, Timer } from 'claude-code'
 import type { AiCliJobsJob, AiCliJobsMachineJob } from '../types/index'
+import { ALERT_KINDS, KERNEL_RECENT_MS, RUN_ID, alertKey, alertText, kernelCounts, kernelJobLabel, kernelRows, kernelVisible, parseJournal, summarizeKernelRun, unreadableRun } from './kernel'
+import type { KernelRow, KernelRunSummary } from './kernel'
 
 const jobs = atom({ plugin: 'ai-cli-jobs', key: 'jobs' } as const, [])
 /** Every session's jobs, read from the job store on disk: `list_processes` only answers for this server. */
 const machine = atom({ plugin: 'ai-cli-jobs', key: 'machine' } as const, [])
+/** kernel runs, read from <state dir>/kernel/runs on the same SCAN_MS timer. */
+const kernel = atom({ plugin: 'ai-cli-jobs', key: 'kernel' } as const, [])
+const kernelArchived = atom({ plugin: 'ai-cli-jobs', key: 'kernelArchived' } as const, {})
+/** How long a kernel toast stays: longer than the default 4 s, it is the one nudge the run gets. */
+export const KERNEL_TOAST_MS = 15_000
 const RETAIN_MS = 120_000
 export const SCAN_MS = 5_000
 /** A finished job from elsewhere stays this long; the server deletes its folder after 30 minutes. */
@@ -19,8 +26,14 @@ const COLORS = {
   running: '#A8D5CE',
   completed: '#DDE6A3',
   failed: '#F4BE86',
+  /** A kernel run that waits for the person. */
+  attention: '#D9C4DC',
   text: '#1A1A1A',
 } as const
+const KERNEL_BACKGROUND: Record<KernelRow['kind'], string> = {
+  running: COLORS.running, approval: COLORS.attention, human: COLORS.attention, interrupted: COLORS.attention, expired: COLORS.attention,
+  done: COLORS.completed, failed: COLORS.failed, budget: COLORS.failed, unreadable: COLORS.failed, cancelled: COLORS.list,
+}
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const record = (v: unknown): Record<string, unknown> | undefined =>
   v !== null && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : undefined
@@ -75,12 +88,12 @@ export function taskLabel(input: Record<string, unknown>): string {
   }
   return 'ai-cli 任務'
 }
-export function summary(list: AiCliJobsJob[], othersRunning = 0): string {
+export function summary(list: AiCliJobsJob[], othersRunning = 0, kernelPart = ''): string {
   const labels = [['running', '執行中'], ['completed', '完成'], ['failed', '失敗'], ['untracked', '已不追蹤']] as const
   return 'ai-cli ▸ ' + [...labels.map(([status, label]) => {
     const n = list.filter(j => j.status === status).length
     return n ? `${n} ${label}` : ''
-  }), othersRunning ? `其他 ${othersRunning} 執行中` : ''].filter(Boolean).join(' · ')
+  }), othersRunning ? `其他 ${othersRunning} 執行中` : '', kernelPart].filter(Boolean).join(' · ')
 }
 export function ago(ms: number): string {
   const m = Math.floor(Math.max(0, ms) / 60_000)
@@ -112,7 +125,8 @@ export function machineJob(jobId: string, meta: unknown, exit: unknown, lost: un
 const DOTS: Record<string, string> = { claude: '🟠', codex: '🟢', grok: '⚫', antigravity: '🔵', 'direct-api': '🟣' }
 type Row = { key: string, kind: 'running' | 'ok' | 'bad' | 'lost' | 'gone', model: string, source: string, task: string, time: string, wrap: boolean }
 /** This session's rows first, then everyone else's; running before finished, the newest finish first. */
-export function tableRows(own: AiCliJobsJob[], others: AiCliJobsMachineJob[], now: number): Row[] {
+/** `runs` names the jobs a kernel run dispatched: its step instead of the prompt's head, its repo instead of `wt`. */
+export function tableRows(own: AiCliJobsJob[], others: AiCliJobsMachineJob[], now: number, runs: KernelRunSummary[] = []): Row[] {
   const modelText = (agent: string, model: string, effort: string) => `${DOTS[agent] ?? '⚪'} ${model}${effort ? `·${effort}` : ''}`
   const mine = new Set(own.map(j => j.pid))
   const rows: (Row & { at: number })[] = own.map(j => {
@@ -120,9 +134,10 @@ export function tableRows(own: AiCliJobsJob[], others: AiCliJobsMachineJob[], no
     const seconds = kind === 'running' ? Math.max(j.elapsedSec, (now - j.startedAt) / 1000) : j.elapsedSec
     const poll = isPollFailure(j.lastEvent)
     const note = poll ? j.lastEvent : eventLabel(j.lastEvent)
+    const k = kernelJobLabel(j.task, runs)
     return {
       key: `own-${j.pid}`, kind, model: modelText(j.agent, j.model, j.reasoningEffort), source: '這個對話',
-      task: [j.task, note].filter(Boolean).join('  ·  '), wrap: poll, at: j.finishedAt ?? now,
+      task: [k ? [k.project ? `［${k.project}］` : '', k.task].filter(Boolean).join(' ') : j.task, note].filter(Boolean).join('  ·  '), wrap: poll, at: j.finishedAt ?? now,
       time: kind === 'running' ? `已跑 ${elapsed(seconds)}` : ago(now - (j.finishedAt ?? now)),
     }
   })
@@ -130,9 +145,11 @@ export function tableRows(own: AiCliJobsJob[], others: AiCliJobsMachineJob[], no
     if (j.pid !== undefined && mine.has(j.pid)) continue
     const quiet = j.status === 'running' && j.outputAt !== undefined && now - j.outputAt > QUIET_MS
       ? `💤 ${Math.floor((now - j.outputAt) / 60_000)} 分沒輸出` : ''
+    const k = kernelJobLabel(j.task, runs)
+    const project = k ? k.project : j.project
     rows.push({
-      key: `job-${j.jobId}`, kind: j.status, model: modelText(j.agent, j.model, j.effort), source: j.project ? '其他專案' : '同專案',
-      task: [j.project ? `［${j.project}］` : '', j.task, quiet].filter(Boolean).join(' '), wrap: false, at: j.endedAt ?? now,
+      key: `job-${j.jobId}`, kind: j.status, model: modelText(j.agent, j.model, j.effort), source: k ? 'kernel' : j.project ? '其他專案' : '同專案',
+      task: [project ? `［${project}］` : '', k ? k.task : j.task, quiet].filter(Boolean).join(' '), wrap: false, at: j.endedAt ?? now,
       time: j.status === 'running' ? `已跑 ${elapsed((now - j.startedAt) / 1000)}` : ago(now - (j.endedAt ?? now)),
     })
   }
@@ -202,15 +219,111 @@ export const DISCOVER_EVERY_MS = 60_000
     poll = undefined; expiry = undefined; scanner = undefined; discovery = []
   }
   const readJson = ($: EngineInterface, path: string) => $.fs.read(path).then(t => JSON.parse(t) as unknown, () => undefined)
+  /** src/core/live-jobs.ts jobStateDir: AI_CLI_STATE_DIR, else ~/.local/state/ai-cli. */
+  async function stateDir($: EngineInterface) {
+    const dir = await $.env.get('AI_CLI_STATE_DIR')
+    const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || ''
+    return dir || `${home}/.local/state/ai-cli`
+  }
+  let kernelScanning = false
+  /** First kernel scan of a session: what is already waiting is drawn, not toasted. */
+  let kernelBaseline = true
+  /** Toasts already shown, by run, state event and kind: each change of state is told once. */
+  const alerted = new Set<string>()
+  /**
+   * Per run: the parsed journal, keyed by its size and mtime so an unchanged one is not read again; the contract,
+   * which never changes once written; archived.json's seq. `settled` runs (finished and out of sight) are not listed again.
+   */
+  const runCache = new Map<string, { journalKey?: string, events?: Record<string, unknown>[], error?: string, contract?: unknown, archivedKey?: string, archivedSeq?: number, settled?: boolean }>()
+  /** Reads <state dir>/kernel/runs (src/ai-cli_kernel/journal.ts kernelRunsDir) with $.fs only: no ai-cli, no node. */
+  async function scanKernel($: EngineInterface) {
+    if (kernelScanning) return
+    kernelScanning = true
+    const epoch = generation
+    try {
+      const root = `${await stateDir($)}/kernel/runs`
+      const now = await $.clock.now()
+      // A listing that fails tells nothing: keep the last tick's rows and baseline, or the next good tick would toast
+      // every run already waiting as if it had just changed. (No folder yet, before any run, fails the same way.)
+      const folders = await $.fs.list(root).catch(() => undefined)
+      if (!folders) return
+      const found: KernelRunSummary[] = []
+      const archived: Record<string, number> = {}
+      for (const folder of folders) {
+        if (folder.kind !== 'dir' || !RUN_ID.test(folder.name)) continue
+        const cached = runCache.get(folder.name) ?? {}
+        if (cached.settled) continue
+        runCache.set(folder.name, cached)
+        const path = `${root}/${folder.name}`
+        const files = await $.fs.list(path).catch((err: unknown) => err instanceof Error ? err : new Error(String(err)))
+        // A run folder that cannot be listed gets a row saying so instead of silently dropping out.
+        if (files instanceof Error) { found.push(unreadableRun(folder.name, `讀不到 run 目錄（${files.message}）`, now)); continue }
+        const file = (name: string) => files.find(f => f.name === name)
+        const journal = file('journal.jsonl'), archive = file('archived.json')
+        // Handed over (archived) or judged (verdict.json) long ago: settled without reading a byte of it.
+        if (journal && now - journal.mtimeMs > KERNEL_RECENT_MS && (archive || file('verdict.json')) && !cached.events) { cached.settled = true; continue }
+        let run: KernelRunSummary
+        try {
+          if (!journal) throw new Error('沒有 journal.jsonl')
+          const key = `${journal.size}:${journal.mtimeMs}`
+          // A broken or oversized journal is not read again until it changes.
+          if (cached.journalKey === key && cached.error) throw new Error(cached.error)
+          if (cached.journalKey !== key || !cached.events) {
+            cached.journalKey = key; cached.events = undefined; cached.error = undefined
+            try { cached.events = parseJournal(await $.fs.read(`${path}/journal.jsonl`)) }
+            catch (err) { cached.error = err instanceof Error ? err.message : String(err); throw err }
+          }
+          if (cached.contract === undefined) {
+            const contract = await readJson($, `${path}/contract.json`)
+            if (contract === undefined) throw new Error('讀不到 contract.json')
+            cached.contract = contract
+          }
+          run = summarizeKernelRun(folder.name, cached.contract, cached.events, !!file('runner.json'), now)
+        } catch (err) {
+          run = unreadableRun(folder.name, err instanceof Error ? err.message : String(err), journal?.mtimeMs || now)
+        }
+        if (archive) {
+          const key = `${archive.size}:${archive.mtimeMs}`
+          if (cached.archivedKey !== key) {
+            const seq = (await readJson($, `${path}/archived.json`) as { journalSeq?: unknown } | undefined)?.journalSeq
+            cached.archivedSeq = typeof seq === 'number' ? seq : undefined
+            cached.archivedKey = key
+          }
+          if (cached.archivedSeq !== undefined) archived[folder.name] = cached.archivedSeq
+        }
+        const visible = kernelVisible(run, now, archived[folder.name])
+        // Settled for good once its journal's own state is terminal and the row is out of sight: such a run can no
+        // longer be approved (src/ai-cli_kernel/api.ts:311 refuses a terminal state) and verdict.json is written only on
+        // delivery (src/ai-cli_kernel/loop.ts:628), so it never waits for the person again. A stop that is only derived
+        // from the journal (state still `running`) is not terminal and keeps being read.
+        if (!visible && run.terminal) { runCache.set(folder.name, { settled: true }); continue }
+        found.push(run)
+      }
+      for (const key of runCache.keys()) if (!folders.some(f => f.name === key)) runCache.delete(key)
+      if (epoch !== generation) return
+      for (const run of found) {
+        if (!ALERT_KINDS.includes(run.kind) || !kernelVisible(run, now, archived[run.runId])) continue
+        const key = alertKey(run)
+        if (alerted.has(key)) continue
+        alerted.add(key)
+        if (!kernelBaseline) $.ui.toast(alertText(run), { timeoutMs: KERNEL_TOAST_MS })
+      }
+      kernelBaseline = false
+      await update($, kernel, () => found)
+      await update($, kernelArchived, () => archived)
+    } catch {
+      // A kernel folder that cannot be listed shows no runs; the job rows are not affected.
+    } finally {
+      kernelScanning = false
+    }
+  }
   /** Reads the job store the server writes (src/core/live-jobs.ts jobStateDir): no MCP, so other sessions' jobs show too. */
   async function scan($: EngineInterface) {
     if (scanning) return
     scanning = true
     const epoch = generation
     try {
-      const dir = await $.env.get('AI_CLI_STATE_DIR')
-      const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || ''
-      const root = `${dir || `${home}/.local/state/ai-cli`}/jobs`
+      const root = `${await stateDir($)}/jobs`
       const here = await $.session.root()
       const now = await $.clock.now()
       const folders = await $.fs.list(root).catch(() => [])
@@ -340,8 +453,9 @@ export const register: Register = on => {
       $.clock.every(DISCOVER_EVERY_MS, () => { void refresh($) }),
     ]
     if (epoch === generation) {
-      scanner = $.clock.every(SCAN_MS, () => { void scan($) })
-      void scan($)
+      kernelBaseline = true
+      scanner = $.clock.every(SCAN_MS, () => { void scan($); void scanKernel($) })
+      void scan($); void scanKernel($)
     }
     return next(e)
   })
@@ -350,6 +464,8 @@ export const register: Register = on => {
     generation++; stop()
     await update($, jobs, () => [])
     await update($, machine, () => [])
+    await update($, kernel, () => [])
+    await update($, kernelArchived, () => ({}))
     return next(e)
   })
   on('tool.call', { tool: 'mcp__ai-cli__run' }, async ($, e, next) => {
@@ -370,8 +486,10 @@ export const register: Register = on => {
   })
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const now = await $.clock.now()
-    const rows = tableRows(await read($, jobs), await read($, machine), now)
-    if (e.props.hasSurvey || !rows.length) return next(e)
+    const runs = await read($, kernel)
+    const rows = tableRows(await read($, jobs), await read($, machine), now, runs)
+    const k = kernelRows(runs, now, await read($, kernelArchived))
+    if (e.props.hasSurvey || (!rows.length && !k.rows.length)) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     const spinner = SPINNER[Math.floor(now / POLL_MS) % SPINNER.length]
     const STATUS = { running: `${spinner} 執行`, ok: '✅ 成功', bad: '❌ 失敗', lost: '❔ 中斷', gone: '➖ 不追蹤' } as const
@@ -384,20 +502,36 @@ export const register: Register = on => {
       <Box key="task" flexGrow={1}><Text color={COLORS.text} bold={bold} wrap={wrap ? 'wrap' : 'truncate-end'}>{task}</Text></Box>,
       <Box key="time" width={12} flexShrink={0} justifyContent="flex-end"><Text color={COLORS.text} bold={bold}>{time}</Text></Box>,
     ]
+    // The kernel runs' own widths: their states are longer words than a job's, and they are a section of their own.
+    const kernelCells = (status: string, run: string, phase: string, since: string, total: string, bold: boolean) => [
+      <Box key="status" width={12} flexShrink={0}><Text color={COLORS.text} bold={bold}>{status}</Text></Box>,
+      <Box key="run" width={24} flexShrink={0}><Text color={COLORS.text} bold={bold} wrap="truncate-end">{run}</Text></Box>,
+      <Box key="phase" flexGrow={1}><Text color={COLORS.text} bold={bold} wrap="truncate-end">{phase}</Text></Box>,
+      <Box key="since" width={10} flexShrink={0} justifyContent="flex-end"><Text color={COLORS.text} bold={bold}>{since}</Text></Box>,
+      <Box key="total" width={12} flexShrink={0} justifyContent="flex-end"><Text color={COLORS.text} bold={bold}>{total}</Text></Box>,
+    ]
     const running = rows.filter(r => r.kind === 'running').length
+    const counts = rows.length ? `執行中 ${running} · 剛完成 ${rows.length - running}` : ''
     return <Box flexDirection="column" backgroundColor={COLORS.list} paddingX={1}>
-      <Box key="title"><Text color={COLORS.text} bold>{`🤖 ai-cli 背景工作（執行中 ${running} · 剛完成 ${rows.length - running}）`}</Text></Box>
-      <Box key="head" flexDirection="row">{cells('狀態', '來源', '模型', '任務／專案', '時間', false, false)}</Box>
+      <Box key="title"><Text color={COLORS.text} bold>{`🤖 ai-cli 背景工作（${[counts, kernelCounts(k.running, k.attention)].filter(Boolean).join(' · ')}）`}</Text></Box>
+      {rows.length ? <Box key="head" flexDirection="row">{cells('狀態', '來源', '模型', '任務／專案', '時間', false, false)}</Box> : null}
       {rows.map(r => <Box key={r.key} flexDirection="row" backgroundColor={BACKGROUND[r.kind]}>
         {cells(STATUS[r.kind], r.source, r.model, r.task, r.time, r.wrap, true)}
       </Box>)}
+      {k.rows.length ? <Box key="kernel-head" flexDirection="row">{kernelCells('kernel run', 'run／專案', '目前階段', '本階段', '總計／預算', false)}</Box> : null}
+      {k.rows.map((r: KernelRow) => <Box key={r.key} flexDirection="row" backgroundColor={KERNEL_BACKGROUND[r.kind]}>
+        {kernelCells(r.kind === 'running' ? `${spinner} ${r.status}` : r.status, r.run, r.phase, r.since, r.total, true)}
+      </Box>)}
+      {k.more ? <Box key="kernel-more"><Text color={COLORS.text}>{`…另有 ${k.more} 個 kernel run，ai-cli kernel status 看全部`}</Text></Box> : null}
     </Box>
   })
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     const list = await read($, jobs)
     const mine = new Set(list.map(j => j.pid))
     const others = (await read($, machine)).filter(j => j.status === 'running' && (j.pid === undefined || !mine.has(j.pid))).length
-    if (!list.length && !others) return next(e)
-    return next({ ...e, props: { ...e.props, tail: [e.props.tail, summary(list, others)].filter(Boolean).join(' · ') } })
+    const k = kernelRows(await read($, kernel), await $.clock.now(), await read($, kernelArchived))
+    const kernelPart = kernelCounts(k.running, k.attention)
+    if (!list.length && !others && !kernelPart) return next(e)
+    return next({ ...e, props: { ...e.props, tail: [e.props.tail, summary(list, others, kernelPart)].filter(Boolean).join(' · ') } })
   })
 }

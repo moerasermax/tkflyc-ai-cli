@@ -1,3 +1,5 @@
+import type { KernelRunSummary } from '../hooks/kernel'
+
 export type AiCliJobsJob = {
   pid: number
   agent: string
@@ -30,6 +32,13 @@ export type AiCliJobsMachineJob = {
 }
 declare module 'claude-code' {
   interface PluginState {
-    'ai-cli-jobs': { jobs: AiCliJobsJob[]; machine: AiCliJobsMachineJob[] }
+    'ai-cli-jobs': {
+      jobs: AiCliJobsJob[]
+      machine: AiCliJobsMachineJob[]
+      /** kernel runs read from <state dir>/kernel/runs that are not settled (finished and out of sight). */
+      kernel: KernelRunSummary[]
+      /** runId → archived.json's journalSeq, for the runs that have one. */
+      kernelArchived: Record<string, number>
+    }
   }
 }
