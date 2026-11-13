@@ -12,7 +12,7 @@ Claude Code 的正式 kernel 控制面板 plugin，版本 **0.1.0**。使用 CLI
 
 需要支援 `hooks.json` 的 `modules`、`command.run`、`$.process.run`、`$.ui.open` 與 Pane/Button 的 Claude Code。使用前可執行下方 validate/test 核對目前 CLI。需要 Node（與 ai-cli 相同，`^20.19.0 || >=22.12.0`）以及已建置的 ai-cli 原始碼 repo。
 
-不猜測 npm 最低版本：本 repo 的 `package.json` 是 7.0.0，但發版文件註明尚未發佈。請以已建置來源實際支援以下功能核對，舊的 npm 發行版不能只看版號推定相容：
+7.0.0 已於 2026-11-13 發佈到 npm，包含以下 kernel CLI 功能。不過本 plugin 仍從下述 repo 路徑執行 `dist/bin/ai-cli.js`，安裝 npm 套件不會替它設定來源路徑或更新 plugin；請以實際使用的已建置 repo 核對以下功能，不將此資訊推定為舊版的最低相容版本：
 
 ```text
 ai-cli kernel status --json

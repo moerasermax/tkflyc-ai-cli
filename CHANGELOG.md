@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 變更
+
+- 同步 7.0.0 已於 2026-11-13 發佈到 npm 的現況、安裝與安全支援說明，釐清 CI 替身測試與真實 CLI 的平台驗證範圍，並修正版本比較連結，避免讀者依過期的未發佈資訊操作。（Codex）
+
 ## [7.0.0] - 2026-11-13
 
 > 2026-11-07 定版號，2026-11-13 打 tag 並發佈到 npm。11-07 之後到發佈前的修正列在本節最後的「定版後、發佈前的修正」。
@@ -2669,8 +2673,8 @@ Antigravity 可用；**Kiro 沒額度**（CLI 回 `Not logged in`）、**Forge �
 - Windows 上優先解析 `.cmd`/`.exe` 而非 extensionless shim。
 - 移除已壞掉的 gemini 殘留；usage 外掛路徑改由 `AI_CLI_USAGE_PLUGIN_BIN` 環境變數設定。
 
-[Unreleased]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.9.1...HEAD
-[7.0.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.9.1...master
+[Unreleased]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v7.0.0...HEAD
+[7.0.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.9.1...v7.0.0
 [6.5.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.4.1...v6.5.0
 [6.4.1]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.4.0...v6.4.1
 [6.4.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v6.3.0...v6.4.0

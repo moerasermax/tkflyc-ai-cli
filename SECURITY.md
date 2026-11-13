@@ -27,11 +27,11 @@ answer is that it was not built for that.
 
 | Version | Supported |
 |---|---|
-| 7.x (current development line; 7.0.0 not yet on npm) | ✅ |
-| 6.9.x (latest on npm until 7.0.0 ships) | ✅ by upgrading; no backports |
+| 7.x (current release line; 7.0.0 published to npm on 2026-11-13) | ✅ |
+| 6.9.x (previous release line) | ✅ by upgrading; no backports |
 | ≤ 6.8 | ❌ |
 
-Fixes land on `master` and ship in the next release. Only this current line receives fixes; older releases receive no security backports. Until 7.0.0 ships on npm, fixes on this line are available from source.
+Fixes land on `master` and ship in the next release. Only this current line receives fixes; older releases receive no security backports. Version 7.0.0 is available on npm; upgrade to the current release line to receive its fixes.
 
 ## Reporting a vulnerability
 

@@ -422,7 +422,7 @@ ai-cli kernel result <run>
 
 有兩個範本。`readonly-audit`（預設）使用工具受限的唯讀模式。`develop` 會改程式：每個 run 有自己的 git worktree 和分支，kernel 自己跑你給的測試指令，通過才算完成，不會自動合併或推送交付分支。開工前的預設回復點使用專用位置，有 `origin` 就會推送，推送失敗便停下來。`develop` 的 worker 權限等於你本人，也會載入你完整的 CLI 設定，包含 MCP server。**它沒有隔離**，核准時要明確承認，只用在你信任的專案。
 
-7.0.0 尚未發佈到 npm。現階段請從 GitHub 取得原始碼，再執行 `npm install`、`npm run build`（見[快速開始](#快速開始)）；前提是 Node `^20.19.0 || >=22.12.0`、已安裝並登入 Codex CLI、已註冊 ai-cli MCP。kernel 只在一台 Windows 上實測；Linux、macOS 尚未實測，stub 測試不代表這兩個平台的行為已經驗證。
+7.0.0 已於 2026-11-13 發佈到 npm。可用 `claude mcp add ai-cli -s user -- npx -y @tkflyc/ai-cli-mcp` 安裝／註冊（見[快速開始](#快速開始)）；前提是 Node `^20.19.0 || >=22.12.0`、已安裝並登入 Codex CLI、已註冊 ai-cli MCP。更新後請重開所有 MCP server。Linux、macOS 的測試套件已在 CI 通過（使用替身 CLI）；kernel 搭配真實 vendor CLI 仍只在一台 Windows 實測過，不能據此視為 Linux、macOS 的真實使用已驗收。
 
 常用委任書可用 `kernel mandate save/approve/list/show/revoke` 保存與管理。同意預設 30 天到期，重新保存或撤銷就失效。`kernel trigger <name>` 每次只觸發一次，另有預設關閉的 `kernel triggers on|off` 與持久每日次數／用量帳本。`kernel schedule <name> --daily HH:MM` 先預覽，Windows 加 `--apply` 才登記，POSIX 只印 crontab。觸發任務不能關閉回復點，也不能使用 release 單次放行；完整操作與限制見教學手冊。
 

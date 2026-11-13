@@ -21,19 +21,19 @@ Peter Steinberger 的 claude-code-mcp（MIT）。分歧點在架構：上游把�
 
 ---
 
-## 現況（2026-11-07）
+## 現況（2026-11-13）
 
 | 項目 | 值 |
 | --- | --- |
 | GitHub | `moerasermax/tkflyc-ai-cli` — **2026-09-09 改名**，舊名是 `ai-cli-mcp` |
-| npm | `@tkflyc/ai-cli-mcp` — **已公開發佈**，最新仍是 `6.9.1`；**`7.0.0` 尚未發佈** |
-| 版本 | `7.0.0`（`package.json`）— 2026-11-07 定版號，**還沒打 tag、還沒發佈**，tag 等真的發 npm 時才打（紅線第 4 條）；內容是 `ai-cli_kernel` 加 6.9.1 之後的修正，相容性見 CHANGELOG。npm 上最新的是 `6.9.1` — 2026-10-20 發佈（codex 唯讀 job 可續接；Windows runner 改由 launcher 啟動、agy 可接回；Codex 額度改走 app-server RPC；gpt-5.5 退役）。前一版 `6.9.0`（2026-10-12，同專案自動接管）。GitHub Release 中英並存。**npm 上沒有 `6.2.0`**：那版只 bump 了 `package.json` 與 CHANGELOG，沒打 tag、沒發佈，內容僅透過 git 自動更新進各機器 |
+| npm | `@tkflyc/ai-cli-mcp` — **已公開發佈**，最新是 `7.0.0`（2026-11-13 發佈） |
+| 版本 | `7.0.0`（`package.json`）— 已打 tag `v7.0.0`（`ffd56ee`），2026-11-13 已發佈到 npm；內容包含 `ai-cli_kernel`、Windows Job Object containment、POSIX 子孫追蹤，相容性見 CHANGELOG。前一版 `6.9.1` — 2026-10-20 發佈（codex 唯讀 job 可續接；Windows runner 改由 launcher 啟動、agy 可接回；Codex 額度改走 app-server RPC；gpt-5.5 退役）。GitHub Release 中英並存。**npm 上沒有 `6.2.0`**：那版只 bump 了 `package.json` 與 CHANGELOG，沒打 tag、沒發佈，內容僅透過 git 自動更新進各機器 |
 | 授權 | **Apache-2.0** — 2026-09-09 從 MIT 改的，附 `NOTICE` |
 | 主分支 | `master`（push 到 master 等同部署，所有機器會自動拉） |
 | CI | Windows / Linux / macOS × Node 20.19、22 — **三個平台都是閘門**。kernel 的真實 CLI 只在一台 Windows 實測過 |
 | 本機路徑 | 目錄名還是舊的 `ai-cli-mcp-source`，不影響任何東西 |
 
-規模：`src/` 65 個 `.ts`、17,431 行（2026-11-07）；驗證腳本都在 `tests/`。`npm test` 跑哪幾支以 `tools/run-tests.mjs` 的
+規模：`src/` 90 個 `.ts`、23,186 行（2026-11-13）；驗證腳本都在 `tests/`。`npm test` 跑哪幾支以 `tools/run-tests.mjs` 的
 `TESTS` 清單為準，刻意不進的列在同檔 `EXCLUDED`（`verify-e2e.mjs` 會真的燒額度、`verify-strict-behaviour.mjs`
 屬手動輔助）；兩邊都沒列的 `verify-*.mjs`，runner 開跑前就報錯。
 
