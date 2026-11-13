@@ -59,7 +59,7 @@ async function until(fn, ms = 30000, step = 100) {
   };
   const recordOf = job => readTreeRecord(job.directory);
   const sealedRecord = job => until(() => { const rec = recordOf(job); return rec && rec !== 'corrupt' && rec.sealed ? rec : null; }, 40000);
-  const describe = rec => JSON.stringify(rec?.members.map(item => ({ pid: item.pid, name: item.name, loose: item.loose ?? false })));
+  const describe = rec => JSON.stringify(rec?.members.map(item => ({ pid: item.pid, name: item.name, started: item.started, gone: item.gone, loose: item.loose ?? false, weak: item.weak ?? false })));
   /** runner 與 worker 都確定不在了（身分對不上表裡任何一列）。之後 isGone 還是 false，擋住它的就只可能是子孫。 */
   const runnerAndWorkerGone = job => until(async () => {
     const meta = JSON.parse(readFileSync(join(job.directory, 'meta.json'), 'utf8'));
@@ -69,6 +69,15 @@ async function until(fn, ms = 30000, step = 100) {
   /** 只在身分還對得上時才送終止。 */
   const terminateVerified = async identity => { if (await aliveNow(identity)) { try { process.kill(identity.pid, 'SIGKILL'); } catch { /* 已經不在。 */ } } };
   const executor = new FileJobExecutor();
+  const diagnostics = async (label, job, grandchild, ref) => {
+    if (process.platform === 'win32') return;
+    const meta = JSON.parse(readFileSync(join(job.directory, 'meta.json'), 'utf8'));
+    const pids = [meta.runner?.pid, meta.worker?.pid, grandchild?.pid].filter(Boolean);
+    console.log('DIAG '+label+' '+JSON.stringify({ meta, record: recordOf(job), blockers: await executor.blockers(ref) }));
+    try { const table = await listProcessTable(); console.log('DIAG '+label+' table '+JSON.stringify({ ...table, rows: table.rows.filter(row => pids.includes(row.pid) || pids.includes(row.ppid) || row.pgid === meta.worker?.pid) })); } catch (e) { console.log('DIAG table failed '+e.message); }
+    try { const { execFileSync } = await import('node:child_process'); console.log('DIAG '+label+' ps '+execFileSync('ps', ['-o', 'pid=,ppid=,pgid=,stat=,lstart=,comm=', '-p', pids.join(',')], { encoding: 'utf8', windowsHide: true, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } })); } catch (e) { console.log('DIAG ps '+String(e.stdout ?? e.message)); }
+  };
+
   try {
     if (process.platform === 'win32') {
       for (const agent of ['grok', 'codex']) {
@@ -93,6 +102,7 @@ async function until(fn, ms = 30000, step = 100) {
       await store.wait([job.pid], 60);
       const rec = await sealedRecord(job);
       console.log(`INFO (a) worker pid ${rec?.root.pid}，孫程序 pid ${grandchild?.pid}，紀錄：${describe(rec)}，列舉 ${rec?.scans} 次、失敗 ${rec?.failed} 次，最長間隔 ${rec?.maxGapMs} ms`);
+      await diagnostics('a before kill', job, grandchild, ref);
       check('真機：父程序活著時看到的孫程序以確定身分記進紀錄', !!rec?.members.some(item => item.pid === grandchild?.pid && item.started === grandchild.started && !item.loose && !item.weak), rec);
       check('真機：正常跑完的 job 紀錄沒有追蹤缺口', !!rec && treeGap(rec) === null, rec);
       check('真機：孫程序此時確實還活著', await aliveNow(grandchild));
@@ -103,6 +113,7 @@ async function until(fn, ms = 30000, step = 100) {
       await executor.kill(ref);
       check('真機：kill 之後孫程序消失', await until(async () => !(await aliveNow(grandchild)), 15000, 300) === true);
       check('真機：孫程序消失後 isGone 轉為 true', await until(() => executor.isGone(ref), 15000, 300) === true);
+      if (await aliveNow(grandchild) || !await executor.isGone(ref)) await diagnostics('a after kill', job, grandchild, ref);
     }
     {
       // (b) worker 一啟動孫程序就結束：沒有任何一次列舉看到「父程序活著」，只有事後的間接跡象。直接執行（不經 cmd.exe），worker 就是孫程序的父程序。
@@ -118,7 +129,7 @@ async function until(fn, ms = 30000, step = 100) {
         // CI 診斷：擋住的不是那個孫程序時，印出 runner／worker 在 ps 與程序表裡的狀態。
         const meta = JSON.parse(readFileSync(join(job.directory, 'meta.json'), 'utf8'));
         const pids = [meta.runner?.pid, meta.worker?.pid, grandchild?.pid].filter(Boolean);
-        try { const { execFileSync } = await import('node:child_process'); console.log('DIAG (b) ps ' + JSON.stringify(execFileSync('ps', ['-o', 'pid=,ppid=,stat=,comm=', '-p', pids.join(',')], { encoding: 'utf8' }))); } catch (e) { console.log('DIAG (b) ps failed ' + JSON.stringify(String(e.stdout ?? e.message))); }
+        try { const { execFileSync } = await import('node:child_process'); console.log('DIAG (b) ps ' + JSON.stringify(execFileSync('ps', ['-o', 'pid=,ppid=,pgid=,stat=,lstart=,comm=', '-p', pids.join(',')], { encoding: 'utf8', windowsHide: true, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } }))); } catch (e) { console.log('DIAG (b) ps failed ' + JSON.stringify(String(e.stdout ?? e.message))); }
         console.log('DIAG (b) meta ' + JSON.stringify({ runner: meta.runner, worker: meta.worker }) + ' table ' + JSON.stringify((await listProcessTable()).rows.filter(item => pids.includes(item.pid))) + ' identities ' + JSON.stringify([...(await lookupIdentities(pids)).values()]));
       }
       check('真機：不確定的程序擋住 isGone，說明標明不會自動終止', await executor.isGone(ref) === false && blockers.some(text => text.includes(`子孫 pid ${grandchild?.pid}`) && text.includes('不會自動終止')), blockers);

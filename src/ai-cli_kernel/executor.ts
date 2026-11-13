@@ -332,6 +332,7 @@ export class FileJobExecutor implements KernelExecutor {
     const isAlive = (identity: ProcessIdentity): boolean => {
       const current = live.get(identity.pid);
       if (current) return !identity.started || sameIdentity(identity, current);
+      if (snapshot?.complete && !snapshot.unknown.some(row => row.pid === identity.pid)) return false;
       return mayBeAlive(identity.pid);
     };
     return { runner: isAlive(meta.runner), worker: meta.worker ? isAlive(meta.worker) : false };

@@ -17,9 +17,9 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { compareStarted, parsePsTable, readProcTable, surveyTree, startTreeTracker, readTreeRecord, terminateTreeMembers, treeGap, TREE_FILE, TREE_GAP_SLACK_MS } from '../dist/core/process-tree.js';
-import { JobStore, collectStoreFiles, JOB_HOLD_FILE, RETENTION_MS } from '../dist/core/job-store.js';
-import { jobStateDir } from '../dist/core/live-jobs.js';
+import { terminatePosixMember, treeTermination, compareStarted, parsePsTable, readProcTable, surveyTree, startTreeTracker, readTreeRecord, terminateTreeMembers, treeGap, TREE_FILE, TREE_GAP_SLACK_MS } from '../dist/core/process-tree.js';
+import { posixTerminationReply, jobResult, JobStore, collectStoreFiles, JOB_HOLD_FILE, RETENTION_MS } from '../dist/core/job-store.js';
+import { parsePsIdentities, jobStateDir } from '../dist/core/live-jobs.js';
 import { FileJobExecutor } from '../dist/ai-cli_kernel/executor.js';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -153,8 +153,8 @@ const sure = (result, pid) => !!has(result, pid) && !has(result, pid).loose && !
   const rows = [{ pid: 100, ppid: 1, pgid: 100, started: lstart(0), name: 'worker' }, { pid: 200, ppid: 100, pgid: 100, started: lstart(10), name: 'same-second' }, { pid: 210, ppid: 100, pgid: 100, started: lstart(3), name: 'older' }];
   const result = surveyTree(record('darwin', root), snap(rows), { before: at(10) + 400, now: at(11), rootAlive: true });
   check('macOS：出生的那一秒內第一次看到的成員標成精度不足（只擋不殺），之後才看到的是確定', has(result, 200)?.weak === true && sure(result, 210), result.record.members);
-  // 子程序自成一個 group：只剩「父程序是 200」這條線，而 200 的身分精度不足。
-  const child = surveyTree(result.record, snap([...rows, { pid: 300, ppid: 200, pgid: 300, started: lstart(20), name: 'child' }].filter(item => item.pid !== 100)), { before: at(30), now: at(31) });
+  // 子程序自成一個 group：移除已核實的 group 錨點 210，才真的只剩精度不足的父程序 200。
+  const child = surveyTree(result.record, snap([...rows, { pid: 300, ppid: 200, pgid: 300, started: lstart(20), name: 'child' }].filter(item => item.pid !== 100 && item.pid !== 210)), { before: at(30), now: at(31) });
   check('macOS：精度不足的成員生的子程序不算確定', has(child, 300)?.loose === true, child.record.members);
 }
 {
@@ -189,6 +189,55 @@ const sure = (result, pid) => !!has(result, pid) && !has(result, pid).loose && !
   check('追蹤缺口：存活期間太久沒有成功列舉', /沒有成功列舉/.test(treeGap({ ...base, maxGapMs: 5000 + TREE_GAP_SLACK_MS + 1 }) ?? '') && treeGap({ ...base, maxGapMs: 5000 + TREE_GAP_SLACK_MS }) === null);
 }
 
+/* FIX14: coarse identities need fresh ownership, not elapsed time alone. */
+{
+  const stamp = sec => new Date(at(sec)).toUTCString().replace(/^\w+, (\d+) (\w+) (\d+) (.+) GMT$/, (_, d, m, y, t) => `Thu ${m} ${d.padStart(2, ' ')} ${t} ${y}`);
+  const root = { pid: 100, started: stamp(0), name: 'worker', since: iso(0) };
+  const child = { pid: 200, ppid: 100, pgid: 200, started: stamp(10), name: 'detached' };
+  const rows = [{ ...root, ppid: 1, pgid: 100 }, child];
+  const first = surveyTree(record('darwin', root), snap(rows), { before: at(10) + 10, now: at(10) + 20, rootAlive: true });
+  const within = surveyTree(first.record, snap(rows), { before: at(10) + 900, now: at(10) + 950, rootAlive: true });
+  check('FIX14 same birth second remains weak despite live parent', has(within, 200)?.weak === true);
+  const mature = surveyTree(first.record, snap(rows), { before: at(11), now: at(11) + 20, rootAlive: true });
+  check('FIX14 fresh held parent after birth boundary promotes detached child', sure(mature, 200));
+  const lost = surveyTree(first.record, snap([{ ...child, ppid: 1 }]), { before: at(20), now: at(21) });
+  check('FIX14 elapsed time without fresh ownership cannot promote weak PID', has(lost, 200)?.weak === true);
+  const reusedGroup = surveyTree(first.record, snap([{ ...child, ppid: 1, pgid: 100 }]), { before: at(20), now: at(21) });
+  check('FIX14 dead group leader plus weak member cannot prove group ownership', has(reusedGroup, 200)?.weak === true);
+  const newGroup = surveyTree(first.record, snap([{ ...rows[0], started: stamp(15) }, { ...child, ppid: 1, pgid: 100 }]), { before: at(20), now: at(21) });
+  check('FIX14 reused leader PID cannot anchor a process group', has(newGroup, 200)?.weak === true);
+  const anchored = surveyTree(mature.record, snap([{ ...child, ppid: 1, pgid: 100 }, { pid: 300, ppid: 1, pgid: 100, started: stamp(15), name: 'orphan' }]), { before: at(20), now: at(21) });
+  check('FIX14 proven survivor anchors group after leader exits', sure(anchored, 300));
+  const noRoot = surveyTree(first.record, snap([{ ...child, ppid: 1, pgid: 100 }]), { before: at(20), now: at(21), rootAlive: true });
+  check('FIX14 missing worker row cannot prove group membership', has(noRoot, 200)?.weak === true);
+}
+{
+  const base = record('linux', member(100, 0), [member(200, 1)], { ended: iso(10), sealed: true });
+  const gone = treeTermination(base, snap([]));
+  check('FIX14 complete sealed empty tree confirms termination', gone.confirmed && gone.reasons.length === 0);
+  const cases = [treeTermination(base, snap([row(200, 1, 1)])), treeTermination(base, snap([row(100, 1, 0)])), treeTermination(base, snap([], { complete: false })), treeTermination(base, snap([], { unknown: [{ pid: 200, ppid: 1 }] })), treeTermination({ ...base, sealed: undefined }, snap([]))];
+  check('FIX14 alive unknown incomplete or unsealed trees cannot confirm termination', cases.every(r => !r.confirmed && r.reasons.length > 0), cases);
+  for (const [name, exit] of [['missing', undefined], ['legacy', { killed: true }], ['pending', { termination: { confirmed: true, pending: true, reasons: ['pending'] } }], ['survivor', { termination: cases[0] }]]) {
+    const reply = posixTerminationReply(100, 'fixture', exit);
+    check('FIX14 kill reply unconfirmed '+name, reply.status === 'termination_unconfirmed' && reply.terminationConfirmed === false && reply.terminationReasons.length > 0, reply);
+  }
+  check('FIX14 kill reply requires final descendant proof', posixTerminationReply(100, 'fixture', { termination: gone }).status === 'terminated');
+  const parsed = parsePsIdentities('501 1 S Wed Nov 11 01:00:00 2026 /bin/node\n502 1 Z Wed Nov 11 01:00:00 2026 (node)\n503 1 X Wed Nov 11 01:00:00 2026 node\n504 1 S Wed Nov 11 01:00:00 2026 npm @scope/pkg');
+  check('FIX14 BSD identity parser filters zombies and dead states', parsed.size === 2 && parsed.get(501)?.started === 'Wed Nov 11 01:00:00 2026' && parsed.get(504)?.name === 'npm @scope/pkg', [...parsed]);
+}
+
+{
+  for (const [mode, expected] of [['ignores', 'SIGTERM,SIGKILL'], ['exits', 'SIGTERM'], ['reused', 'SIGTERM'], ['unknown', 'SIGTERM']]) {
+    let calls = 0; const signals = [], pauses = [];
+    const result = await terminatePosixMember(member(200, 1), async () => {
+      calls++; if (calls > 1 && mode === 'unknown') throw Error('unavailable');
+      return new Map(calls > 1 && mode === 'exits' ? [] : [[200, member(200, calls > 1 && mode === 'reused' ? 99 : 1)]]);
+    }, Date.now() + 5000, (pid, kind) => signals.push(kind), async ms => pauses.push(ms));
+    check('FIX14 POSIX bounded SIGTERM escalation '+mode, result && signals.join() === expected && pauses.length === 1 && pauses[0] <= 200 && calls === 2, { signals, pauses, calls });
+  }
+  const signals = []; await terminatePosixMember(member(200, 1, { weak: true }), async () => new Map([[200, member(200, 1)]]), Infinity, (pid, kind) => signals.push(kind), async () => {});
+  check('FIX14 POSIX escalation never signals weak identities', signals.length === 0);
+}
 /* ---- 2. 終止：逐筆核對身分 ---- */
 {
   const sent = [];
@@ -314,6 +363,42 @@ const sure = (result, pid) => !!has(result, pid) && !has(result, pid).loose && !
   check('程序表不完整的列舉不算成功、不能封存，但看到的成員照記', sealed === false && rec !== 'corrupt' && rec?.scans === 0 && !rec.sealed && rec.members.some(item => item.pid === 200), rec);
 }
 
+for (const loseParent of [false, true]) {
+  const directory = mkdtempSync(join(TEMP, 'fix14-boundary-'));
+  const stamp = ms => new Date(ms).toUTCString().replace(/^\w+, (\d+) (\w+) (\d+) (.+) GMT$/, (_, d, m, y, t) => `Thu ${m} ${d.padStart(2, ' ')} ${t} ${y}`);
+  const worker = { pid: 100, started: stamp(Date.now() - 2000), name: 'worker' };
+  let alive = true, calls = 0, child; const sent = [];
+  const tracker = startTreeTracker({ directory, pid: 100, identity: worker, since: Date.now(), platform: 'darwin', intervalMs: 60000, alive: () => alive,
+    table: async () => { calls++; child ??= { pid: 200, ppid: 100, pgid: 200, started: stamp(Date.now()), name: 'child' }; if (calls > 1 && loseParent) alive = false; return snap([...(alive ? [{ ...worker, ppid: 1, pgid: 100 }] : []), { ...child, ppid: alive ? 100 : 1 }]); },
+    lookup: async () => new Map([[200, child]]), send: pid => sent.push(pid), killBudgetMs: 2000 });
+  try {
+    const began = Date.now(); await tracker.killRecorded();
+    check('FIX14 bounded pre-kill rescan '+(loseParent ? 'losing owner stays blocked' : 'promotes owned child'), calls >= 2 && Date.now() - began < 2500 && (loseParent ? sent.length === 0 : sent.join() === '200'), { calls, sent });
+  } finally { alive = false; tracker.ended(); await tracker.seal(); }
+}
+
+{
+  const directory = mkdtempSync(join(TEMP, 'fix14-slow-table-'));
+  const stamp = ms => new Date(ms).toUTCString().replace(/^\w+, (\d+) (\w+) (\d+) (.+) GMT$/, (_, d, m, y, t) => `Thu ${m} ${d.padStart(2, ' ')} ${t} ${y}`);
+  const worker = { pid: 100, started: stamp(Date.now() - 2000), name: 'worker' };
+  let calls = 0, alive = true, child; const sent = [];
+  const tracker = startTreeTracker({ directory, pid: 100, identity: worker, since: Date.now(), platform: 'darwin', intervalMs: 60000, alive: () => alive,
+    table: async () => { calls++; child ??= { pid: 200, ppid: 100, pgid: 200, started: stamp(Date.now()), name: 'child' }; if (calls === 1) await sleep(1010 - Date.now() % 1000); return snap([{ ...worker, ppid: 1, pgid: 100 }, child]); },
+    lookup: async () => new Map([[200, child]]), send: pid => sent.push(pid), killBudgetMs: 3000 });
+  try { await tracker.killRecorded(); check('FIX14 table crossing birth boundary still rescans', calls >= 2 && sent.join() === '200', { calls, sent }); }
+  finally { alive = false; await tracker.seal(); }
+}
+{
+  const directory = mkdtempSync(join(TEMP, 'fix14-confirm-history-'));
+  let table = snap([]), calls = 0;
+  const tracker = startTreeTracker({ directory, pid: 100, identity: member(100, 0), since: Date.now(), platform: 'linux', intervalMs: 60000, alive: () => false,
+    table: async () => { calls++; return table; }, killBudgetMs: 200 });
+  await tracker.seal(); table = snap([], { unknown: [{ pid: 200, ppid: 100 }] });
+  const unknown = await tracker.confirmation(); table = snap([]);
+  const later = await tracker.confirmation();
+  check('FIX14 confirmation preserves newly unknown descendant history', !unknown.confirmed && !later.confirmed && readTreeRecord(directory)?.uncertainHistory === true, { unknown, later, calls });
+}
+
 /* ---- 4. kernel 執行器：假程序表＋假 job 目錄 ---- */
 const GONE_PID = 2147480000; // 不會有程序用到的 pid：process.kill(pid, 0) 回 ESRCH。
 const sealedRecord = (worker, members, extra = {}) => ({ ...record('win32', { ...worker, gone: iso(-10) }, members), ended: iso(-10), sealed: true, boot: 'boot-a', ...extra });
@@ -338,6 +423,20 @@ const executorWith = (table, extra = {}) => {
   return { executor, terminated };
 };
 const held = fixture => existsSync(join(fixture.directory, JOB_HOLD_FILE));
+{
+  const { executor } = executorWith({ value: [] });
+  const meta = { runner: { pid: process.pid, started: 'fixture', name: 'node' } };
+  check('FIX14 complete table absence overrides kill-zero zombie liveness', (await executor.identitiesAlive(meta, snap([]))).runner === false);
+  check('FIX14 unreadable or incomplete table keeps root uncertain', (await executor.identitiesAlive(meta, snap([], { unknown: [{ pid: process.pid, ppid: 1 }] }))).runner === true && (await executor.identitiesAlive(meta, snap([], { complete: false }))).runner === true);
+  const fixture = fakeJob(); const store = new JobStore(jobStateDir());
+  try {
+    await store.ready; const job = store.get(fixture.job.pid, fixture.job.jobId);
+    check('FIX14 job result does not claim descendants gone from legacy exit', jobResult(job).terminationConfirmed === false);
+    const path = join(fixture.directory, 'exit.json'); const exit = JSON.parse(readFileSync(path, 'utf8')); writeFileSync(path, JSON.stringify({ ...exit, termination: { confirmed: false, reasons: ['descendant still alive'] } }));
+    check('FIX14 job result exposes descendant termination reasons', jobResult(job).terminationReasons?.includes('descendant still alive'));
+  } finally { store.dispose(); }
+}
+
 {
   const child = member(GONE_PID + 10, -50);
   const fixture = fakeJob({ members: [child] });

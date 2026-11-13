@@ -266,7 +266,7 @@ cp.spawn=(binary,...args)=>{if(binary!=='git')return original(binary,...args);ap
     writeFileSync(probe, `import{createRequire,syncBuiltinESMExports}from'node:module';import{promisify}from'node:util';import assert from'node:assert/strict';
 Object.defineProperty(process,'platform',{value:'darwin'});
 const cp=createRequire(import.meta.url)('node:child_process');const stub=()=>{throw Error('unexpected callback form');};
-stub[promisify.custom]=async(binary,args,options)=>{assert.equal(binary,'ps');assert.equal(options.env.LC_ALL,'C');assert.equal(options.env.TZ,'UTC');return{stdout:'123 1 Thu Oct  8 00:00:00 2026 /usr/bin/codex\\n'};};
+stub[promisify.custom]=async(binary,args,options)=>{assert.equal(binary,'ps');assert.equal(options.env.LC_ALL,'C');assert.equal(options.env.TZ,'UTC');assert.equal(options.windowsHide,true);assert.equal(args[3],'pid=,ppid=,stat=,lstart=,comm=');return{stdout:'123 1 S Thu Oct  8 00:00:00 2026 /usr/bin/codex\\n'};};
 cp.execFile=stub;syncBuiltinESMExports();const{lookupIdentities}=await import(${JSON.stringify(pathToFileURL(join(ROOT, 'dist/core/live-jobs.js')).href)});
 process.env.TZ='Asia/Taipei';const a=(await lookupIdentities([123])).get(123);process.env.TZ='America/New_York';const b=(await lookupIdentities([123])).get(123);console.log(JSON.stringify([a,b]));`);
     const child = spawn(process.execPath, [probe], { windowsHide: true, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -279,7 +279,7 @@ process.env.TZ='Asia/Taipei';const a=(await lookupIdentities([123])).get(123);pr
     writeFileSync(probe, `import{createRequire,syncBuiltinESMExports}from'node:module';import{promisify}from'node:util';import assert from'node:assert/strict';
 Object.defineProperty(process,'platform',{value:'darwin'});
 const cp=createRequire(import.meta.url)('node:child_process');const stub=()=>{throw Error('unexpected callback');};let empty=false;
-stub[promisify.custom]=async(binary,args)=>{assert.equal(binary,'ps');assert.equal(args[1],'123,999999');throw Object.assign(Error('exit 1'),{code:1,stdout:empty?undefined:'123 1 Thu Oct  8 00:00:00 2026 /usr/bin/codex\\n'});};cp.execFile=stub;syncBuiltinESMExports();
+stub[promisify.custom]=async(binary,args,options)=>{assert.equal(binary,'ps');assert.equal(args[1],'123,999999');assert.equal(args[3],'pid=,ppid=,stat=,lstart=,comm=');assert.equal(options.windowsHide,true);throw Object.assign(Error('exit 1'),{code:1,stdout:empty?undefined:'123 1 S Thu Oct  8 00:00:00 2026 /usr/bin/codex\\n999999 1 Z Thu Oct  8 00:00:00 2026 (node)\\n'});};cp.execFile=stub;syncBuiltinESMExports();
 const{lookupIdentities}=await import(${JSON.stringify(pathToFileURL(join(ROOT, 'dist/core/live-jobs.js')).href)});
 const ids=await lookupIdentities([123,999999]);assert.equal(ids.size,1);assert.equal(ids.get(123).name,'codex');empty=true;assert.equal((await lookupIdentities([123,999999])).size,0);`);
     const child = spawn(process.execPath, [probe], { windowsHide: true, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });

@@ -41,7 +41,7 @@ export interface JobMeta {
   containmentProtocol?: 1;
   adoptedFrom?: Array<{ principal: ProcessIdentity | null; server: ProcessIdentity | null; adoptedAt: string }>;
 }
-export interface JobExit { exitCode: number | null; signal: string | null; endTime: string; timedOut: boolean; killed: boolean; error?: string }
+export interface JobExit { exitCode: number | null; signal: string | null; endTime: string; timedOut: boolean; killed: boolean; error?: string; termination?: { confirmed: boolean; pending?: true; reasons: string[] } }
 export interface RunnerSpec {
   command: string; args: string[]; cwd: string; stdin: boolean; needsShell: boolean; timeoutMs?: number;
   /** 可省略：舊 server 的 spec 照舊走 pipe；meta/exit 格式不變。 */
@@ -398,6 +398,14 @@ export function refreshJob(job: StoredJob): void {
   }
   if (lost && !job.closed) { job.closed = true; job.process.emit('close'); }
 }
+/** POSIX acknowledgement is a proof of descendants gone, not merely exit.json. */
+export function posixTerminationReply(pid: number, jobId: string, exit?: JobExit) {
+  const confirmed = exit?.termination?.confirmed === true && !exit.termination.pending;
+  return { pid, jobId, status: confirmed ? 'terminated' : 'termination_unconfirmed', terminationConfirmed: confirmed,
+    terminationReasons: confirmed ? [] : exit?.termination?.reasons ?? ['Descendant termination has not been verified'],
+    message: confirmed ? 'Worker and recorded descendants terminated' : 'Termination unconfirmed; descendants may still be alive' };
+}
+
 export function jobResult(job: StoredJob, verbose = false): Record<string, unknown> {
   refreshJob(job);
   let stdout = job.stdout, stderr = job.stderr, parsed: any = { ...job.parsed };
@@ -423,6 +431,10 @@ export function jobResult(job: StoredJob, verbose = false): Record<string, unkno
     result[`${stream}Truncated`] = { totalChars: job.cursors[stream].chars, shownChars: job[stream].length };
   }
   result.jobId = job.meta.jobId;
+  if (job.meta.tree === 1 && !job.meta.containment && job.status !== 'running') {
+    const proof = posixTerminationReply(job.pid, job.meta.jobId, readJobExit(job.directory));
+    result.terminationConfirmed = proof.terminationConfirmed; result.terminationReasons = proof.terminationReasons;
+  }
   if(job.meta.containment&&!drainedProof(job.meta.containment)&&json<{state?:string}>(join(job.directory,'containment-status.json'))?.state==='unknown'){result.containment='containment_lost';result.terminationConfirmed=false;}
   if (verbose && job.messageRef && job.messageRef.length > VERBOSE_MAX_BYTES) result.agentOutputTruncated = { totalBytes: job.messageRef.length, limitBytes: VERBOSE_MAX_BYTES };
   for (const stream of ['stdout', 'stderr'] as const) if (verbose && job.cursors[stream].offset > VERBOSE_MAX_BYTES) {
@@ -917,16 +929,16 @@ export class JobStore {
     }
     const startupDeadline = Date.now() + 15000;
     while (!job.meta.runner.started && job.status === 'running' && Date.now() < startupDeadline) { await new Promise(resolve => setTimeout(resolve, 25)); refreshJob(job); }
-    if (job.status !== 'running') return { pid, jobId: job.meta.jobId, status: job.status, message: 'Process already terminated' };
+    if (job.status !== 'running') return posixTerminationReply(pid, job.meta.jobId, readJobExit(job.directory));
     const ids = await this.lookup([job.meta.runner.pid, ...(job.meta.worker ? [job.meta.worker.pid] : [])]);
     if (!sameIdentity(job.meta.runner, ids.get(job.meta.runner.pid))) throw new Error('Runner identity is unavailable or changed; refusing to kill an unverified process');
     // Windows 不用 taskkill runner，讓它有機會落 exit.json；檔案控制通道跨平台可用。
     atomicJson(join(job.directory, 'kill.json'), { runner: job.meta.runner, requestedAt: new Date().toISOString() });
     const deadline = Date.now() + 10000;
-    while (Date.now() < deadline && !readJobExit(job.directory)) await new Promise(resolve => setTimeout(resolve, 50));
+    while (Date.now() < deadline && (!readJobExit(job.directory) || readJobExit(job.directory)?.termination?.pending)) await new Promise(resolve => setTimeout(resolve, 50));
     refreshJob(job);
     if (job.status === 'running') throw new Error('Runner did not acknowledge termination');
-    return { pid, jobId: job.meta.jobId, status: 'terminated', message: 'Process terminated successfully' };
+    return posixTerminationReply(pid, job.meta.jobId, readJobExit(job.directory));
   }
   dispose(): void { if (this.timer) clearInterval(this.timer); }
 }

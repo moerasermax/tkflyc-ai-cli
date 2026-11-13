@@ -111,7 +111,7 @@ export function parsePsTable(stdout: string): Pick<ProcessSnapshot, 'rows' | 'un
       else complete = false;
       continue;
     }
-    if (match[4].startsWith('Z')) continue; // zombie 不會再執行任何東西。
+    if (/^[ZX]/.test(match[4])) continue; // zombie 不會再執行任何東西。
     const name = /^(?:npm|npx)(?:\s|$)/i.test(match[6]) ? match[6] : match[6].split('/').pop()!;
     rows.push({ pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), started: match[5], name });
   }
@@ -171,8 +171,8 @@ export const listProcessTable: ProcessTable = async (options = {}) => {
   } else if (process.platform === 'linux') {
     snapshot = readProcTable();
   } else {
-    const { stdout } = await exec('ps', ['-A', '-o', 'pid=,ppid=,pgid=,stat=,lstart=,comm='], { env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, timeout, maxBuffer: 32 * 1024 * 1024 });
-    const boot = await exec('sysctl', ['-n', 'kern.bootsessionuuid'], { timeout: 5000 }).then(result => result.stdout.trim() || undefined, () => undefined);
+    const { stdout } = await exec('ps', ['-A', '-o', 'pid=,ppid=,pgid=,stat=,lstart=,comm='], { windowsHide: true, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, timeout, maxBuffer: 32 * 1024 * 1024 });
+    const boot = await exec('sysctl', ['-n', 'kern.bootsessionuuid'], { windowsHide: true, timeout: 5000 }).then(result => result.stdout.trim() || undefined, () => undefined);
     snapshot = { ...parsePsTable(stdout), ...(boot ? { boot } : {}) };
   }
   // 連自己都不在表裡，這張表就不可信。
@@ -229,6 +229,9 @@ export function surveyTree(input: TreeRecord, snapshot: ProcessSnapshot, options
   if (root.started) known.add(keyOf(root));
   const sureAlive = (member: TreeMember): boolean => !member.loose && !member.weak && stateOf(member) === 'alive';
 
+  // A timestamp is reusable until its entire second has elapsed. Time alone
+  // never promotes an old observation: fresh ownership must also be proven.
+  const mature = (started: string): boolean => !coarse || (Number.isFinite(Date.parse(`${started} UTC`)) && Date.parse(`${started} UTC`) + 1000 <= options.before);
   type Verdict = 'sure' | 'loose' | null;
   /** Windows：父程序死後 ParentProcessId 還指著它，所以分兩種。父程序活著＝直接證據；不在了＝只算間接跡象。 */
   const linkWindows = (row: ProcessRow): Verdict => {
@@ -261,14 +264,15 @@ export function surveyTree(input: TreeRecord, snapshot: ProcessSnapshot, options
   /** POSIX：ppid 是當下的事實，但只有父程序活著才看得到；group 要有身分對得上的既有成員還活著，才證明它沒被別人重用。 */
   const linkPosix = (row: ProcessRow): Verdict => {
     let verdict: Verdict = null;
-    if (held && row.ppid === root.pid) verdict = 'sure';
+    const heldRoot = held && !!rootRow && rootRow.started === root.started;
+    if (heldRoot && row.ppid === root.pid) verdict = 'sure';
     for (const member of members) {
       if (verdict === 'sure') break;
       if (member.pid !== row.ppid || stateOf(member) !== 'alive') continue;
       if (member.loose || member.weak) verdict ??= 'loose'; else verdict = 'sure';
     }
     if (verdict !== 'sure' && row.pgid === root.pid) {
-      const proven = held || members.some(member => sureAlive(member) && byPid.get(member.pid)!.pgid === root.pid);
+      const proven = (heldRoot && rootRow.pgid === root.pid) || members.some(member => sureAlive(member) && byPid.get(member.pid)!.pgid === root.pid);
       verdict = proven ? 'sure' : 'loose';
     }
     return verdict;
@@ -279,15 +283,17 @@ export function surveyTree(input: TreeRecord, snapshot: ProcessSnapshot, options
       if (held && row.pid === root.pid) continue;
       if (known.has(keyOf(row))) {
         // 先前只有間接跡象的成員，這次拿到直接證據（父程序活著、身分相符）就升為確定。反方向不降。
-        const existing = members.find(member => member.loose && member.pid === row.pid && member.started === row.started);
-        if (existing && (windows ? linkWindows(row) : linkPosix(row)) === 'sure') { delete existing.loose; changed = true; }
+        const existing = members.find(member => (member.loose || (!windows && member.weak)) && (windows || !member.gone) && member.pid === row.pid && member.started === row.started);
+        if (existing && (windows ? linkWindows(row) : linkPosix(row)) === 'sure') {
+          if (existing.loose) { delete existing.loose; changed = true; }
+          if (existing.weak && mature(row.started)) { delete existing.weak; changed = true; }
+        }
         continue;
       }
       const verdict = windows ? linkWindows(row) : linkPosix(row);
       if (!verdict) continue;
       // 啟動時間只到秒的平台：第一次看到它時還在它出生的那一秒內，之後同一秒被重用的 pid 就分不出來。
-      const born = coarse ? Date.parse(`${row.started} UTC`) : NaN;
-      const weak = coarse && !(Number.isFinite(born) && born + 1000 <= options.before);
+      const weak = !mature(row.started);
       known.add(keyOf(row));
       members.push({ pid: row.pid, started: row.started, name: row.name, ...(verdict === 'loose' ? { loose: true as const } : {}), ...(weak ? { weak: true as const } : {}) });
       changed = true;
@@ -340,17 +346,52 @@ export function readTreeRecord(directory: string, file = TREE_FILE): TreeRecord 
  * 直接對那個 pid 送終止（Windows 是 TerminateProcess），不遞迴擴張到沒核對過的程序。
  * 重查只能把「核對」到「送出」之間的空窗縮到最小，消不掉；要完全消掉得握著程序 handle，這裡沒有。
  */
+/** POSIX graceful signal with bounded escalation; recheck identity before each signal. */
+export async function terminatePosixMember(member: TreeMember, lookup: IdentityLookup, deadline: number,
+  signal: (pid: number, signal: NodeJS.Signals) => void = (pid, signal) => { process.kill(pid, signal); },
+  pause: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms))): Promise<boolean> {
+  if (member.loose || member.weak || !member.started) return false;
+  let sent = false;
+  for (const kind of ['SIGTERM', 'SIGKILL'] as const) {
+    if (Date.now() >= deadline) break;
+    let current: ProcessIdentity | undefined;
+    try { current = (await lookup([member.pid])).get(member.pid); } catch { break; }
+    if (!current || current.started !== member.started || Date.now() >= deadline) break;
+    try { signal(member.pid, kind); sent = true; } catch { break; }
+    if (kind === 'SIGTERM') await pause(Math.min(200, Math.max(0, deadline - Date.now())));
+  }
+  return sent;
+}
+
 export async function terminateTreeMembers(members: TreeMember[], lookup: IdentityLookup = lookupIdentities, deadline = Infinity,
-  send: (pid: number) => void = pid => { process.kill(pid, 'SIGKILL'); }): Promise<number> {
+  send?: (pid: number) => void): Promise<number> {
   let sent = 0;
   for (const member of members) {
     if (member.loose || member.weak || !member.started || Date.now() >= deadline) continue;
+    if (!send && process.platform !== 'win32') { if (await terminatePosixMember(member, lookup, deadline)) sent++; continue; }
     let current: ProcessIdentity | undefined;
     try { current = (await lookup([member.pid])).get(member.pid); } catch { continue; }
     if (!current || current.started !== member.started || Date.now() >= deadline) continue;
-    try { send(member.pid); sent++; } catch { /* 已退出。 */ }
+    try { if (send) send(member.pid); else process.kill(member.pid, 'SIGKILL'); sent++; } catch { /* 已退出。 */ }
   }
   return sent;
+}
+
+export interface TreeTermination { confirmed: boolean; pending?: true; reasons: string[] }
+/** Absence is evidence only with a sealed history and a complete fresh table. */
+export function treeTermination(record: TreeRecord, snapshot: ProcessSnapshot, before = Date.now()): TreeTermination {
+  const survey = surveyTree(record, snapshot, { before, now: Date.now() });
+  const root = snapshot.rows.find(row => row.pid === record.root.pid);
+  const reasons = [
+    ...(root && (!record.root.started || root.started === record.root.started) ? ['worker still alive'] : []),
+    ...(snapshot.unknown.some(row => row.pid === record.root.pid) ? ['worker identity unknown'] : []),
+    ...survey.alive.map(member => `descendant ${member.pid} still alive${member.weak ? ' (weak identity)' : ''}${member.loose ? ' (unproven ownership)' : ''}`),
+    ...survey.unknown.map(member => `descendant ${member.pid} identity unknown`),
+    ...survey.unverified.map(pid => `possible descendant ${pid} identity unknown`),
+    ...(survey.blind ? ['process table incomplete'] : []),
+    ...(treeGap(record) ? [treeGap(record)!] : []),
+  ];
+  return { confirmed: reasons.length === 0, reasons };
 }
 
 export interface TreeTrackerOptions {
@@ -380,6 +421,7 @@ export interface TreeTracker {
   seal(): Promise<boolean>;
   /** 重新列舉，終止確定還活著的子孫，最多花 killBudgetMs。回傳送出的數量。 */
   killRecorded(): Promise<number>;
+  confirmation(): Promise<TreeTermination>;
 }
 
 /** runner 用：worker 存活期間定期列舉，結果累積進 tree.json。寫檔與列舉失敗都不影響 job 本身。 */
@@ -393,7 +435,7 @@ export function startTreeTracker(options: TreeTrackerOptions): TreeTracker {
     members: [], scans: 0, failed: 0, intervalMs: interval, maxGapMs: 0,
   };
   // 只在讀端會在意的內容變了才重寫：列舉次數、時間戳每次都變，為了它們每 5 秒寫一次檔不值得。
-  const signature = (): string => JSON.stringify([record.root, record.members, record.failed, record.boot, record.ended, record.sealed, record.maxGapMs > interval + TREE_GAP_SLACK_MS]);
+  const signature = (): string => JSON.stringify([record.root, record.members, record.failed, record.boot, record.ended, record.sealed, record.uncertainHistory, record.maxGapMs > interval + TREE_GAP_SLACK_MS]);
   let written = '';
   const persist = (force = false): void => {
     const current = signature();
@@ -464,7 +506,34 @@ export function startTreeTracker(options: TreeTrackerOptions): TreeTracker {
     async killRecorded() {
       const deadline = Date.now() + (options.killBudgetMs ?? TREE_KILL_BUDGET_MS);
       if (!await scan(stopped, deadline).catch(() => false)) return 0;
+      // Keep the original worker handle alive across the birth-second boundary.
+      // Re-scan with fresh ownership; never clear weak merely after a delay.
+      if (record.platform !== 'win32' && record.platform !== 'linux' && options.alive() && lastAlive.some(member => member.weak)) {
+        const boundary = Math.max(...lastAlive.filter(member => member.weak).map(member => Date.parse(`${member.started} UTC`) + 1000));
+        const delay = Math.max(0, boundary - Date.now() + 1);
+        if (Number.isFinite(delay) && delay <= 1001 && Date.now() + delay < deadline) {
+          await new Promise(resolve => setTimeout(resolve, delay));
+          if (!await scan(stopped, deadline).catch(() => false)) return 0;
+        }
+      }
       return terminateTreeMembers(lastAlive, lookup, deadline, options.send);
+    },
+    async confirmation() {
+      const deadline = Date.now() + Math.min(3000, options.killBudgetMs ?? TREE_KILL_BUDGET_MS);
+      let result: TreeTermination = { confirmed: false, reasons: ['termination not observed'] };
+      do {
+        const before = Date.now();
+        try {
+          const snapshot = await table({ timeoutMs: Math.max(1, deadline - before) });
+          record = surveyTree(record, snapshot, { before, now: Date.now() }).record;
+          persist(); // A newly discovered unknown child must survive later empty tables.
+          result = treeTermination(record, snapshot, before);
+        }
+        catch (error) { return { confirmed: false, reasons: [`process table unavailable: ${(error as Error).message}`] }; }
+        if (result.confirmed || treeGap(record)) return result;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      } while (Date.now() < deadline);
+      return result;
     },
   };
 }

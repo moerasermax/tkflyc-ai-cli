@@ -12,6 +12,10 @@
 維護規則見 [CONTRIBUTING.md](./CONTRIBUTING.md)：**每次改動都要在此補一行。**
 
 ## [Unreleased]
+### 修正（P0 FIX14）
+- macOS 秒級啟動時間不再永久卡在 weak：只有跨過出生秒後，重新取得仍持有的 worker／已核實成員的親子或 group 證據才能升級；kill 前有界重查，沒有證據仍不終止。修復 CI 中另建 group 的孫程序殘留。（Codex）
+- POSIX kill 回覆與 job 結果區分 worker 已退出與子孫已確認消失；封存缺口、列舉失敗或存活子孫一律回 termination_unconfirmed／terminationConfirmed:false，不再以 exit.json 當整棵樹的終止證據。BSD ps 與 kernel 完整程序表統一略過 zombie／dead 狀態，避免殭屍造成永久 stop_pending。（Codex）
+
 ### 修正（P0 FIX8＋FIX9）
 
 - FIX13：durable restart 驗收改用測試完成閘門，避免機器負載吃掉固定 8 秒餘裕；失敗證據滿額時淘汰最舊擷取，保留最新一次並維持數量／容量上限。（@moerasermax）

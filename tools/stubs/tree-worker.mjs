@@ -23,7 +23,7 @@ if (spec.mode === 'orphan') {
   background([fileURLToPath(import.meta.url), midSpec]);
   setInterval(() => {}, 1000);
 } else {
-  const child = background(['-e', 'setInterval(()=>{},1000)']);
+  const child = background(['-e', "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"]);
   writeFileSync(spec.childFile, String(child.pid));
   setTimeout(() => process.exit(0), spec.lingerMs ?? 0);
 }

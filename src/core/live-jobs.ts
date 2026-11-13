@@ -57,25 +57,29 @@ async function lookupProcessIdentities(pids: number[], includeCommandLine = fals
     } else {
       let stdout: string;
       try {
-        ({ stdout } = await exec('ps', ['-p', ids.join(','), '-o', 'pid=,ppid=,lstart=,comm='], { env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, timeout: 5000 }));
+        ({ stdout } = await exec('ps', ['-p', ids.join(','), '-o', 'pid=,ppid=,stat=,lstart=,comm='], { windowsHide: true, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, timeout: 5000 }));
       } catch (error) {
         // BSD ps 可在部分 PID 消失時非零退出，仍保留有效的其他行。
         stdout = typeof (error as { stdout?: unknown }).stdout === 'string' ? (error as { stdout: string }).stdout : '';
       }
-      for (const line of stdout.split('\n')) {
-        const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.{24})\s+(.+)$/);
-        if (match) {
-          // npm title 可含 @scope/package 的 slash，不能誤當 executable 路徑截掉前綴。
-          const name = /^(?:npm|npx)(?:\s|$)/i.test(match[4]) ? match[4] : match[4].split('/').pop()!;
-          result.set(Number(match[1]), { pid: Number(match[1]), ppid: Number(match[2]), started: match[3], name });
-        }
-      }
+      for (const [pid, identity] of parsePsIdentities(stdout)) result.set(pid, identity);
       if (includeCommandLine && result.size) {
-        const { stdout: commands } = await exec('ps', ['-p', [...result.keys()].join(','), '-o', 'pid=,args='], { timeout: 5000 }).catch(() => ({ stdout: '' }));
+        const { stdout: commands } = await exec('ps', ['-p', [...result.keys()].join(','), '-o', 'pid=,args='], { windowsHide: true, timeout: 5000 }).catch(() => ({ stdout: '' }));
         for (const line of commands.split('\n')) { const match = line.trim().match(/^(\d+)\s+(.+)$/); if (match && result.has(Number(match[1]))) result.get(Number(match[1]))!.commandLine = match[2]; }
       }
     }
   } catch { /* 無法查證身分時不冒充存活；下一輪再試。 */ }
+  return result;
+}
+/** BSD ps may return partial stdout with a nonzero exit. Ignore zombies as /proc does. */
+export function parsePsIdentities(stdout: string): Map<number, ProcessIdentity> {
+  const result = new Map<number, ProcessIdentity>();
+  for (const line of stdout.split('\n')) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.{24})\s+(.+)$/);
+    if (!match || /^[ZX]/.test(match[3])) continue;
+    const name = /^(?:npm|npx)(?:\s|$)/i.test(match[5]) ? match[5] : match[5].split('/').pop()!;
+    result.set(Number(match[1]), { pid: Number(match[1]), ppid: Number(match[2]), started: match[4], name });
+  }
   return result;
 }
 export const lookupIdentities: IdentityLookup = pids => lookupProcessIdentities(pids);

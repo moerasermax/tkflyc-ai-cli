@@ -282,7 +282,7 @@ async function execute(directory: string, options: RunnerOptions): Promise<void>
   }
   closeSync(stderr);
   const report: JobExit = { exitCode: spec.pty && killed ? 143 : exit.code, signal: exit.signal, endTime: new Date().toISOString(), timedOut, killed,
-    ...(exitError ? { error: exitError } : {}) };
+    ...(exitError ? { error: exitError } : {}), ...(tracker ? { termination: { confirmed: false, pending: true as const, reasons: ['Descendant cleanup pending'] } } : {}) };
   if (!readJobExit(directory)) save(join(directory, 'exit.json'), report);
   for (const file of ['stdin.tmp', 'kill.json']) rmSync(join(directory, file), { force: true });
   // 結果先落盤，呼叫端不必多等；runner 自己留下來補最後一次列舉。讀端要等 runner 也消失才會看子孫紀錄。
@@ -293,6 +293,10 @@ async function execute(directory: string, options: RunnerOptions): Promise<void>
       // 被終止或逾時：worker 的樹已經砍過，這裡補砍已經脫離那棵樹、但確定是它子孫的程序（每一筆送出前再核對身分）。自然結束的不動。
       if (killed || timedOut) await tracker.killRecorded();
     } catch (error) { console.error('ai-cli runner tree:', error); }
+    const termination = await tracker.confirmation().catch(error => ({ confirmed: false, reasons: [String(error)] }));
+    const current = readJobExit(directory);
+    // Preserve an independent runner failure; only finish our own report.
+    if (current?.endTime === report.endTime) save(join(directory, 'exit.json'), { ...current, termination });
   }
 }
 // 僅 runner 入口執行；其他模組不 import 本檔。

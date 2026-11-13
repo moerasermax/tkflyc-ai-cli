@@ -7440,7 +7440,7 @@
   {
     "name": "issue17-tree-A：POSIX 無條件信任 process group",
     "file": "src/core/process-tree.ts",
-    "from": "      const proven = held || members.some(",
+    "from": "      const proven = (heldRoot && rootRow.pgid === root.pid) || members.some(",
     "to": "      const proven = Date.now() > 0 || members.some(",
     "script": "verify-process-tree.mjs",
     "expect": "POSIX：worker 結束後沒有已記錄成員可證明時，同 group 的孤兒只列為不確定"
@@ -7456,8 +7456,8 @@
   {
     "name": "issue17-tree-A：秒級啟動時間不標記精度不足",
     "file": "src/core/process-tree.ts",
-    "from": "      const weak = coarse && !(Number.isFinite(born) && born + 1000 <= options.before);",
-    "to": "      const weak = coarse && !Number.isFinite(born);",
+    "from": "      const weak = !mature(row.started);",
+    "to": "      const weak = false;",
     "script": "verify-process-tree.mjs",
     "expect": "macOS：出生的那一秒內第一次看到的成員標成精度不足"
   },
@@ -9731,5 +9731,141 @@
     "to": "writeFileSync(releaseFile, 'too early'); await c.stop(); c = client(state, false, Number(process.env.DURABLE_RESTART_PAUSE_MS || 0));",
     "script": "verify-durable-jobs.mjs",
     "expect": "MCP restart recovers running job without redispatch"
+  },
+  {
+    "name": "FIX14 weak remains sticky",
+    "file": "src/core/process-tree.ts",
+    "from": "if (existing.weak && mature(row.started))",
+    "to": "if (existing.weak && Date.now() < 0)",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 fresh held parent after birth boundary promotes detached child"
+  },
+  {
+    "name": "FIX14 ignore birth second",
+    "file": "src/core/process-tree.ts",
+    "from": "if (existing.weak && mature(row.started))",
+    "to": "if (existing.weak)",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 same birth second remains weak despite live parent"
+  },
+  {
+    "name": "FIX14 time replaces ownership",
+    "file": "src/core/process-tree.ts",
+    "from": "if (existing && (windows ? linkWindows(row) : linkPosix(row)) === 'sure')",
+    "to": "if (existing)",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 elapsed time without fresh ownership cannot promote weak PID"
+  },
+  {
+    "name": "FIX14 held handle without row",
+    "file": "src/core/process-tree.ts",
+    "from": "(heldRoot && rootRow.pgid === root.pid) || members.some",
+    "to": "held || members.some",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 missing worker row cannot prove group membership"
+  },
+  {
+    "name": "FIX14 omit pre-kill boundary rescan",
+    "file": "src/core/process-tree.ts",
+    "from": "record.platform !== 'win32' && record.platform !== 'linux' && options.alive() && lastAlive.some(member => member.weak)",
+    "to": "false",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 bounded pre-kill rescan promotes owned child"
+  },
+  {
+    "name": "FIX14 absence ignores descendants",
+    "file": "src/core/process-tree.ts",
+    "from": "return { confirmed: reasons.length === 0, reasons };",
+    "to": "return { confirmed: true, reasons };",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 alive unknown incomplete or unsealed trees cannot confirm termination"
+  },
+  {
+    "name": "FIX14 pending proof accepted",
+    "file": "src/core/job-store.ts",
+    "from": "exit?.termination?.confirmed === true && !exit.termination.pending",
+    "to": "exit?.termination?.confirmed === true",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 kill reply unconfirmed pending"
+  },
+  {
+    "name": "FIX14 exit means terminated",
+    "file": "src/core/job-store.ts",
+    "from": "exit?.termination?.confirmed === true && !exit.termination.pending",
+    "to": "Date.now() > 0 && !!exit",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 kill reply unconfirmed legacy"
+  },
+  {
+    "name": "FIX14 job hides unconfirmed descendants",
+    "file": "src/core/job-store.ts",
+    "from": "result.terminationConfirmed = proof.terminationConfirmed;",
+    "to": "result.terminationConfirmed = true;",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 job result does not claim descendants gone from legacy exit"
+  },
+  {
+    "name": "FIX14 BSD zombies count alive",
+    "file": "src/core/live-jobs.ts",
+    "from": "if (!match || /^[ZX]/.test(match[3])) continue;",
+    "to": "if (!match) continue;",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 BSD identity parser filters zombies and dead states"
+  },
+  {
+    "name": "FIX14 kernel resurrects zombie",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "if (snapshot?.complete && !snapshot.unknown.some(row => row.pid === identity.pid)) return false;",
+    "to": "if (false) return false;",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 complete table absence overrides kill-zero zombie liveness"
+  },
+  {
+    "name": "FIX14 kernel treats unknown as absence",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "if (snapshot?.complete && !snapshot.unknown.some(row => row.pid === identity.pid)) return false;",
+    "to": "if (snapshot) return false;",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 unreadable or incomplete table keeps root uncertain"
+  },
+  {
+    "name": "FIX14 omit SIGKILL escalation",
+    "file": "src/core/process-tree.ts",
+    "from": "for (const kind of ['SIGTERM', 'SIGKILL'] as const)",
+    "to": "for (const kind of ['SIGTERM'] as const)",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 POSIX bounded SIGTERM escalation ignores"
+  },
+  {
+    "name": "FIX14 escalation ignores PID reuse",
+    "file": "src/core/process-tree.ts",
+    "from": "if (!current || current.started !== member.started || Date.now() >= deadline) break;",
+    "to": "if (!current || Date.now() >= deadline) break;",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 POSIX bounded SIGTERM escalation reused"
+  },
+  {
+    "name": "FIX14 skip rescan when table crosses second",
+    "file": "src/core/process-tree.ts",
+    "from": "Number.isFinite(delay) && delay <= 1001",
+    "to": "Number.isFinite(delay) && delay > 0 && delay <= 1001",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 table crossing birth boundary still rescans"
+  },
+  {
+    "name": "FIX14 discard confirmation uncertainty history",
+    "file": "src/core/process-tree.ts",
+    "from": "          record = surveyTree(record, snapshot, { before, now: Date.now() }).record;",
+    "to": "          // discard confirmation history",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 confirmation preserves newly unknown descendant history"
+  },
+  {
+    "name": "FIX14 omit durable uncertainty signature",
+    "file": "src/core/process-tree.ts",
+    "from": "record.sealed, record.uncertainHistory, record.maxGapMs",
+    "to": "record.sealed, record.maxGapMs",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX14 confirmation preserves newly unknown descendant history"
   }
 ]

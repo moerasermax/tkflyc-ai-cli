@@ -178,14 +178,20 @@ if (!section || section === 'kill') {
   await check('kill terminates runner worker and SIGTERM ignoring grandchild', async () => {
     const childFile = join(TEMP, 'grandchild.pid'); const job = await dispatch(c, state, { mode: 'tree', childFile });
     const grandchild = Number(await until(() => existsSync(childFile) && readFileSync(childFile, 'utf8')));
-    const response = await c.call('kill_process', { pid: job.pid }); assert.equal(response.status, 'terminated');
-    const exit = JSON.parse(readFileSync(join(job.dir, 'exit.json'))); assert.equal(exit.killed, true); assert.equal(exit.timedOut, false);
-    const killPids = [job.pid, job.meta.worker.pid, grandchild];
-    try { await until(async () => (await lookupIdentities(killPids)).size === 0); }
+    const killPids = [job.pid, job.meta.worker.pid, grandchild]; let response;
+    try {
+      response = await c.call('kill_process', { pid: job.pid }); assert.equal(response.status, 'terminated');
+      const exit = JSON.parse(readFileSync(join(job.dir, 'exit.json'))); assert.equal(exit.killed, true); assert.equal(exit.timedOut, false);
+      if (process.platform !== 'win32') { assert.equal(response.terminationConfirmed, true); assert.equal(exit.termination?.confirmed, true); }
+      await until(async () => (await lookupIdentities(killPids)).size === 0);
+    }
     catch (error) {
       // CI 診斷：逾時時印出還查得到的是誰、ps 看到的狀態（殭屍或真的活著）。
       console.log('DIAG kill survivors ' + JSON.stringify({ runner: job.pid, worker: job.meta.worker.pid, grandchild, found: [...(await lookupIdentities(killPids)).values()] }));
-      if (process.platform !== 'win32') { try { const { execFileSync } = await import('node:child_process'); console.log('DIAG ps ' + JSON.stringify(execFileSync('ps', ['-o', 'pid=,ppid=,stat=,comm=', '-p', killPids.join(',')], { encoding: 'utf8' }))); } catch (e) { console.log('DIAG ps failed ' + JSON.stringify(String(e.stdout ?? e.message))); } }
+      if (process.platform !== 'win32') { try { const { execFileSync } = await import('node:child_process'); console.log('DIAG ps ' + JSON.stringify(execFileSync('ps', ['-o', 'pid=,ppid=,pgid=,stat=,lstart=,comm=', '-p', killPids.join(',')], { encoding: 'utf8', windowsHide: true, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } }))); } catch (e) { console.log('DIAG ps failed ' + JSON.stringify(String(e.stdout ?? e.message))); } }
+      console.log('DIAG kill response ' + JSON.stringify(response));
+      for (const file of ['meta.json', 'exit.json', 'tree.json']) { try { console.log('DIAG '+file+' '+readFileSync(join(job.dir, file), 'utf8')); } catch (e) { console.log('DIAG '+file+' '+e.message); } }
+      if (process.platform !== 'win32') { try { const { listProcessTable } = await import('../dist/core/process-tree.js'); const table = await listProcessTable(); console.log('DIAG process table '+JSON.stringify({ ...table, rows: table.rows.filter(row => killPids.includes(row.pid) || killPids.includes(row.ppid) || row.pgid === job.meta.worker.pid) })); } catch (e) { console.log('DIAG table unavailable '+e.message); } }
       throw error;
     }
   });
