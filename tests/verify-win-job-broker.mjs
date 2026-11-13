@@ -64,7 +64,7 @@ try {
   const naturalRef=await client.prepare(naturalId,natural);await client.terminate(naturalRef);
   check('broker preserves existing natural exit result',readFileSync(join(natural,'exit.json'),'utf8')===naturalResult);
   const acl=JSON.parse(await powershell(nativeScript(`[AiCliContainment]::SecurityFixture('${config.name}','${config.directory.replaceAll("'","''")}')`)));
-  check('pipe mutex registry ACL allow only owner SID',['pipe','mutex','directory'].every(key=>{const aces=acl[key].match(/\(A;[^)]+\)/g)||[];return aces.length===1&&aces[0].includes(acl.sid)&&!acl[key].includes(';;;WD)')&&!acl[key].includes(';;;AN)');}));
+  check('pipe mutex registry ACL allow only owner SID',['pipe','mutex','directory'].every(key=>{const aces=acl[key].match(/\(A;[^)]+\)/g)||[];return aces.length===1&&[acl.sid,...(acl.sid.endsWith('-500')?['LA']:[])].some(id=>aces[0].includes(';;;'+id+')'))&&!acl[key].includes(';;;WD)')&&!acl[key].includes(';;;AN)');}));
   await launchBroker(config); await sleep(1500);
   check('mutex contender cannot replace live epoch',readBroker(config).epoch===broker.epoch);
   const outside=spawn(process.execPath,['-e','setTimeout(()=>{},90000)'],{stdio:'ignore',windowsHide:true}); const outsideId=await identity(outside.pid);fixtures.push(outsideId);

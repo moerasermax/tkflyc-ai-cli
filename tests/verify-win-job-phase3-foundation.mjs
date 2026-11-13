@@ -33,7 +33,7 @@ if(process.platform==='win32'){
   check('ancestry stops at foreign SID or reused parent but detects worker',tails.different&&tails.reused&&!tails.same&&tails.worker==='worker');
   const security=JSON.parse(await powershell(nativeScript(`[AiCliContainment]::SecurityFixture('${config.name}','${config.directory.replaceAll("'","''")}')`)));
   console.log('SECURITY',JSON.stringify(security));
-  for(const object of ['pipe','mutex'])check(object+' has actual Medium mandatory label and owner ACL',security[object].includes('(ML;;NW;;;ME)')&&security[object].includes(`;;;${security.sid})`));
+  for(const object of ['pipe','mutex'])check(object+' has actual Medium mandatory label and owner ACL',security[object].includes('(ML;;NW;;;ME)')&&[security.sid,...(security.sid.endsWith('-500')?['LA']:[])].some(id=>security[object].includes(`;;;${id})`)));
   const root=dirname(await ensureWindowlessHost()),base=join(root,'native-'+'f'.repeat(64)+'.dll');
   const artifacts=[base,base+'.sha256',base+'.'+randomUUID()+'.dll',base+'.'+randomUUID()+'.dll.bak',join(root,'broker-PHASE3fixture.error.log')];
   for(const file of artifacts){writeFileSync(file,'owned expired fixture');utimesSync(file,new Date(0),new Date(0));}

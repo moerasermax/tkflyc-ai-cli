@@ -180,7 +180,14 @@ if (!section || section === 'kill') {
     const grandchild = Number(await until(() => existsSync(childFile) && readFileSync(childFile, 'utf8')));
     const response = await c.call('kill_process', { pid: job.pid }); assert.equal(response.status, 'terminated');
     const exit = JSON.parse(readFileSync(join(job.dir, 'exit.json'))); assert.equal(exit.killed, true); assert.equal(exit.timedOut, false);
-    await until(async () => (await lookupIdentities([job.pid, job.meta.worker.pid, grandchild])).size === 0);
+    const killPids = [job.pid, job.meta.worker.pid, grandchild];
+    try { await until(async () => (await lookupIdentities(killPids)).size === 0); }
+    catch (error) {
+      // CI 診斷：逾時時印出還查得到的是誰、ps 看到的狀態（殭屍或真的活著）。
+      console.log('DIAG kill survivors ' + JSON.stringify({ runner: job.pid, worker: job.meta.worker.pid, grandchild, found: [...(await lookupIdentities(killPids)).values()] }));
+      if (process.platform !== 'win32') { try { const { execFileSync } = await import('node:child_process'); console.log('DIAG ps ' + JSON.stringify(execFileSync('ps', ['-o', 'pid=,ppid=,stat=,comm=', '-p', killPids.join(',')], { encoding: 'utf8' }))); } catch (e) { console.log('DIAG ps failed ' + JSON.stringify(String(e.stdout ?? e.message))); } }
+      throw error;
+    }
   });
   if(process.platform==='win32')await check('Windows durable runner fallback records killed intent after broker unknown',async()=>{
     const fallbackState=join(TEMP,'fallback-kill'),fallback=client(fallbackState);await fallback.init();

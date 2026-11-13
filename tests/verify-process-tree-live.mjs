@@ -114,6 +114,13 @@ async function until(fn, ms = 30000, step = 100) {
       await runnerAndWorkerGone(job);
       const blockers = await executor.blockers(ref);
       console.log(`INFO (b) 擋住的原因：${JSON.stringify(blockers)}`);
+      if (process.platform !== 'win32' && !blockers.some(text => text.includes(`子孫 pid ${grandchild?.pid}`))) {
+        // CI 診斷：擋住的不是那個孫程序時，印出 runner／worker 在 ps 與程序表裡的狀態。
+        const meta = JSON.parse(readFileSync(join(job.directory, 'meta.json'), 'utf8'));
+        const pids = [meta.runner?.pid, meta.worker?.pid, grandchild?.pid].filter(Boolean);
+        try { const { execFileSync } = await import('node:child_process'); console.log('DIAG (b) ps ' + JSON.stringify(execFileSync('ps', ['-o', 'pid=,ppid=,stat=,comm=', '-p', pids.join(',')], { encoding: 'utf8' }))); } catch (e) { console.log('DIAG (b) ps failed ' + JSON.stringify(String(e.stdout ?? e.message))); }
+        console.log('DIAG (b) meta ' + JSON.stringify({ runner: meta.runner, worker: meta.worker }) + ' table ' + JSON.stringify((await listProcessTable()).rows.filter(item => pids.includes(item.pid))) + ' identities ' + JSON.stringify([...(await lookupIdentities(pids)).values()]));
+      }
       check('真機：不確定的程序擋住 isGone，說明標明不會自動終止', await executor.isGone(ref) === false && blockers.some(text => text.includes(`子孫 pid ${grandchild?.pid}`) && text.includes('不會自動終止')), blockers);
       await executor.kill(ref);
       await sleep(1500);
