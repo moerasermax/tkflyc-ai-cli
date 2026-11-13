@@ -12,6 +12,9 @@
 維護規則見 [CONTRIBUTING.md](./CONTRIBUTING.md)：**每次改動都要在此補一行。**
 
 ## [Unreleased]
+### 修正（P0 FIX15）
+- POSIX kill 保留已失聯與舊版已完成 worker 的原狀態，仍明示子孫未確認；自然完成在有界樹追蹤收尾後僅寫一次 final exit，維持 metadata 寫入不隨輸出量增加的不變量；同步遺漏的 ps stat 替身，拒絕缺欄位造成的錯位身分，補上跨平台純邏輯驗收。（Codex）
+
 ### 修正（P0 FIX14）
 - macOS 秒級啟動時間不再永久卡在 weak：只有跨過出生秒後，重新取得仍持有的 worker／已核實成員的親子或 group 證據才能升級；kill 前有界重查，沒有證據仍不終止。修復 CI 中另建 group 的孫程序殘留。（Codex）
 - POSIX kill 回覆與 job 結果區分 worker 已退出與子孫已確認消失；封存缺口、列舉失敗或存活子孫一律回 termination_unconfirmed／terminationConfirmed:false，不再以 exit.json 當整棵樹的終止證據。BSD ps 與 kernel 完整程序表統一略過 zombie／dead 狀態，避免殭屍造成永久 stop_pending。（Codex）

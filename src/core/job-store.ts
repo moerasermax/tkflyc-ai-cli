@@ -406,6 +406,16 @@ export function posixTerminationReply(pid: number, jobId: string, exit?: JobExit
     message: confirmed ? 'Worker and recorded descendants terminated' : 'Termination unconfirmed; descendants may still be alive' };
 }
 
+/** Preserve the worker result without claiming an untracked descendant tree is gone. */
+export function posixFinishedReply(job: Pick<StoredJob, 'pid' | 'meta' | 'status' | 'directory'>) {
+  if (job.status === 'lost' || job.meta.tree !== 1) return {
+    pid: job.pid, jobId: job.meta.jobId, status: job.status, terminationConfirmed: false,
+    terminationReasons: ['Descendant termination has not been verified'],
+    message: `Worker status is ${job.status}; no termination requested; descendants unverified`,
+  };
+  return posixTerminationReply(job.pid, job.meta.jobId, readJobExit(job.directory));
+}
+
 export function jobResult(job: StoredJob, verbose = false): Record<string, unknown> {
   refreshJob(job);
   let stdout = job.stdout, stderr = job.stderr, parsed: any = { ...job.parsed };
@@ -929,7 +939,7 @@ export class JobStore {
     }
     const startupDeadline = Date.now() + 15000;
     while (!job.meta.runner.started && job.status === 'running' && Date.now() < startupDeadline) { await new Promise(resolve => setTimeout(resolve, 25)); refreshJob(job); }
-    if (job.status !== 'running') return posixTerminationReply(pid, job.meta.jobId, readJobExit(job.directory));
+    if (job.status !== 'running') return posixFinishedReply(job);
     const ids = await this.lookup([job.meta.runner.pid, ...(job.meta.worker ? [job.meta.worker.pid] : [])]);
     if (!sameIdentity(job.meta.runner, ids.get(job.meta.runner.pid))) throw new Error('Runner identity is unavailable or changed; refusing to kill an unverified process');
     // Windows 不用 taskkill runner，讓它有機會落 exit.json；檔案控制通道跨平台可用。

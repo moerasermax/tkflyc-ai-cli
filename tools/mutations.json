@@ -7292,14 +7292,10 @@
   {
     "name": "issue17-tree-live：runner 被終止時不補砍已記錄的子孫",
     "file": "src/core/job-runner.ts",
-    "from": "      if (killed || timedOut) await tracker.killRecorded();",
-    "to": "      if ((killed || timedOut) && Date.now() < 0) await tracker.killRecorded();",
-    "script": "verify-process-tree-live.mjs",
-    "expect": "真機：終止執行中的 job 會連同已記錄的孤兒一起砍掉",
-    "platforms": [
-      "linux",
-      "darwin"
-    ]
+    "from": "      if (report.killed || report.timedOut) await tracker.killRecorded();",
+    "to": "      // omit descendant cleanup",
+    "script": "verify-process-tree.mjs",
+    "expect": "FIX15 kill finishes descendant cleanup"
   },
   {
     "name": "issue17-tree-live：runner 在 worker 結束後不補最後一次列舉",
@@ -9867,5 +9863,85 @@
     "to": "record.sealed, record.maxGapMs",
     "script": "verify-process-tree.mjs",
     "expect": "FIX14 confirmation preserves newly unknown descendant history"
+  },
+  {
+    "name": "FIX15 lost overwritten by proof",
+    "file": "src/core/job-store.ts",
+    "from": "job.status === 'lost' || job.meta.tree !== 1",
+    "to": "job.meta.tree !== 1",
+    "expect": "FIX15 lost status overrides stale termination proof",
+    "script": "verify-process-tree.mjs"
+  },
+  {
+    "name": "FIX15 legacy overwritten by proof",
+    "file": "src/core/job-store.ts",
+    "from": "job.status === 'lost' || job.meta.tree !== 1",
+    "to": "job.status === 'lost'",
+    "expect": "FIX15 legacy finished status completed does not claim tree termination",
+    "script": "verify-process-tree.mjs"
+  },
+  {
+    "name": "FIX15 kill bypasses finished worker status",
+    "file": "src/core/job-store.ts",
+    "from": "if (job.status !== 'running') return posixFinishedReply(job);",
+    "to": "if (job.status !== 'running') return posixTerminationReply(pid, job.meta.jobId, readJobExit(job.directory));",
+    "expect": "FIX15 product kill preserves lost/1",
+    "script": "verify-process-tree.mjs"
+  },
+  {
+    "name": "FIX15 natural exit double write",
+    "file": "src/core/job-runner.ts",
+    "from": "(!tracker || report.killed || report.timedOut) && !readJobExit(directory)",
+    "to": "!readJobExit(directory)",
+    "expect": "FIX15 natural POSIX completion writes one final exit",
+    "script": "verify-process-tree.mjs"
+  },
+  {
+    "name": "FIX15 natural exit never persisted",
+    "file": "src/core/job-runner.ts",
+    "from": "if (!current || current.endTime === report.endTime) save",
+    "to": "if (current && current.endTime === report.endTime) save",
+    "expect": "FIX15 natural POSIX completion writes one final exit",
+    "script": "verify-process-tree.mjs"
+  },
+  {
+    "name": "FIX15 unknown proof forced confirmed",
+    "file": "src/core/job-runner.ts",
+    "from": "{ ...report, ...current, termination });",
+    "to": "{ ...report, ...current, termination: { confirmed: true, reasons: [] } });",
+    "expect": "FIX15 unknown final exit cannot claim termination",
+    "script": "verify-process-tree.mjs"
+  },
+  {
+    "name": "FIX15 independent exit rewritten",
+    "file": "src/core/job-runner.ts",
+    "from": "if (!current || current.endTime === report.endTime) save",
+    "to": "if (Date.now() > 0) save",
+    "expect": "FIX15 finalizer preserves independent exit",
+    "script": "verify-process-tree.mjs"
+  },
+  {
+    "name": "FIX15 Windows initial exit omitted",
+    "file": "src/core/job-runner.ts",
+    "from": "(!tracker || report.killed || report.timedOut) && !readJobExit(directory)",
+    "to": "(report.killed || report.timedOut) && !readJobExit(directory)",
+    "expect": "FIX15 tracker-free Windows still writes once immediately",
+    "script": "verify-process-tree.mjs"
+  },
+  {
+    "name": "FIX15 spaced comm truncated",
+    "file": "src/core/live-jobs.ts",
+    "from": "const name = /^(?:npm|npx)(?:\\s|$)/i.test(match[5]) ? match[5] : match[5].split('/').pop()!;",
+    "to": "const name = match[5].split(' ')[0];",
+    "expect": "POSIX product identity lookup preserves spaced comm and exact lstart",
+    "script": "verify-worker-identity.mjs"
+  },
+  {
+    "name": "FIX15 accept shifted legacy ps layout",
+    "file": "src/core/live-jobs.ts",
+    "from": "    if (!/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}\\d{1,2} \\d{2}:\\d{2}:\\d{2} \\d{4}$/.test(match[4]) || !Number.isFinite(Date.parse(`${match[4]} UTC`))) continue;\n",
+    "to": "",
+    "expect": "FIX15 old ps columns are rejected rather than misidentified",
+    "script": "verify-process-tree.mjs"
   }
 ]

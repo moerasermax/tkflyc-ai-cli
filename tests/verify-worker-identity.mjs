@@ -137,10 +137,10 @@ const require=createRequire(import.meta.url), cp=require('node:child_process'), 
 Object.defineProperty(process,'platform',{value:'darwin',configurable:true});
 const started=['Fri Oct  9 13:30:35 2026','Fri Oct 19 12:34:56 2026'];
 cp.execFile=(file,args,options,callback)=>{
-  assert.equal(file,'ps');
-  if(args.at(-1)==='pid=,ppid=,lstart=,comm=') {
+  assert.equal(file,'ps'); assert.equal(options.windowsHide,true);
+  if(args.at(-1)==='pid=,ppid=,stat=,lstart=,comm=') {
     assert.equal(options.env.LC_ALL,'C'); assert.equal(options.env.TZ,'UTC');
-    callback(null,' 2203 2202 '+started[0]+' npm test\\n 101 90 '+started[1]+' /Applications/My CLI/codex\\n 2204 2202 '+started[0]+' npm exec @tkflyc/ai-cli-mcp\\n','');
+    callback(null,' 2203 2202 S '+started[0]+' npm test\\n 101 90 S '+started[1]+' /Applications/My CLI/codex\\n 2204 2202 S '+started[0]+' npm exec @tkflyc/ai-cli-mcp\\n','');
   } else { assert.equal(args.at(-1),'pid=,args='); callback(null,' 2203 npm test\\n 101 /Applications/My CLI/codex exec --json -\\n 2204 npm exec @tkflyc/ai-cli-mcp\\n',''); }
 };
 cp.execFile[Symbol.for('nodejs.util.promisify.custom')]=(...args)=>new Promise((resolve,reject)=>

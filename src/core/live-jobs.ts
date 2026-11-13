@@ -77,6 +77,8 @@ export function parsePsIdentities(stdout: string): Map<number, ProcessIdentity> 
   for (const line of stdout.split('\n')) {
     const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.{24})\s+(.+)$/);
     if (!match || /^[ZX]/.test(match[3])) continue;
+    // Reject shifted old layouts; a 24-character slice alone is not a creation token.
+    if (!/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(match[4]) || !Number.isFinite(Date.parse(`${match[4]} UTC`))) continue;
     const name = /^(?:npm|npx)(?:\s|$)/i.test(match[5]) ? match[5] : match[5].split('/').pop()!;
     result.set(Number(match[1]), { pid: Number(match[1]), ppid: Number(match[2]), started: match[4], name });
   }

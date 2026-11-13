@@ -18,8 +18,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { terminatePosixMember, treeTermination, compareStarted, parsePsTable, readProcTable, surveyTree, startTreeTracker, readTreeRecord, terminateTreeMembers, treeGap, TREE_FILE, TREE_GAP_SLACK_MS } from '../dist/core/process-tree.js';
-import { posixTerminationReply, jobResult, JobStore, collectStoreFiles, JOB_HOLD_FILE, RETENTION_MS } from '../dist/core/job-store.js';
+import { posixFinishedReply, posixTerminationReply, jobResult, JobStore, collectStoreFiles, JOB_HOLD_FILE, RETENTION_MS } from '../dist/core/job-store.js';
 import { parsePsIdentities, jobStateDir } from '../dist/core/live-jobs.js';
+import { finishJobReport } from '../dist/core/job-runner.js';
 import { FileJobExecutor } from '../dist/ai-cli_kernel/executor.js';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -238,6 +239,64 @@ const sure = (result, pid) => !!has(result, pid) && !has(result, pid).loose && !
   const signals = []; await terminatePosixMember(member(200, 1, { weak: true }), async () => new Map([[200, member(200, 1)]]), Infinity, (pid, kind) => signals.push(kind), async () => {});
   check('FIX14 POSIX escalation never signals weak identities', signals.length === 0);
 }
+/* FIX15: real ps layouts and product completion/kill semantics, no OS signals. */
+{
+  for (const text of ['36924 36923 36924 S<s  Fri Nov 13 04:59:00 2026     /Users/…/node', '   7182    7175    7182 Ssl  Fri Nov 13 04:58:18 2026 node']) {
+    const table = parsePsTable(text), row = table.rows[0];
+    check('FIX15 CI ps table sample '+text.trim().split(' ')[0], table.complete && table.unknown.length === 0 && row?.name === 'node' && row.pgid === row.pid && row.ppid === row.pid - (row.pid === 7182 ? 7 : 1), table);
+    const identity = parsePsIdentities(text.replace(/^(\s*\d+\s+\d+)\s+\d+/, '$1')).get(row.pid);
+    check('FIX15 CI identity sample '+row.pid, identity?.started === row.started && identity.name === 'node' && identity.ppid === row.ppid, identity);
+  }
+  check('FIX15 old ps columns are rejected rather than misidentified', parsePsIdentities('2203 2202 Fri Oct  9 13:30:35 2026 npm test').size === 0);
+}
+{
+  const directory = mkdtempSync(join(TEMP, 'fix15-finished-'));
+  const base = { pid: 100, directory, meta: { jobId: 'fixture', tree: 1 }, status: 'completed' };
+  writeFileSync(join(directory, 'exit.json'), JSON.stringify({ termination: { confirmed: true, reasons: [] } }));
+  const lost = posixFinishedReply({ ...base, status: 'lost' });
+  check('FIX15 lost status overrides stale termination proof', lost.status === 'lost' && lost.terminationConfirmed === false);
+  for (const status of ['completed', 'failed']) {
+    const legacy = posixFinishedReply({ ...base, status, meta: { jobId: 'fixture' } });
+    check('FIX15 legacy finished status '+status+' does not claim tree termination', legacy.status === status && legacy.terminationConfirmed === false && legacy.terminationReasons.length > 0);
+  }
+  check('FIX15 tracked finished job still requires proof', posixFinishedReply(base).status === 'terminated');
+  writeFileSync(join(directory, 'exit.json'), JSON.stringify({ termination: { confirmed: false, reasons: ['survivor'] } }));
+  check('FIX15 tracked survivor remains unconfirmed', posixFinishedReply(base).status === 'termination_unconfirmed');
+  // Exercise the actual POSIX JobStore.kill early branch on Windows, with all
+  // process lookups and signals excluded. Restore the platform synchronously.
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  try {
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+    for (const [status, tree, expected] of [['lost', 1, 'lost'], ['completed', undefined, 'completed'], ['completed', 1, 'termination_unconfirmed']]) {
+      const store = Object.create(JobStore.prototype);
+      Object.assign(store, { ready: Promise.resolve(), get: () => ({ ...base, status, meta: { jobId: 'fixture', tree, runner: { pid: 100, started: 'fixture' } } }), check: async () => {}, lookup: async () => { throw Error('must not query or signal'); } });
+      const result = await store.kill(base.pid);
+      check('FIX15 product kill preserves '+status+'/'+tree, result.status === expected && result.terminationConfirmed === false && !existsSync(join(directory, 'kill.json')), result);
+    }
+  } finally { Object.defineProperty(process, 'platform', platform); }
+}
+{
+  const report = { exitCode: 0, signal: null, endTime: new Date().toISOString(), killed: false, timedOut: false, termination: { confirmed: false, pending: true, reasons: ['pending'] } };
+  for (const mode of ['natural', 'kill', 'timeout', 'unknown', 'failure', 'preexisting', 'windows']) {
+    const directory = mkdtempSync(join(TEMP, 'fix15-report-')), file = join(directory, 'exit.json'), writes = [];
+    const killed = mode === 'kill', timedOut = mode === 'timeout'; let observed, killedCalls = 0;
+    if (mode === 'preexisting') writeFileSync(file, JSON.stringify({ ...report, endTime: 'independent-error', error: 'preserve me' }));
+    const tracker = mode === 'windows' ? undefined : {
+      seal: async () => { observed = existsSync(file); if (mode === 'failure') throw Error('injected seal failure'); return true; },
+      killRecorded: async () => { killedCalls++; return 0; },
+      confirmation: async () => { if (mode === 'failure') throw Error('injected table failure'); return { confirmed: mode !== 'unknown', reasons: mode === 'unknown' ? ['survivor'] : [] }; },
+    };
+    await finishJobReport(directory, { ...report, killed, timedOut }, tracker, (path, value) => { writes.push(value); writeFileSync(path, JSON.stringify(value)); });
+    const final = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
+    if (mode === 'natural') check('FIX15 natural POSIX completion writes one final exit', writes.length === 1 && observed === false && final.termination?.confirmed && !final.termination?.pending, writes);
+    if (killed || timedOut) check('FIX15 '+mode+' finishes descendant cleanup', killedCalls === 1);
+    if (killed || timedOut) check('FIX15 '+mode+' retains pending then final proof', writes.length === 2 && observed === true && writes[0].termination.pending === true && final.termination?.confirmed && !final.termination?.pending, writes);
+    if (mode === 'unknown' || mode === 'failure') check('FIX15 '+mode+' final exit cannot claim termination', writes.length === 1 && final.termination?.confirmed === false && final.termination.reasons.length > 0 && !final.termination?.pending, final);
+    if (mode === 'preexisting') check('FIX15 finalizer preserves independent exit', writes.length === 0 && final.error === 'preserve me', final);
+    if (mode === 'windows') check('FIX15 tracker-free Windows still writes once immediately', writes.length === 1);
+  }
+}
+
 /* ---- 2. 終止：逐筆核對身分 ---- */
 {
   const sent = [];

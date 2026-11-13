@@ -1,4 +1,4 @@
-/** Detached runner：worker 的父行程，fd 直寫 log，唯一一次落 meta 與 exit。 */
+/** Detached runner：worker 的父行程，fd 直寫 log，meta 落一次；自然完成 exit 一次，取消先 pending 再 final。 */
 import { spawn, execFile } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
@@ -10,7 +10,7 @@ import { lookupIdentities, type ProcessIdentity, type IdentityLookup } from './l
 import { identityOnly } from './principal.js';
 import { loadPtyModule, releaseExitedPty, stopOwnedPty } from './pty-runner.js';
 import { createAnsiCleaner } from './ansi.js';
-import { startTreeTracker, TREE_SCAN_MS, type ProcessTable } from './process-tree.js';
+import { startTreeTracker, TREE_SCAN_MS, type ProcessTable, type TreeTracker } from './process-tree.js';
 import { WinJobClient, lookupNativeIdentities } from './win-job-client.js';
 import { saveContainmentRef, findContainmentRef, readContainment, markContainmentIntent } from './containment-store.js';
 
@@ -283,20 +283,27 @@ async function execute(directory: string, options: RunnerOptions): Promise<void>
   closeSync(stderr);
   const report: JobExit = { exitCode: spec.pty && killed ? 143 : exit.code, signal: exit.signal, endTime: new Date().toISOString(), timedOut, killed,
     ...(exitError ? { error: exitError } : {}), ...(tracker ? { termination: { confirmed: false, pending: true as const, reasons: ['Descendant cleanup pending'] } } : {}) };
-  if (!readJobExit(directory)) save(join(directory, 'exit.json'), report);
+  await finishJobReport(directory, report, tracker, save);
+}
+/** Shared report finalization, injectable for POSIX write-count/failure tests on Windows. */
+export async function finishJobReport(directory: string, report: JobExit,
+  tracker?: Pick<TreeTracker, 'seal' | 'killRecorded' | 'confirmation'>, save = atomicJson): Promise<void> {
+  // Natural POSIX completion writes one final exit after the bounded tree checks.
+  // Cancellation retains the early pending acknowledgement while cleanup continues.
+  if ((!tracker || report.killed || report.timedOut) && !readJobExit(directory)) save(join(directory, 'exit.json'), report);
   for (const file of ['stdin.tmp', 'kill.json']) rmSync(join(directory, file), { force: true });
-  // 結果先落盤，呼叫端不必多等；runner 自己留下來補最後一次列舉。讀端要等 runner 也消失才會看子孫紀錄。
+  // 取消先落 pending；自然完成等有界追蹤收尾後一次落盤。讀端仍需確認 runner 已退出。
   // 兩段都有時間上限（TREE_SEAL_BUDGET_MS、TREE_KILL_BUDGET_MS）：列舉一直逾時也不會把 runner 拖住。
   if (tracker) {
     try {
       await tracker.seal();
       // 被終止或逾時：worker 的樹已經砍過，這裡補砍已經脫離那棵樹、但確定是它子孫的程序（每一筆送出前再核對身分）。自然結束的不動。
-      if (killed || timedOut) await tracker.killRecorded();
+      if (report.killed || report.timedOut) await tracker.killRecorded();
     } catch (error) { console.error('ai-cli runner tree:', error); }
     const termination = await tracker.confirmation().catch(error => ({ confirmed: false, reasons: [String(error)] }));
     const current = readJobExit(directory);
     // Preserve an independent runner failure; only finish our own report.
-    if (current?.endTime === report.endTime) save(join(directory, 'exit.json'), { ...current, termination });
+    if (!current || current.endTime === report.endTime) save(join(directory, 'exit.json'), { ...report, ...current, termination });
   }
 }
 // 僅 runner 入口執行；其他模組不 import 本檔。
