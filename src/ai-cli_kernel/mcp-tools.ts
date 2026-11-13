@@ -171,6 +171,7 @@ export async function aiCliKernelHandleTool(name: string, args: Record<string, u
     case 'ai-cli_kernel_result':
       return aiCliKernelResult({ runId: requireString(args, 'runId') });
     case 'ai-cli_kernel_cancel':
+      for(const key of Object.keys(args))if(key!=='runId')throw Error('MCP cancel rejects exception fields: '+key);
       return aiCliKernelCancel({ runId: requireString(args, 'runId') });
     case 'ai-cli_kernel_probe':
       return aiCliKernelProbe({ agent: requireString(args, 'agent') });

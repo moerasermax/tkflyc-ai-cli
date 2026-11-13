@@ -1,3 +1,4 @@
+import { assertDurableStatus, preserveDurableFailure } from './helpers/durable-failure-evidence.mjs';
 /** Windows runner 行程樹隔離：只 taskkill 本測試 SDK 啟動的 server，vendor 與狀態全部隔離。 */
 import '../tools/stubs/catalog-test-env.mjs';
 import assert from 'node:assert/strict';
@@ -34,7 +35,7 @@ async function until(fn, timeout = 25000) {
 }
 async function test(name, fn) {
   try { await fn(); passed++; console.log('PASS ' + name); }
-  catch (error) { failed++; console.log('FAIL ' + name + '\n' + error.stack); }
+  catch (error) { failed++; preserveDurableFailure({name, result: { assertionError: String(error) }, roots: [TEMP]}); console.log('FAIL ' + name + '\n' + error.stack); }
 }
 const stub = join(TEMP, 'worker.mjs');
 writeFileSync(stub, `const s=JSON.parse(process.argv[2]);console.log('LAUNCHER_READY');setTimeout(()=>console.log(JSON.stringify({type:'result',result:'LAUNCHER_DONE',response:'LAUNCHER_DONE',status:'SUCCESS'})),s.delay??20000);`);
@@ -80,7 +81,7 @@ async function client(fault = '') {
     assert.equal(result.isError ?? false, false, JSON.stringify(result) + errors);
     return JSON.parse(result.content.find(c => c.type === 'text').text);
   }, async stop() { await sdk.close(); clients.delete(api); } };
-  clients.add(api); await sdk.connect(transport); api.serverPid = json(pidFile).pid;
+  clients.add(api); await sdk.connect(transport); api.serverPid = json(pidFile).pid; await ownPid(api.serverPid);
   return api;
 }
 async function dispatch(api, model) {
@@ -128,15 +129,11 @@ try {
       assert.equal(existsSync(join(job.dir, 'launch.tmp')), false, 'launch.tmp removed once launcher confirms');
     }
   });
-  await test('Windows server tree kill cannot terminate durable pipe or PTY jobs', async () => {
+  await test('Windows verified server exit cannot terminate durable pipe or PTY jobs', async () => {
     assert.equal(jobs.length, 2); assert.ok(mayBeAlive(a.serverPid));
-    // 只能對本測試 proxy 寫下的 SDK server PID 執行 tree kill。
-    try { await promisify(execFile)('taskkill.exe', ['/T', '/F', '/PID', String(a.serverPid)], { windowsHide: true }); }
-    catch (error) {
-      // 身分查詢的短命子行程可在列舉後消失；server 仍活著才是 tree kill 失敗。
-      if (mayBeAlive(a.serverPid)) throw error;
-      console.log('OBSERVED taskkill reported a vanished descendant; SDK server is gone');
-    }
+    const expected = owned.get(a.serverPid), current = (await lookupIdentities([a.serverPid])).get(a.serverPid);
+    assert.ok(expected && current?.started === expected, 'own server identity verified before stop');
+    process.kill(a.serverPid, 'SIGKILL');
     await until(() => !mayBeAlive(a.serverPid));
     await sleep(500);
     for (const job of jobs) { assert.ok(mayBeAlive(job.pid), 'runner survives server tree kill'); assert.ok(mayBeAlive(job.meta.worker.pid), 'worker survives server tree kill'); }
@@ -153,7 +150,7 @@ try {
       await until(() => !mayBeAlive(job.pid) && !mayBeAlive(job.meta.worker.pid));
     }
   });
-  await test('Windows old direct runner entry remains compatible for pipe and PTY', async () => {
+  await test('Windows legacy server spec gains containment before pipe and PTY spawn', async () => {
     for (const pty of [false, true]) {
       const jobId = randomUUID(), dir = join(state, 'jobs', jobId); mkdirSync(dir, { recursive: true });
       atomicJson(join(dir, 'launch.tmp'), { command: process.execPath, args: [stub, JSON.stringify({ delay: 100 })], cwd: ROOT,
@@ -163,6 +160,7 @@ try {
       const child = spawn(process.execPath, [join(ROOT, 'dist/core/job-runner.js'), dir], { env: buildWorkerEnv(), detached: true, stdio: 'ignore', windowsHide: true });
       child.unref(); runners.add(child.pid); await ownPid(child.pid);
       await until(() => existsSync(join(dir, 'exit.json'))); assert.equal(json(join(dir, 'exit.json')).exitCode, 0);
+      assert.ok(json(join(dir, 'meta.json')).containment?.generation, 'legacy spec must acquire containment, never silently bypass');
       assert.equal(json(join(dir, 'meta.json')).pid, child.pid); assert.equal(existsSync(join(dir, 'launcher.ready')), false);
       await until(() => !mayBeAlive(child.pid));
     }
@@ -174,7 +172,8 @@ try {
         await assert.rejects(c.call('run', { model: 'gpt-6.1-sol', prompt: JSON.stringify({ delay: 100 }), workFolder: ROOT }), /launcher|ENOENT|runner/i);
         const dir = readdirSync(join(state, 'jobs')).filter(id => !existing.has(id)).map(id => join(state, 'jobs', id));
         assert.equal(dir.length, 1); const exit = json(join(dir[0], 'exit.json'));
-        assert.equal(exit.exitCode, 1); assert.equal(exit.killed, false); assert.equal(exit.timedOut, false); assert.ok(exit.error);
+        assert.equal(exit.exitCode, 1); assert.equal(exit.killed, false); assert.equal(exit.timedOut, false);
+        assert.match(exit.error, /Failed to start codex runner:/); assert.doesNotMatch(exit.error, /terminated by user/i);
         assert.match(readFileSync(join(dir[0], 'stderr.log'), 'utf8'), /Process error:/);
         assert.equal(existsSync(join(dir[0], 'stdout.log')), false); assert.equal(existsSync(join(dir[0], 'stdin.tmp')), false);
         if (fault === 'invalid-pid') { const pid = json(c.evidence).pid; runners.add(pid); await ownPid(pid); await until(() => !mayBeAlive(pid)); }
@@ -188,7 +187,8 @@ try {
       await assert.rejects(c.call('run', { model: 'gpt-6.1-sol', prompt: JSON.stringify({ delay: 100 }), workFolder: ROOT }), /injected launcher\.ready write failure/);
       const [jobId] = readdirSync(join(state, 'jobs')).filter(id => !existing.has(id)), dir = join(state, 'jobs', jobId);
       const pid = json(join(dir, 'launcher.json')).pid; runners.add(pid); await ownPid(pid);
-      const exit = json(join(dir, 'exit.json')); assert.equal(exit.exitCode, 1); assert.match(exit.error, /launcher\.ready/);
+      const exit = json(join(dir, 'exit.json')); assert.equal(exit.exitCode, 1); assert.equal(exit.killed, false); assert.equal(exit.timedOut, false);
+      assert.match(exit.error, /injected launcher\.ready write failure/); assert.doesNotMatch(exit.error, /terminated by user/i); assert.match(readFileSync(join(dir,'stderr.log'),'utf8'), /launcher\.ready/);
       await until(() => !mayBeAlive(pid), 15000);
       assert.equal(json(join(dir, 'exit.json')).error, exit.error, 'runner must not overwrite the launch failure');
       assert.equal(existsSync(join(dir, 'stdout.log')), false); assert.equal(existsSync(join(dir, 'launch.tmp')), false); assert.equal(existsSync(join(dir, 'stdin.tmp')), false);
@@ -234,7 +234,7 @@ try {
     const current = await lookupIdentities(leftovers.map(([pid]) => pid)).catch(() => new Map());
     for (const [pid, started] of leftovers) if (current.get(pid)?.started === started) {
       console.log(`Launcher cleanup: force terminating own PID ${pid}`);
-      await promisify(execFile)('taskkill.exe', ['/pid', String(pid), '/t', '/f'], { windowsHide: true }).catch(() => {});
+      await promisify(execFile)('taskkill.exe', ['/pid', String(pid), '/f'], { windowsHide: true }).catch(() => {});
     }
     await until(() => [...runners].every(pid => !mayBeAlive(pid)), 10000).catch(() => {});
   }

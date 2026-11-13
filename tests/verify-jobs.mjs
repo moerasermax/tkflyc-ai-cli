@@ -216,8 +216,9 @@ try {
   await check('MCP publication rejection resets promise and retries', async () => {
     const service = new ProcessService({ cliPaths: {} }), all = Promise.all; let calls = 0;
     Promise.all = () => ++calls === 1 ? Promise.reject(Error('stub failure')) : Promise.resolve([{ setSource() {} }, dispatcher]);
-    try { service.publishJobs(); await sleep(0); assert.equal(service.publishing, undefined); service.publishJobs(); await sleep(0); assert.ok(service.publisher); assert.equal(calls, 2); }
-    finally { Promise.all = all; }
+    const unhandled=[];const capture=error=>unhandled.push(error);process.on('unhandledRejection',capture);
+    try { service.publishJobs(); await sleep(0); assert.equal(unhandled.length,0,'publication rejection must be handled'); assert.equal(service.publishing, undefined); service.publishJobs(); await sleep(0); assert.ok(service.publisher); assert.equal(calls, 2); }
+    finally { Promise.all = all; process.off('unhandledRejection',capture);service.dispose(); }
   });
   await check('audit documentation describes excerpts and unverified CLI jobs', async () => {
     const en = readFileSync(join(ROOT, 'README.md'), 'utf8'), zh = readFileSync(join(ROOT, 'README.zh-TW.md'), 'utf8');
@@ -246,7 +247,7 @@ try {
     writeFileSync(preload, `import{createRequire,syncBuiltinESMExports}from'node:module';import{EventEmitter}from'node:events';import{PassThrough}from'node:stream';import{appendFileSync}from'node:fs';
 const cp=createRequire(import.meta.url)('node:child_process'),original=cp.spawn;
 cp.spawn=(binary,...args)=>{if(binary!=='git')return original(binary,...args);appendFileSync(${JSON.stringify(trace)},'git called');const child=new EventEmitter();child.stdout=new PassThrough();child.stderr=new PassThrough();setImmediate(()=>{child.stdout.end('stub-head\\n');child.stderr.end();child.emit('close',0);});return child;};syncBuiltinESMExports();`);
-    const child = spawn(process.execPath, ['--import', pathToFileURL(preload).href, join(ROOT, 'dist/bin/ai-cli.js'), 'jobs', '--json'], {
+    const child = spawn(process.execPath, ['--import', pathToFileURL(preload).href, join(ROOT, 'dist/bin/ai-cli.js'), 'jobs', '--json'], { windowsHide: true,
       env: { ...process.env, AI_CLI_WORKER: '1', AI_CLI_STATE_DIR: state, AI_CLI_UPDATE_REPO_ROOT: repo }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let output = '', errors = ''; child.stdout.on('data', data => output += data); child.stderr.on('data', data => errors += data);
@@ -268,7 +269,7 @@ const cp=createRequire(import.meta.url)('node:child_process');const stub=()=>{th
 stub[promisify.custom]=async(binary,args,options)=>{assert.equal(binary,'ps');assert.equal(options.env.LC_ALL,'C');assert.equal(options.env.TZ,'UTC');return{stdout:'123 1 Thu Oct  8 00:00:00 2026 /usr/bin/codex\\n'};};
 cp.execFile=stub;syncBuiltinESMExports();const{lookupIdentities}=await import(${JSON.stringify(pathToFileURL(join(ROOT, 'dist/core/live-jobs.js')).href)});
 process.env.TZ='Asia/Taipei';const a=(await lookupIdentities([123])).get(123);process.env.TZ='America/New_York';const b=(await lookupIdentities([123])).get(123);console.log(JSON.stringify([a,b]));`);
-    const child = spawn(process.execPath, [probe], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [probe], { windowsHide: true, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '', errors = ''; child.stdout.on('data', data => output += data); child.stderr.on('data', data => errors += data);
     const code = await new Promise(resolve => child.once('close', resolve)); assert.equal(code, 0, errors);
     const [a, b] = JSON.parse(output); assert.equal(a?.started, 'Thu Oct  8 00:00:00 2026'); assert.deepEqual(a, b); assert.equal(a.name, 'codex');
@@ -281,7 +282,7 @@ const cp=createRequire(import.meta.url)('node:child_process');const stub=()=>{th
 stub[promisify.custom]=async(binary,args)=>{assert.equal(binary,'ps');assert.equal(args[1],'123,999999');throw Object.assign(Error('exit 1'),{code:1,stdout:empty?undefined:'123 1 Thu Oct  8 00:00:00 2026 /usr/bin/codex\\n'});};cp.execFile=stub;syncBuiltinESMExports();
 const{lookupIdentities}=await import(${JSON.stringify(pathToFileURL(join(ROOT, 'dist/core/live-jobs.js')).href)});
 const ids=await lookupIdentities([123,999999]);assert.equal(ids.size,1);assert.equal(ids.get(123).name,'codex');empty=true;assert.equal((await lookupIdentities([123,999999])).size,0);`);
-    const child = spawn(process.execPath, [probe], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [probe], { windowsHide: true, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let errors = ''; child.stderr.on('data', data => errors += data); child.stdout.resume();
     assert.equal(await new Promise(resolve => child.once('close', resolve)), 0, errors);
   });
@@ -298,27 +299,46 @@ const ids=await lookupIdentities([123,999999]);assert.equal(ids.size,1);assert.e
     }
     assert.equal(readFileSync(meta, 'utf8'), before);
   });
+  await check('CLI reused legacy PID is lost without changing metadata', async()=>{
+    const state=join(dir,'reused-legacy'),folder=join(state,'cwds','stub',String(process.pid));mkdirSync(folder,{recursive:true});
+    const meta=join(folder,'meta.json'),row={pid:process.pid,processStarted:'old-birth',prompt:'PID reuse',toolType:'antigravity',workFolder:dir,cwdKey:'stub',status:'running',startTime:new Date().toISOString(),dispatcher,stdoutPath:join(folder,'stdout.log'),stderrPath:join(folder,'stderr.log')};
+    writeFileSync(meta,JSON.stringify(row));writeFileSync(row.stdoutPath,'');writeFileSync(row.stderrPath,'');
+    const reader=new FileProcessService({stateDir:state,cliPaths:{},readOnly:true});
+    try{const projected=await reader.listJobSummaries(async()=>new Map([[process.pid,{pid:process.pid,started:'new-birth',name:'node'}]]));assert.equal(projected[0].status,'lost');assert.equal(readFileSync(meta,'utf8'),JSON.stringify(row));}finally{reader.dispose();}
+  });
+  await check('MCP direct close publishes terminal snapshot before any timer', async()=>{
+    const service=new ProcessService({cliPaths:{}}),agent=getAgent('direct-api'),run=agent.runDirect;
+    const pub=new LiveJobPublisher(join(dir,'direct-close'),owner);let reject;
+    agent.runDirect=()=>new Promise((_,r)=>reject=r);service.publisher=pub;pub.setSource(service,()=>service.jobSummaries());
+    try{
+      const job=service.startDirectProcess({agent:'direct-api',prompt:'direct fixture',cwd:dir,args:[],cliPath:''});
+      assert.equal(JSON.parse(readFileSync(pub.filePath)).jobs.find(x=>x.pid===job.pid).status,'running');
+      reject(Error('controlled direct failure'));await Promise.resolve();await Promise.resolve();
+      const ended=JSON.parse(readFileSync(pub.filePath)).jobs.find(x=>x.pid===job.pid);assert.equal(ended.status,'failed');assert.ok(ended.endTime);
+    }finally{agent.runDirect=run;pub.dispose();service.dispose();}
+  });
   await check('CLI identity batching caches dispatcher without blocking PID', async () => {
     const cp = createRequire(import.meta.url)('node:child_process'), originalSpawn = cp.spawn;
-    const agent = getAgent('claude'), build = agent.buildCommand, platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const agent = getAgent('antigravity'), build = agent.buildCommand, spawnMode=agent.win32SpawnMode, platform = Object.getOwnPropertyDescriptor(process, 'platform');
     const state = join(dir, 'async-identities'), calls = [], resolvers = []; let pid = 54320;
     Object.defineProperty(process, 'platform', { value: 'win32' });
+    agent.win32SpawnMode='pipe';
     cp.spawn = () => ({ pid: ++pid, unref() {}, on() {} }); syncBuiltinESMExports();
-    agent.buildCommand = input => ({ cliPath: process.execPath, args: [], cwd: input.cwd, agent: 'claude', prompt: input.prompt });
+    agent.buildCommand = input => ({ cliPath: process.execPath, args: [], cwd: input.cwd, agent: 'antigravity', prompt: input.prompt });
     const service = new FileProcessService({ stateDir: state, cliPaths: {}, identityLookup: pids => { calls.push(pids); return new Promise(resolve => resolvers.push(resolve)); } });
     try {
-      const start = await Promise.race([service.startLegacyDetached({ cliPath: 'stub', args: [], cwd: dir, agent: 'antigravity', prompt: 'Async first' }), sleep(500).then(() => { throw Error('PID blocked on lookup'); })]);
+      const start = await Promise.race([service.startProcess({cwd:dir,model:'agy-default',prompt:'Async first'}), sleep(500).then(() => { throw Error('PID blocked on lookup'); })]);
       assert.deepEqual(calls[0], [start.pid, process.pid, process.ppid]);
       const key = readdirSync(join(state, 'cwds'))[0], meta = join(state, 'cwds', key, String(start.pid), 'meta.json');
       const before = JSON.parse(readFileSync(meta)); assert.equal(before.processStarted, undefined);
       before.status = 'completed'; before.endTime = new Date().toISOString(); writeFileSync(meta, JSON.stringify(before));
       resolvers[0](new Map([[start.pid, { pid: start.pid, started: 'child' }], [process.pid, { started: 'dispatcher' }], [process.ppid, { name: 'shell' }]])); await flushJobIdentities();
       const updated = JSON.parse(readFileSync(meta)); assert.equal(updated.status, 'completed'); assert.equal(updated.processStarted, 'child'); assert.equal(updated.dispatcher.parentName, 'shell');
-      const second = await service.startLegacyDetached({ cliPath: 'stub', args: [], cwd: dir, agent: 'antigravity', prompt: 'Async second' }); assert.deepEqual(calls[1], [second.pid]);
+      const second = await service.startProcess({cwd:dir,model:'agy-default',prompt:'Async second'}); assert.deepEqual(calls[1], [second.pid]);
       const secondMeta = join(state, 'cwds', key, String(second.pid), 'meta.json'); rmSync(secondMeta);
       resolvers[1](new Map([[second.pid, { started: 'second' }]])); await flushJobIdentities(); assert.equal(existsSync(secondMeta), false);
       assert.equal(calls.length, 2);
-    } finally { for (const resolve of resolvers) resolve(new Map()); await flushJobIdentities(); cp.spawn = originalSpawn; syncBuiltinESMExports(); agent.buildCommand = build; Object.defineProperty(process, 'platform', platform); }
+    } finally { for (const resolve of resolvers) resolve(new Map()); await flushJobIdentities(); cp.spawn = originalSpawn; syncBuiltinESMExports(); agent.buildCommand = build;agent.win32SpawnMode=spawnMode;service.dispose(); Object.defineProperty(process, 'platform', platform); }
   });
   await check('binary run persists runner metadata before launcher exit', async () => {
     const state = join(dir, 'binary-run'), preload = join(dir, 'run-preload.mjs'), vendor = join(dir, 'run-vendor.mjs');
@@ -326,7 +346,7 @@ const ids=await lookupIdentities([123,999999]);assert.equal(ids.size,1);assert.e
     writeFileSync(preload, `const{getAgent}=await import(${JSON.stringify(pathToFileURL(join(ROOT, 'dist/agents/registry.js')).href)});
 getAgent('claude').buildCommand=input=>({cliPath:process.execPath,args:[${JSON.stringify(vendor)}],cwd:input.cwd,agent:'claude',prompt:input.prompt,resolvedModel:'stub'});`);
     const child = spawn(process.execPath, ['--import', pathToFileURL(preload).href, join(ROOT, 'dist/bin/ai-cli.js'), 'run', '--cwd', dir, '--model', 'claude', '--prompt', 'Binary stub'],
-      { env: { ...process.env, AI_CLI_STATE_DIR: state }, stdio: ['ignore', 'pipe', 'pipe'] });
+      { windowsHide: true, env: { ...process.env, AI_CLI_STATE_DIR: state }, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '', errors = ''; child.stdout.on('data', data => output += data); child.stderr.on('data', data => errors += data);
     assert.equal(await new Promise(resolve => child.once('close', resolve)), 0, errors);
     const pid = JSON.parse(output).pid, id = readdirSync(join(state, 'jobs'))[0];
@@ -346,7 +366,7 @@ console.log(publisher.filePath);
 process.stdin.resume(); process.stdin.on('data',data=>{clearInterval(timer);if(data.toString().trim()==='crash')process.abort();else{process.stdin.destroy();}});
 `);
   function fixtureChild(state) {
-    const child = spawn(process.execPath, [fixture, state], { env: { ...process.env, AI_CLI_AUTO_UPDATE: 'off' }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [fixture, state], { windowsHide: true, env: { ...process.env, AI_CLI_AUTO_UPDATE: 'off' }, stdio: ['pipe', 'pipe', 'pipe'] });
     child.done = new Promise(resolve => child.once('close', resolve));
     child.path = new Promise(resolve => child.stdout.once('data', data => resolve(data.toString().trim())));
     child.stderr.resume(); return child;
@@ -381,7 +401,8 @@ process.stdin.resume(); process.stdin.on('data',data=>{clearInterval(timer);if(d
       const terminal = await find(); assert.equal(terminal.status, 'completed');
       assert.ok(terminal.endTime); const elapsed = terminal.elapsedSec; await sleep(50);
       assert.equal((await find()).elapsedSec, elapsed);
-      service.cleanupProcesses(); assert.equal(await find(), undefined);
+      // exit.json precedes runner exit; containment GC waits for the durable drained proof.
+      await until(async()=>{service.cleanupProcesses();return (await find())===undefined;});
       writeFileSync(vendor, 'setTimeout(()=>process.exit(7),100);');
       const failedStart = await service.startProcess({ prompt: 'Failed stub task', workFolder: dir, model: 'claude' });
       await service.waitForProcesses([failedStart.pid], 10);
@@ -390,7 +411,7 @@ process.stdin.resume(); process.stdin.on('data',data=>{clearInterval(timer);if(d
       assert.equal(immediate.status, 'failed');
       const failedJob = (await readLiveJobs(dir)).find(job => job.pid === failedStart.pid);
       assert.equal(failedJob.status, 'failed'); assert.ok(failedJob.endTime);
-      service.cleanupProcesses(); assert.ok(!(await readLiveJobs(dir)).some(job => job.pid === failedStart.pid));
+      await until(async()=>{service.cleanupProcesses();return !(await readLiveJobs(dir)).some(job=>job.pid===failedStart.pid);});
     } finally { agent.buildCommand = original; }
   });
 
@@ -431,7 +452,7 @@ getAgent('claude').buildCommand=input=>({cliPath:process.execPath,args:[${JSON.s
 console.log(JSON.stringify(await new FileProcessService({stateDir:${JSON.stringify(state)},cliPaths:{}}).startProcess({cwd:${JSON.stringify(dir)},model:'claude',prompt:'Launcher stub'})));
 await (await import(${JSON.stringify(pathToFileURL(join(ROOT, 'dist/core/file-process-service.js')).href)})).flushJobIdentities();
 `);
-    const child = spawn(process.execPath, [launch], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [launch], { windowsHide: true, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = ''; let errors = ''; child.stdout.on('data', data => output += data); child.stderr.on('data', data => errors += data);
     const code = await new Promise(resolve => child.once('close', resolve)); assert.equal(code, 0, errors);
     const start = JSON.parse(output); const service = new FileProcessService({ stateDir: state, cliPaths: {}, readOnly: true });
@@ -467,6 +488,6 @@ await (await import(${JSON.stringify(pathToFileURL(join(ROOT, 'dist/core/file-pr
       await runJobs(args, { list: async () => jobs, columns: () => 160, stdout: text => { process.stdout.write(text); if (args.includes('--watch')) process.emit('SIGINT'); } });
     }
   }
-} finally { publisher.dispose(); rmSync(dir, { recursive: true, force: true }); }
+} finally { publisher.dispose(); if (!failed) rmSync(dir, { recursive: true, force: true }); else console.log('Jobs evidence retained: ' + dir); }
 console.log(`jobs: ${passed} passed, ${failed} failed`);
 process.exitCode = failed ? 1 : 0;

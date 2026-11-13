@@ -3,6 +3,7 @@
  * 匯出函式一律以 aiCliKernel 開頭，讓原生程式碼裡一眼看得出這是延伸功能。
  */
 import { spawn } from 'node:child_process';
+import {readJournalReconcile} from './journal-reconcile.js';
 import { randomBytes } from 'node:crypto';
 import { aiCliKernelCreateRelease, aiCliKernelRunRelease, aiCliKernelRunTrigger, type KernelTriggerDeps, type KernelReleaseCreateInput, type KernelReleaseDeps } from './loop.js';
 import { existsSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
@@ -12,13 +13,15 @@ import { CONFIG_DIR } from '../core/user-config.js';
 import { lookupIdentities } from '../core/live-jobs.js';
 import { mayBeAlive, sameIdentity } from '../core/job-store.js';
 import { assertCanStartJob } from '../core/worker-env.js';
+import { confirmContainmentLostCli } from './containment-exception.js';
 import { FileJobExecutor } from './executor.js';
+import { confirmFullPermissionGone, fullPermissionRecords, isFullPermission, unsettledFullPermission, type GoneDeps } from './full-permission.js';
 import { admitRun, readActiveRuns, type ActiveRun, type AdmissionDeps } from './admission.js';
 import { releaseStoppedTestLock } from './test-lock.js';
 import type { MutexRetryDeps } from './process-mutex.js';
 import { atomicWrite, kernelRunDir, listRunIds, newRunId, recordSlotReleaseFailed, releaseActiveLock, RunStore, SLOT_RELEASE_DEFERRED_NOTE, SLOT_RELEASE_MARKER_NOTE } from './journal.js';
 import { boundaryKey, boundaryStatus, hasProbeEvidenceFormat, probeResultLabel, probeRerunHint, runBoundaryProbe, type ProbeRecord } from './probe.js';
-import { activeMinutes, nextStep, openActions, replayJournal, unprocessedActions, type RunView } from './replay.js';
+import { activeMinutes, nextStep, openActions, replayJournal, type RunView } from './replay.js';
 import { agentForModel, readQuota } from './runtime.js';
 import { buildContract, needsQuotaSnapshot, TEMPLATES, type KernelStartInput } from './templates.js';
 import { readQuotaSnapshot } from './model-select.js';
@@ -91,6 +94,7 @@ export interface KernelRunStatus {
   effectiveState: EffectiveState;
   stateLabel: string;
   reason: string | null;
+  reconciliation?: {reason:'journal_unavailable';detail:string} | null;
   detail: string | null;
   goal: string;
   workFolder: string;
@@ -133,7 +137,7 @@ function nextActionFor(state: EffectiveState, runId: string, reason?: string): s
       if (reason === 'decide_question') return `回答問題：ai-cli kernel approve ${runId} --note "你的回答"`;
       return `確認上面的原因後，要繼續就執行 ai-cli kernel approve ${runId}，不要就執行 ai-cli kernel cancel ${runId}`;
     case 'needs_reconcile': return `先用 ai-cli jobs 和 git status 確認實際情況。確定要放棄這個動作的結果就執行 ai-cli kernel approve ${runId} --reconcile abandon`;
-    case 'stop_pending': return `舊程序還沒確認停止。稍後再執行一次 ai-cli kernel cancel ${runId} 重新檢查。`;
+    case 'stop_pending': return `舊程序還沒確認停止。completion_pending 可用 ai-cli kernel approve ${runId} 重查並接續原結果；要取消則用 ai-cli kernel cancel ${runId}。`;
     case 'version_drift': return `ai-cli 更新過了。確認沒問題後執行 ai-cli kernel approve ${runId} 接回。`;
     case 'interrupted': return `runner 不在了。執行 ai-cli kernel approve ${runId} 接回，已完成的步驟不會重做。`;
     case 'completed': return `看報告：ai-cli kernel result ${runId}`;
@@ -190,6 +194,7 @@ function boundaries(contract: KernelContract): Record<string, BoundaryStatus> {
 async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRunStatus> {
   const contract = store.readContract();
   const view = replayJournal(store.read());
+  const reconcile=readJournalReconcile(store.dir);
   const alive = view.state === 'running' ? await aiCliKernelRunnerAlive(store) : null;
   const effectiveState: EffectiveState = view.state === 'running' && alive === false ? 'interrupted' : view.state;
   const open = openActions(view)[0];
@@ -200,8 +205,9 @@ async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRun
   return {
     origin: contract.origin ?? null,
     contextCommand: contract.contextCommand ?? null, context: view.context,
-    runId: store.runId, state: view.state, effectiveState, stateLabel: view.testLockWaiting ? `等測試鎖（被 ${view.testLockWaiting} 佔用）` : STATE_LABELS[effectiveState],
-    reason: view.reason ?? null, detail: view.detail ?? null, goal: contract.goal, workFolder: contract.develop ? workDirOf(contract.develop) : contract.workFolder, template: contract.template,
+    runId: store.runId, state: view.state, effectiveState, stateLabel: reconcile ? `journal 需對帳（${STATE_LABELS[effectiveState]}）` : view.testLockWaiting ? `等測試鎖（被 ${view.testLockWaiting} 佔用）` : STATE_LABELS[effectiveState],
+    reason: view.reason ?? null, reconciliation: reconcile ? {reason:'journal_unavailable',detail:reconcile.detail} : null,
+    detail: reconcile ? `${reconcile.detail}${view.detail ? '；原狀態：'+view.detail : ''}` : view.detail ?? null, goal: contract.goal, workFolder: contract.develop ? workDirOf(contract.develop) : contract.workFolder, template: contract.template,
     models: { decide: contract.decide, worker: contract.worker, allowedWorkers: contract.allowedWorkerModels }, contractDigest: view.contractDigest, boundary,
     modelSelection: contract.modelSelection ?? null,
     develop: contract.develop ? {
@@ -224,7 +230,7 @@ async function statusOf(store: RunStore, withBoundary = true): Promise<KernelRun
     },
     steps: describeSteps(view),
     currentAction: open ? { actionId: open.spec.actionId, kind: open.spec.kind, stepId: open.spec.stepId ?? null, job: open.job ?? null } : null,
-    acceptance: view.acceptance, nextAction: developNextAction(contract, effectiveState, store.runId) ?? nextActionFor(effectiveState, store.runId, view.reason),
+    acceptance: view.acceptance, nextAction: `${reconcile ? `先備份並核對 ${join(store.dir,'journal-reconcile.json')}、journal 與 writer tickets，排除原寫入者及鎖問題。接回成功才自動清除此標記；不要直接刪除當作已修復。` : ''}${developNextAction(contract, effectiveState, store.runId) ?? nextActionFor(effectiveState, store.runId, view.reason)}`,
     reportPath: existsSync(store.reportPath) ? store.reportPath : null, runDir: store.dir,
   };
 }
@@ -308,16 +314,21 @@ export function aiCliKernelRollback(input: { runId: string; apply?: boolean }): 
 
 export interface KernelApproveInput { runId: string; note?: string; reconcile?: string; acknowledgeUnisolated?: boolean; acknowledgeUnverifiedBoundary?: boolean }
 
-export async function aiCliKernelApprove(input: KernelApproveInput, deps: AdmissionDeps & { launch?: (store: RunStore) => Promise<void>; beforeStart?: () => void; release?: Partial<MutexRetryDeps> } = {}): Promise<KernelRunStatus> {
+export async function aiCliKernelApprove(input: KernelApproveInput, deps: AdmissionDeps & { launch?: (store: RunStore) => Promise<void>; beforeStart?: () => void; release?: Partial<MutexRetryDeps>; executor?: GoneDeps['executor'] } = {}): Promise<KernelRunStatus> {
   assertCanStartJob();
   const store = storeFor(input.runId);
   const contract = store.readContract();
   const view = replayJournal(store.read());
+  const legacyNotices = new Set<string>();
   const digest = store.contractDigest();
   if (digest !== view.contractDigest) throw new Error('委任書內容和建立時不一致，拒絕核准');
   if (isTerminalState(view.state)) throw new Error(`這個 run 已經結束（${view.state}），不能再核准`);
-  if (view.state === 'stop_pending') throw new Error(`舊程序還沒確認停止，不能接回。請執行 ai-cli kernel cancel ${input.runId} 重新檢查`);
-  if (view.state === 'running' && await aiCliKernelRunnerAlive(store) !== false) throw new Error('這個 run 已經在執行中');
+  if (view.state === 'stop_pending') {
+    if (view.reason !== 'completion_pending') throw new Error(`舊程序還沒確認停止，不能接回。請執行 ai-cli kernel cancel ${input.runId} 重新檢查`);
+    const block = await confirmFullPermissionGone(fullPermissionRecords(view), goneDeps(deps.executor ?? new FileJobExecutor(), 0, detail => { legacyNotices.add(detail); }), { kill: false });
+    if (block) throw new Error(`仍不能接續完成結果：${block.detail}`);
+  }
+  if ((view.state === 'running' || view.state === 'stop_pending') && await aiCliKernelRunnerAlive(store) !== false) throw new Error('這個 run 已經在執行中');
 
   if (view.state === 'needs_reconcile' && input.reconcile !== 'abandon') throw new Error('結果不明，確認後使用 --reconcile abandon');
   if (view.state !== 'needs_reconcile' && input.reconcile !== undefined) throw new Error('這個狀態不需要 --reconcile');
@@ -345,11 +356,17 @@ export async function aiCliKernelApprove(input: KernelApproveInput, deps: Admiss
       }
     }
   }
+  if (view.state === 'needs_reconcile') {
+    // 放棄的是「結果」，不是程序：全權限 job 還活著就放棄，接回後會在它還在寫的工作目錄上繼續派工。只查不砍。
+    const block = await confirmFullPermissionGone(openActions(view).filter(action => isFullPermission(action.spec)), goneDeps(deps.executor ?? new FileJobExecutor(), 0, detail => { legacyNotices.add(detail); }), { kill: false });
+    if (block) throw new Error(`拒絕 --reconcile abandon：${block.detail}。請先 ai-cli kernel cancel ${input.runId} 停掉它，或等它結束`);
+  }
   await admitRun(store, () => {
     // The preflight above can overlap another approval or cancellation while querying usage.
     if (replayJournal(store.read()).lastSeq !== view.lastSeq || store.contractDigest() !== digest || store.cancelRequested()) throw new Error('run 在取得名額前已變動，請重新檢查狀態');
     if (contract.develop && view.state === 'awaiting_approval' && Date.now() > Date.parse(contract.develop.expiresAt)) throw new Error('委任書已失效');
     deps.beforeStart?.();
+    for (const detail of legacyNotices) store.append({ type: 'compatibility_warning', detail });
     if (view.state === 'needs_reconcile') {
       for (const action of openActions(view)) store.append({ type: 'action_abandoned', actionId: action.spec.actionId, reason: '使用者確認後放棄', refund: false });
       if (view.openCheck) store.append({ type: 'check_finished', pid: view.openCheck.pid });
@@ -472,6 +489,11 @@ export async function aiCliKernelWait(input: { runId: string; timeoutSec?: numbe
   }
 }
 
+/** kernel 進程外（取消、cleanup、核准）確認全權限 worker 消失用的依賴。confirmMs 為 0 表示只查一次。 */
+function goneDeps(executor: GoneDeps['executor'], confirmMs: number, onLegacy?: GoneDeps['onLegacy']): GoneDeps {
+  return { executor, now: () => Date.now(), sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), pollMs: 500, confirmMs, onLegacy };
+}
+
 const cancelledOutcome: ActionOutcome = { ok: false, failureClass: 'cancelled', detail: '使用者取消', jobStatus: null, exitCode: null, messageFile: null, messageChars: 0, messagePreview: '', usage: null };
 
 /** runner 不在時由這裡收尾。回報 terminated 不算數，要確認程序真的消失。 */
@@ -486,20 +508,11 @@ export async function cancelWithoutRunner(store: RunStore, executor: KernelExecu
     store.append({ type: 'check_finished', pid: before.openCheck.pid });
     await releaseStoppedTestLock(store.runId);
   }
-  // 回報結束但還沒判定的寫入 job：它可能就是 stop_pending 的原因，不能略過。
-  for (const action of unprocessedActions(before)) {
-    if (action.spec.mode !== 'write' || !action.job) continue;
-    await executor.kill(action.job).catch(() => false);
-    const deadline = Date.now() + confirmMs;
-    let gone = await executor.isGone(action.job).catch(() => false);
-    while (!gone && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 500));
-      gone = await executor.isGone(action.job).catch(() => false);
-    }
-    if (!gone) {
-      store.append({ type: 'state', state: 'stop_pending', reason: 'worker_still_alive', detail: `job ${action.job.jobId} 還沒確認停止` });
-      return;
-    }
+  // 回報結束但還沒判定的全權限 job：它可能就是 stop_pending 的原因，不能略過。還沒有結果的在下面處理。
+  const block = await confirmFullPermissionGone(unsettledFullPermission(before).filter(action => action.outcome), goneDeps(executor, confirmMs, detail => store.append({ type: 'compatibility_warning', detail })), { kill: true });
+  if (block) {
+    store.append({ type: 'state', state: 'stop_pending', reason: block.reason, detail: block.detail });
+    return;
   }
   for (const action of openActions(replayJournal(store.read()))) {
     if (action.job) {
@@ -514,6 +527,7 @@ export async function cancelWithoutRunner(store: RunStore, executor: KernelExecu
         store.append({ type: 'state', state: 'stop_pending', reason: 'worker_still_alive', detail: `job ${action.job.jobId} 還沒確認停止` });
         return;
       }
+      if (action.job.legacyNotice) store.append({ type: 'compatibility_warning', detail: action.job.jobId + '：' + action.job.legacyNotice });
       store.append({ type: 'action_result', actionId: action.spec.actionId, outcome: cancelledOutcome });
     } else {
       const found = await executor.find(action.spec.marker);
@@ -544,6 +558,7 @@ async function cancelStatus(store: RunStore, sinceSeq: number): Promise<KernelRu
 
 /** deps 只供測試注入釋放名額時的協調；MCP／CLI 只傳 input。 */
 export async function aiCliKernelCancel(input: { runId: string; timeoutSec?: number }, deps: { release?: Partial<MutexRetryDeps> } = {}): Promise<KernelRunStatus> {
+  for(const key of Object.keys(input))if(!['runId','timeoutSec'].includes(key))throw Error('cancel API rejects exception fields: '+key);
   const store = storeFor(input.runId);
   const view = replayJournal(store.read());
   if (isTerminalState(view.state)) { await releaseActiveLock(input.runId, { deps: deps.release }); return cancelStatus(store, view.lastSeq); }
@@ -576,23 +591,45 @@ export async function aiCliKernelProbe(input: { agent: string; timeoutSec?: numb
 }
 
 /** 使用者決定不要了，或合併完了才呼叫。分支沒合併不會被刪。 */
-export async function aiCliKernelCleanup(input: { runId: string }): Promise<{ runId: string; worktreeRemoved: boolean; branchRemoved: boolean; detail: string }> {
+export async function aiCliKernelCleanup(input: { runId: string }, deps: { executor?: GoneDeps['executor'] } = {}): Promise<{ runId: string; worktreeRemoved: boolean; branchRemoved: boolean; detail: string }> {
+  for(const key of Object.keys(input))if(key!=='runId')throw Error('cleanup API rejects exception fields: '+key);
   const store = storeFor(input.runId);
   const contract = store.readContract();
   if (!contract.develop) throw new Error('只有 develop 範本的 run 有 worktree 要清');
   const view = replayJournal(store.read());
   if (!isTerminalState(view.state)) throw new Error(`這個 run 還沒結束（${view.state}），請先完成或 ai-cli kernel cancel ${input.runId}`);
+  // 終態不代表程序都停了：舊版可能在全權限 worker 還活著時就寫了 cancelled／failed。這裡只查不砍，還在就拒絕拆 worktree。
+  // 沒派過全權限動作就不進這段非同步檢查：下面的放行鎖要在呼叫當下同步取得，鎖被佔用時才會立刻拒絕。
+  const legacyNotices = new Set<string>();
+  const records = fullPermissionRecords(view);
+  if (records.length > 0) {
+    const block = await confirmFullPermissionGone(records, goneDeps(deps.executor ?? new FileJobExecutor(), 0, detail => { legacyNotices.add(detail); }), { kill: false });
+    if (block) throw new Error(`拒絕 cleanup：${block.detail}。它可能還在寫 worktree，請先讓那些程序結束，再執行一次`);
+  }
+  return cleanupChecked(store,legacyNotices);
+}
+/** Only called with an ordinary drain check or a freshly fsynced interactive cleanup event. */
+function cleanupChecked(store:RunStore,legacyNotices:Set<string>=new Set()) {
+  const contract=store.readContract();
+  if(!contract.develop)throw Error('only develop runs have a worktree');
   return store.withReleaseLock(() => {
+    for (const detail of legacyNotices) store.append({ type: 'compatibility_warning', detail });
     for (const runId of listRunIds()) {
-      if (runId === input.runId) continue;
+      if (runId === store.runId) continue;
       const dependent = storeFor(runId);
       let spec: DevelopSpec | undefined;
       try { spec = dependent.readContract().develop; }
       catch { throw new Error(`拒絕 cleanup：無法讀取 run ${runId} 的委任書，不能確認是否仍有依賴`); }
-      if (spec?.dependsOnRunId === input.runId && !isTerminalState(replayJournal(dependent.read()).state)) throw new Error(`拒絕 cleanup：尚未結束的 run ${runId} 依賴 ${input.runId} 的交付分支（baseRef ${spec.baseRef} @ ${spec.baseCommit}）`);
+      if (spec?.dependsOnRunId === store.runId && !isTerminalState(replayJournal(dependent.read()).state)) throw new Error(`拒絕 cleanup：尚未結束的 run ${runId} 依賴 ${store.runId} 的交付分支（baseRef ${spec.baseRef} @ ${spec.baseCommit}）`);
     }
-    return { runId: input.runId, ...cleanupWorkspace(contract.develop!) };
+    const result = cleanupWorkspace(contract.develop!);
+    return { runId: store.runId, ...result, detail: [result.detail, ...legacyNotices].join('；') };
   });
+}
+
+/** CLI only; actual console/worker checks run inside the interactive implementation. */
+export async function aiCliKernelContainmentException(runId:string,scope:'cancel'|'cleanup') {
+  return confirmContainmentLostCli(runId,scope,store=>cleanupChecked(store));
 }
 
 export function aiCliKernelTemplates(): Array<{ name: string; description: string }> {

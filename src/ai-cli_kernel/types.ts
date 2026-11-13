@@ -223,7 +223,25 @@ export interface ActionSpec {
 }
 
 /** startedAt 是 job 真正啟動的時間。接回時用它算時限，不會重新起算。 */
-export interface JobRef { pid: number; jobId: string; startedAt?: string }
+export interface JobRef {
+  containmentProtocol?: 1;
+  legacyNotice?: string;
+  pid: number;
+  jobId: string;
+  startedAt?: string;
+  /** kernel 需要這個 job 的子孫紀錄（全權限 job）。紀錄不見了不能當作「已消失」。舊日誌沒有這一格。 */
+  tracked?: true;
+  /** 程序已啟動，但沒有 job 紀錄可以接回，送出終止後也沒確認消失。這時 jobId 是空字串，靠 pid＋啟動時間重查。 */
+  untracked?: { started: string };
+}
+
+/**
+ * 執行器的 start 丟這個：程序已經啟動了，卻追蹤不到、也沒確認停掉。
+ * loop 會把 job 記進日誌，之後的終態關卡才查得到它；一般的啟動失敗（確定沒有程序）丟普通的 Error。
+ */
+export class KernelUntrackedStartError extends Error {
+  constructor(message: string, readonly job: JobRef) { super(message); }
+}
 
 export type FailureClass =
   | 'rate_limited' | 'quota' | 'auth' | 'model_unavailable' | 'timeout' | 'policy_refused'
@@ -252,7 +270,17 @@ export const NEEDS_HUMAN_FAILURES: readonly FailureClass[] = ['rate_limited', 'q
 
 export interface StopDecision { state: 'waiting_human' | 'failed'; reason: string; detail: string }
 
+export interface ContainmentConfirmation {
+  type: 'containment_lost_confirmed'; runId: string;
+  jobs: Array<{jobId:string;generation:string;brokerEpoch:string}>;
+  actor: {sid:string;pid:number;started:string;sessionId:number};
+  diagnostics: {reason:'broker_exited_handle_lost';errors:string[];observations: Array<Record<string,unknown>>};
+  observedSeq:number;scope:'cancel'|'cleanup';requestId:string;
+  /** Other blockers explicitly prevent replay from finishing cancellation. */
+  remainingBlockers:string[];
+}
 export type KernelEventBody =
+  | ContainmentConfirmation
   | { type: 'created'; contractDigest: string; modelSelection?: { mode: 'auto'; difficulty: KernelDifficulty; decide: ModelChoice; worker: ModelChoice; allowedWorkerModels: string[]; quotas: QuotaSnapshot } }
   | { type: 'approved'; contractDigest: string; kind: 'contract' | 'continue'; note?: string; overrides?: string[] }
   | { type: 'runner_started'; pid: number; versionId: string; token: string }
@@ -283,6 +311,7 @@ export type KernelEventBody =
   | { type: 'slot_release_failed'; detail: string }
   /** runner 定期補 active.lock 時出錯（H2）。不是狀態：replay 不讀它，不影響 run。 */
   | { type: 'legacy_marker_check_failed'; detail: string }
+  | { type: 'compatibility_warning'; detail: string }
   | { type: 'verification'; commit: string; passed: boolean; exitCode: number | null; timedOut: boolean; tail: string }
   | { type: 'quota_unknown'; agent: string }
   | { type: 'state'; state: RunState; reason?: string; detail?: string };
@@ -307,8 +336,14 @@ export interface KernelExecutor {
   /** 用 marker 查有沒有啟動過。null＝查過確定沒有；'unknown'＝查不了，不能當作沒有。 */
   find(marker: string): Promise<JobRef | null | 'unknown'>;
   kill(job: JobRef): Promise<boolean>;
-  /** 程序真的消失才回 true。查不了要回 false。 */
+  /**
+   * 程序真的消失才回 true。查不了要回 false。
+   * 真實執行器查的是 runner、worker，以及 runner 記下的子孫程序（core/process-tree.ts）；
+   * 沒被記到的子孫不在查核範圍，限制見技術手冊。
+   */
   isGone(job: JobRef): Promise<boolean>;
+  /** 還活著或查不了的程序，給 stop_pending 的 detail 用。可省略；不影響任何判定。 */
+  blockers?(job: JobRef): Promise<string[]>;
 }
 
 /** 探針紀錄裡能存的結果。 */

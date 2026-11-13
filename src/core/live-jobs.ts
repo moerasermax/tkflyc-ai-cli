@@ -40,7 +40,7 @@ async function lookupProcessIdentities(pids: number[], includeCommandLine = fals
     if (process.platform === 'win32') {
       const filter = ids.map(pid => `ProcessId=${pid}`).join(' OR ');
       const script = `@(Get-CimInstance Win32_Process -Filter '${filter}' | ForEach-Object { [pscustomobject]@{pid=[int]$_.ProcessId;ppid=[int]$_.ParentProcessId;started=$_.CreationDate.ToUniversalTime().ToString('o');name=$_.Name${includeCommandLine ? ';commandLine=$_.CommandLine' : ''}} }) | ConvertTo-Json -Compress`;
-      const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 5000, maxBuffer: 1024 * 1024 });
+      const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: 5000, maxBuffer: 1024 * 1024 });
       const rows = JSON.parse(stdout || '[]');
       for (const row of Array.isArray(rows) ? rows : [rows]) if (row?.started) result.set(row.pid, row);
     } else if (process.platform === 'linux') {

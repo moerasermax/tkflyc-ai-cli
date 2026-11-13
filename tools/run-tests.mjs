@@ -67,10 +67,33 @@ const TESTS = [
   'verify-adopt.mjs',
   'verify-pty-jobs.mjs',
   'verify-launcher-jobs.mjs',
+  'verify-win-job-gates.mjs',
+  'verify-win-job-phase3-foundation.mjs',
+  'verify-ai-cli_kernel-containment-exception.mjs',
+  'verify-ai-cli_kernel-journal-lock.mjs',
+  'verify-jobobj-fix4.mjs',
+  'verify-jobobj-fix5.mjs',
+  'verify-jobobj-fix6.mjs',
+  'verify-jobobj-fix7.mjs',
+  {file:'verify-jobobj-fix8.mjs',timeoutMs:300000},
+  {file:'verify-jobobj-fix9.mjs',timeoutMs:300000},
+  {file:'verify-jobobj-fix10.mjs',timeoutMs:300000},
+  {file:'verify-jobobj-fix11.mjs',timeoutMs:300000},
+  {file:'verify-jobobj-fix12.mjs',timeoutMs:300000},
+  'verify-win-job-late-exit.mjs',
+  'verify-win-job-fix1.mjs',
+  'verify-win-job-fix2.mjs',
+  'verify-win-job-unknown.mjs',
+  'verify-win-job-windowless.mjs',
+  'verify-win-job-broker.mjs',
+  'verify-process-tree.mjs',
+  'verify-process-tree-live.mjs',
   'verify-ai-cli_kernel.mjs',
+  'verify-ai-cli_kernel-terminal.mjs',
   'verify-ai-cli_kernel-evidence.mjs',
   'verify-ai-cli_kernel-base-archive.mjs',
   'verify-ai-cli_kernel-concurrency.mjs',
+  'verify-ai-cli_kernel-process-mutex.mjs',
   'verify-ai-cli_kernel-e2e.mjs',
   'verify-ai-cli_kernel-dashboard.mjs',
   'verify-ai-cli_kernel-panel.mjs',
@@ -80,6 +103,7 @@ const TESTS = [
 
 /** 刻意不進 `npm test` 的 verify 腳本。新增一支卻不想進 npm test，就要在這裡寫理由。 */
 const EXCLUDED = {
+  'verify-win-job-scale.mjs': 'Windows 0/1000/10000保留紀錄的冷啟動效能基準；需無其他測試競爭時獨立執行，避免p50/p95失真',
   'verify-e2e.mjs': '會真的呼叫 claude／codex／agy 三家 CLI、消耗額度，只在需要驗證端到端行為時手動跑',
   'verify-strict-behaviour.mjs': '手動輔助：用真模型探針驗唯讀旗標的實際行為（npm run verify:strict-behaviour）',
 };
@@ -123,6 +147,7 @@ for (const [i, entry] of entries.entries()) {
   const started = Date.now();
   const r = spawnSync(process.execPath, [...(entry.nodeArgs ?? []), join(testsDir, entry.file)], {
     cwd: ROOT,
+    windowsHide: true,
     stdio: 'inherit',
     // 定向突變的環境篩選不得縮小正式 npm test 驗收。
     env: { ...process.env, KERNEL_EVIDENCE_TEST_FILTER: '', KERNEL_BASE_ARCHIVE_TEST_FILTER: '', KERNEL_CONCURRENCY_TEST_FILTER: '' },

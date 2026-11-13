@@ -1,3 +1,4 @@
+import { assertDurableStatus, preserveDurableFailure } from './helpers/durable-failure-evidence.mjs';
 /** Windows ConPTY 持久化回歸：SDK 獨立 server、真實 PTY + Node stub，狀態全部隔離。 */
 import '../tools/stubs/catalog-test-env.mjs';
 import assert from 'node:assert/strict';
@@ -17,6 +18,8 @@ import { loadPtyModule, releaseExitedPty } from '../dist/core/pty-runner.js';
 import { FileProcessService } from '../dist/core/file-process-service.js';
 import { getAgent } from '../dist/agents/registry.js';
 import { buildWorkerEnv } from '../dist/core/worker-env.js';
+import { WinJobClient, lookupNativeIdentities } from '../dist/core/win-job-client.js';
+import { saveContainmentRef } from '../dist/core/containment-store.js';
 import { runJobs } from '../dist/app/jobs.js';
 
 if (process.platform !== 'win32') { console.log('SKIP verify-pty-jobs: Windows ConPTY only'); process.exit(0); }
@@ -33,8 +36,9 @@ async function until(fn, timeout = 20000) {
   throw new Error('PTY test deadline exceeded');
 }
 async function test(name, fn) {
+  if(process.env.PTY_TEST_FILTER&&!name.includes(process.env.PTY_TEST_FILTER))return;
   try { await fn(); passed++; console.log('PASS ' + name); }
-  catch (e) { failed++; console.log('FAIL ' + name + '\n' + e.stack); }
+  catch (e) { failed++; preserveDurableFailure({name, result: { assertionError: String(e) }, roots: [TEMP]}); console.log('FAIL ' + name + '\n' + e.stack); }
 }
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
 // PID 可被新 job 重用；同 jobId 必須唯一，同 PID 的其他紀錄只能屬於較早 job。
@@ -117,6 +121,7 @@ async function rawRunner(extra = {}, command = process.execPath, launch = {}) {
     meta: { version: 1, jobId: id, agent: 'antigravity', resolvedModel: 'agy-default', task: 'stub', workFolder: ROOT,
       startTime: new Date().toISOString(), source: 'cli', server: null, principal: null, recoverable: true },
     serverPid: process.pid, principalPid: process.ppid, ...extra };
+  if (process.platform === 'win32') { spec.meta.containment = await new WinJobClient().prepare(id, dir); saveContainmentRef(state, spec.meta.containment); atomicJson(join(dir, 'hold.json'), { containment: spec.meta.containment }); }
   atomicJson(join(dir, 'launch.tmp'), spec);
   const child = spawn(process.execPath, [launch.entry ?? join(ROOT, 'dist/core/job-runner.js'), dir], {
     detached: true, stdio: 'ignore', windowsHide: true, env: { ...buildWorkerEnv(), ...launch.env } }); child.unref(); runners.add(child.pid);
@@ -125,7 +130,7 @@ async function rawRunner(extra = {}, command = process.execPath, launch = {}) {
 }
 async function exited(job) {
   // 真 node-pty 的 console kill 可先等 ready，再走 5 秒查詢退路；使用一般原生 PTY 期限。
-  try { await until(() => existsSync(join(job.dir, 'exit.json')), job.evidence && !job.nativePty ? 8000 : 20000); }
+  try { await until(async () => { if (process.platform === 'win32' && !mayBeAlive(job.pid) && !existsSync(join(job.dir, 'exit.json'))) await storedResult(job); return existsSync(join(job.dir, 'exit.json')); }, job.evidence && !job.nativePty ? 8000 : 20000); }
   catch (error) {
     if (job.nativePty) {
       nativeFaultFailed = true;
@@ -157,7 +162,7 @@ if(${JSON.stringify(fault)}==='write'||${JSON.stringify(fault)}==='flush-write'&
 return original.write.call(this,fd,text,...args);};
 require('node:module').syncBuiltinESMExports();
 m._load=function(id,...args){if(id!=='@homebridge/node-pty-prebuilt-multiarch')return original.load.call(this,id,...args);
-if(${JSON.stringify(fault)}.startsWith('native-')){const native=original.load.call(this,id,...args);return{spawn(...args){const p=native.spawn(...args),kill=p.kill.bind(p);stats.worker=p.pid;persist();p.kill=()=>{stats.kills++;stats.killReady=p._isReady;stats.deferred=p._deferreds?.length;persist();return kill();};return p;}};}
+if(${JSON.stringify(fault)}.startsWith('native-')){const native=original.load.call(this,id,...args);return{spawn(...args){const p=native.spawn(...args),kill=p.kill.bind(p);stats.worker=p.pid;persist();if(${JSON.stringify(fault)}==='native-broker-lost'){const agent=p._agent,nativeKill=agent._ptyNative.kill.bind(agent._ptyNative);agent._ptyNative={...agent._ptyNative,kill(...a){stats.nativeKills=(stats.nativeKills??0)+1;persist();return nativeKill(...a);}};}if(${JSON.stringify(fault)}==='native-kill-zero'){const onExit=p.onExit.bind(p);Object.defineProperty(p,'onExit',{value:fn=>onExit(event=>{stats.nativeExit=event.exitCode;stats.forwardedExit=0;persist();fn({...event,exitCode:0});})});}p.kill=()=>{stats.kills++;stats.killReady=p._isReady;stats.deferred=p._deferreds?.length;persist();return kill();};return p;}};}
 return{spawn(){let data,exit;const p={pid:process.pid,onData(fn){data=fn;},onExit(fn){exit=fn;},kill(){stats.kills++;persist();if(stats.ended)throw Error('kill after exit');if(${JSON.stringify(fault)}==='kill-throws')throw Error('injected kill failure');}};
 if(${JSON.stringify(fault)}==='cleanup-stuck')setInterval(()=>{},1000);
 if(${JSON.stringify(fault)}!=='missing')p._agent={inSocket:{destroy(){if(${JSON.stringify(fault)}.startsWith('cleanup'))throw Error('injected release failure');}},_conoutSocketWorker:{dispose(){}}};
@@ -166,12 +171,14 @@ setTimeout(()=>{stats.ended=true;persist();exit({exitCode:${JSON.stringify(fault
 if(${JSON.stringify(fault)}==='after-exit')queueMicrotask(()=>process.emit('SIGTERM'));
 setTimeout(()=>{data('LATE_DATA');persist();},50);},150);return p;}};};persist();}`);
   writeFileSync(entry, `import{runJob}from ${JSON.stringify(pathToFileURL(join(ROOT,'dist/core/job-runner.js')).href)};
+import{lookupNativeIdentities,WinJobClient}from ${JSON.stringify(pathToFileURL(join(ROOT,'dist/core/win-job-client.js')).href)};
+if(['native-broker-lost','native-kill-zero','kill-throws','after-exit'].includes(${JSON.stringify(fault)}))WinJobClient.prototype.terminate=async()=>{(await import('node:fs')).appendFileSync(${JSON.stringify(evidence+'.requests')},'terminate\\n');return {state:'unknown'}};
 import{lookupIdentities}from ${JSON.stringify(pathToFileURL(join(ROOT,'dist/core/live-jobs.js')).href)};
 import{createAnsiCleaner}from ${JSON.stringify(pathToFileURL(join(ROOT,'dist/core/ansi.js')).href)};
 const cleaner=createAnsiCleaner();
 if(${JSON.stringify(fault)}==='flush-throw')cleaner.flush=()=>{throw Error('injected flush failure');};
 if(${JSON.stringify(fault)}==='flush-write')cleaner.flush=()=>'FLUSH_WRITE';
-await runJob(process.argv[2],{cleaner,lookup:async pids=>{if(pids.length===1){if(${JSON.stringify(fault)}==='native-kill')throw Error('injected worker lookup failure');return new Map();}return lookupIdentities(pids);}});`);
+await runJob(process.argv[2],{cleaner,lookup:async pids=>{if(pids.length===1){if(${JSON.stringify(fault)}==='native-kill')throw Error('injected worker lookup failure');return new Map();}return (process.platform==='win32'?lookupNativeIdentities:lookupIdentities)(pids);}});`);
   const target = await rawRunner({ pty: true, ...extra }, process.execPath, { entry,
     env: { NODE_OPTIONS: `--require ${JSON.stringify(loader)}` } });
   if (fault.startsWith('native-')) assert.ok(Number.isInteger(json(evidence).worker), 'native spawn instrumentation must record its own worker');
@@ -248,7 +255,7 @@ try {
     try {
       await until(() => existsSync(join(retained.dir, 'exit.json')), 8000);
       assert.ok(mayBeAlive(retained.pid), 'fixture must retain its own handle after exit');
-      assert.equal((await storedResult(retained)).status, 'completed');
+      assertDurableStatus((await storedResult(retained)), 'completed', {name:'pty-jobs',roots:[TEMP]});
     } finally { await stopOwnWorker(retained.meta.runner); }
   });
   await test('PTY missing private fields still persist correct results', async () => {
@@ -262,7 +269,7 @@ try {
     for (const fault of ['flush-throw', 'flush-write']) {
       const target = await faultRunner(fault); assert.equal((await exited(target)).exitCode, 0);
       assert.match(readFileSync(join(target.dir, 'stderr.log'), 'utf8'), /PTY stdout flush failed/);
-      assert.equal((await storedResult(target)).status, 'completed');
+      assertDurableStatus((await storedResult(target)), 'completed', {name:'pty-jobs',roots:[TEMP]});
     }
   });
   await test('PTY onData write errors are recorded once without uncaught exit', async () => {
@@ -288,31 +295,46 @@ try {
     assert.equal(readFileSync(join(target.dir, 'stdout.log'), 'utf8'), '');
     assert.equal((await storedResult(target)).status, 'failed');
   });
-  await test('PTY missing worker identity uses owned console kill', async () => {
+  await test('PTY missing worker identity uses containment or owned console kill', async () => {
     const target = await faultRunner('native-kill', { args: [stub, JSON.stringify({ delay: 60000 })] });
     const pid = json(target.evidence).worker, identity = (await lookupIdentities([pid])).get(pid);
     try {
       assert.equal(target.meta.worker, null); atomicJson(join(target.dir, 'kill.json'), { runner: target.meta.runner });
       const exit = await exited(target); assert.equal(exit.killed, true); assert.equal(exit.timedOut, false); assert.equal(exit.exitCode, 143);
-      assert.ok(json(target.evidence).kills >= 1); await until(() => !mayBeAlive(pid));
+      if (process.platform === 'win32') assert.equal(json(target.evidence).kills, 0, 'broker terminates the job without console fallback'); else assert.ok(json(target.evidence).kills >= 1); await until(() => !mayBeAlive(pid));
     } finally { await stopOwnWorker(identity); }
   });
-  await test('PTY missing worker identity uses owned console timeout', async () => {
+  await test('PTY missing identity and lost broker use owned real console kill',async()=>{
+    const target=await faultRunner('native-broker-lost',{args:[stub,JSON.stringify({delay:60000})]});
+    const pid=json(target.evidence).worker,identity=(await lookupIdentities([pid])).get(pid);
+    try{assert.equal(target.meta.worker,null);atomicJson(join(target.dir,'kill.json'),{runner:target.meta.runner});
+      const exit=await exited(target);assert.equal(exit.killed,true);assert.ok(json(target.evidence).nativeKills>=1);await until(()=>!mayBeAlive(pid));
+    }finally{await stopOwnWorker(identity);}
+  });
+  await test('PTY killed native zero exit normalizes to 143', async()=>{
+    const target=await faultRunner('native-kill-zero',{args:[stub,JSON.stringify({delay:60000})]});
+    atomicJson(join(target.dir,'kill.json'),{runner:target.meta.runner});
+    const exit=await exited(target);assert.equal(json(target.evidence).forwardedExit,0,'injected ConPTY exit must differ from 143');
+    assert.equal(exit.killed,true);assert.equal(exit.exitCode,143);assert.equal((await storedResult(target)).exitCode,143);
+  });
+  await test('PTY missing worker identity uses containment or owned console timeout', async () => {
     const target = await faultRunner('native-timeout', { timeoutMs: 1500, args: [stub, JSON.stringify({ delay: 60000 })] });
     const pid = json(target.evidence).worker, identity = (await lookupIdentities([pid])).get(pid);
     try {
       const exit = await exited(target); assert.equal(target.meta.worker, null);
       assert.equal(exit.timedOut, true); assert.equal(exit.killed, false); await until(() => !mayBeAlive(pid));
-      assert.ok(json(target.evidence).kills >= 1);
+      if (process.platform === 'win32') assert.equal(json(target.evidence).kills, 0, 'broker terminates the job without console fallback'); else assert.ok(json(target.evidence).kills >= 1);
     } finally { await stopOwnWorker(identity); }
   });
-  await test('PTY failed console kill does not mark killed or timedOut', async () => {
+  await test('PTY failed held-console termination never claims request was sent', async () => {
     const target = await faultRunner('kill-throws', { timeoutMs: 0 }); const exit = await exited(target);
+    if (process.platform === 'win32') { assert.equal(exit.timedOut, true); assert.equal(json(target.evidence).kills, 0); const text=readFileSync(join(target.dir,'stderr.log'),'utf8');assert.match(text,/no direct worker termination request was sent/);assert.doesNotMatch(text,/direct worker termination requested|Process terminated by user/); return; }
     assert.equal(exit.killed, false); assert.equal(exit.timedOut, false); assert.equal(exit.exitCode, 0);
-    assert.ok(json(target.evidence).kills >= 1); assert.match(readFileSync(join(target.dir, 'stderr.log'), 'utf8'), /injected kill failure/);
+    if (process.platform === 'win32') assert.equal(json(target.evidence).kills, 0, 'broker terminates the job without console fallback'); else assert.ok(json(target.evidence).kills >= 1); assert.match(readFileSync(join(target.dir, 'stderr.log'), 'utf8'), /injected kill failure/);
   });
   await test('PTY console fallback never kills after onExit', async () => {
     const target = await faultRunner('after-exit'); const exit = await exited(target);
+    assert.equal(existsSync(target.evidence+'.requests'),false,'natural close must not request new broker termination');
     assert.equal(json(target.evidence).kills, 0); assert.equal(exit.killed, false); assert.equal(exit.timedOut, false);
   });
   await test('PTY asynchronous spawn failure reports a failed job with reason', async () => {
@@ -382,7 +404,7 @@ try {
   });
   await test('PTY stdout strips split ANSI and get_result wait parse the response', async () => {
     const target = await dispatch(b); const [result] = await b.call('wait', { pids: [target.pid], timeout: 20, verbose: true });
-    assert.equal(result.status, 'completed'); assert.equal(result.agentOutput.message, 'PTY_PONG');
+    assertDurableStatus(result, 'completed', { name: 'pty-jobs', roots: [TEMP] }); assert.equal(result.agentOutput.message, 'PTY_PONG');
     const text = readFileSync(join(target.dir, 'stdout.log'), 'utf8'); assert.ok(text.includes('PTY_READY'));
     assert.ok(!text.includes('\x1b')); assert.ok(!text.includes('title')); assert.ok(!text.includes('31m'));
     assert.equal(readFileSync(join(target.dir, 'stderr.log'), 'utf8'), '');

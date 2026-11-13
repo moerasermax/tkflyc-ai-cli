@@ -105,9 +105,20 @@ export function replayJournal(events: KernelEvent[]): RunView {
     else view.failureStreak = { failureClass, count: 1, detail };
     if (NEEDS_HUMAN_FAILURES.includes(failureClass)) view.humanStop = { state: 'waiting_human', reason: failureClass, detail };
   };
+  const confirmations=new Set<string>();
   for (const event of events) {
+    if(event.type==='containment_lost_confirmed'&&confirmations.has(event.requestId)){view.lastSeq=Math.max(view.lastSeq,event.seq);continue;}
+    const precedingSeq=view.lastSeq;
     view.lastSeq = event.seq;
     switch (event.type) {
+      case 'containment_lost_confirmed':
+        if(confirmations.has(event.requestId))break;
+        if(event.observedSeq!==precedingSeq || !event.jobs.length || !Array.isArray(event.remainingBlockers))throw Error('invalid containment confirmation sequence');
+        confirmations.add(event.requestId);
+        if(event.scope==='cancel' && event.remainingBlockers.length===0 && view.state==='stop_pending') {
+          closeActive(event.at);view.state='cancelled';view.reason='containment_lost_confirmed';view.detail='程序可能仍在執行；人工承認追蹤遺失，未證明 drained';
+        }
+        break;
       case 'created': view.contractDigest = event.contractDigest; break;
       case 'context_intent': view.contextStarted = true; break;
       case 'context_result': view.context = { ok: event.ok, outputFile: event.outputFile, exitCode: event.exitCode, timedOut: event.timedOut, detail: event.detail }; break;

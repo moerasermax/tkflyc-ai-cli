@@ -68,8 +68,8 @@ try {
     assert.throws(() => verifySpawnedServer([], 101, 90), /"snapshotCount":0,"candidates":\[\]/);
   });
   await test('restart live MCP transport uses only three stub vendors and recovers without rerun', async () => {
-    const worker = join(temp, 'vendor.mjs'), preload = join(temp, 'preload.mjs');
-    await writeFile(worker, `const family=process.argv[2]; await new Promise(r=>setTimeout(r,14000));
+    const worker = join(temp, 'vendor.mjs'), preload = join(temp, 'preload.mjs'), release=join(temp,'release');
+    await writeFile(worker, `import{existsSync}from'node:fs';const family=process.argv[2],deadline=Date.now()+90000;while(!existsSync(${JSON.stringify(release)})){if(Date.now()>deadline)process.exit(1);await new Promise(r=>setTimeout(r,50));}
 const message='DONE-'+family;
 if(family==='codex'){console.log(JSON.stringify({type:'thread.started',thread_id:'stub-session'})); console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:message}})); console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_input_tokens:0,output_tokens:2}}));}
 else {console.log(JSON.stringify({type:'system',session_id:'stub-session'}));console.log(JSON.stringify({type:'result',subtype:'success',result:message,session_id:'stub-session',stop_reason:'end_turn',usage:{input_tokens:1,output_tokens:2},is_error:false}));}
@@ -78,7 +78,9 @@ else {console.log(JSON.stringify({type:'system',session_id:'stub-session'}));con
     await writeFile(preload, `import{getAgent}from ${JSON.stringify(registry)}; for(const family of ['claude','codex','grok']) getAgent(family).buildCommand=i=>({cliPath:process.execPath,args:[${JSON.stringify(worker)},family],agent:family,cwd:i.cwd,prompt:i.prompt,resolvedModel:i.resolvedModel});`);
     const before = process.env.NODE_OPTIONS; process.env.NODE_OPTIONS = `--import ${JSON.stringify(pathToFileURL(preload).href)}`;
     try {
-      const result = await runRecovery({ timeoutMs: 30000, restartMs: 500, out: join(temp, 'transport') }, await liveDeps());
+      const deps=await liveDeps(),server=deps.server;let servers=0;
+      deps.server=async state=>{const api=await server(state);if(++servers===2){const call=api.call;api.call=async(name,args)=>{const value=await call(name,args);if(name==='list_processes')await writeFile(release,'go');return value;};}return api;};
+      const result = await runRecovery({ timeoutMs: 30000, restartMs: 500, out: join(temp, 'transport') }, deps);
       artifacts.push(result.report.stateDir, result.report.workFolder);
       assert.equal(result.exitCode, 0, JSON.stringify(result.report)); assert.equal(result.report.storeCount, 3);
       assert(result.report.jobs.every(j => j.result.recovered && j.result.agentOutput.usage));

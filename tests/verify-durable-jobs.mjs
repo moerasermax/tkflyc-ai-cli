@@ -1,3 +1,4 @@
+import { assertDurableStatus, preserveDurableFailure } from './helpers/durable-failure-evidence.mjs';
 /** Stub-only：MCP 真重啟、身分隔離、整棵樹 kill、假時鐘 GC、50×1 MiB heap/IO。 */
 import '../tools/stubs/catalog-test-env.mjs';
 import assert from 'node:assert/strict';
@@ -13,6 +14,7 @@ import { JobStore, atomicJson, collectStoreFiles, jobResult, MAX_FINISHED_BYTES,
 import { lookupIdentities } from '../dist/core/live-jobs.js';
 import { resolvePrincipal } from '../dist/core/principal.js';
 import { FileProcessService } from '../dist/core/file-process-service.js';
+import { WinJobClient } from '../dist/core/win-job-client.js';
 import { ProcessService } from '../dist/core/process-service.js';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -21,8 +23,9 @@ const section = process.argv[2];
 let passed = 0, failed = 0;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function check(name, fn) {
+  if (process.env.DURABLE_TEST_FILTER && !name.includes(process.env.DURABLE_TEST_FILTER)) return;
   try { await fn(); passed++; console.log(`PASS ${name}`); }
-  catch (e) { failed++; console.log(`FAIL ${name}\n${e.stack}`); }
+  catch (e) { failed++; preserveDurableFailure({name, result: { assertionError: String(e) }, roots: [TEMP]}); console.log(`FAIL ${name}\n${e.stack}`); }
 }
 async function until(fn, ms = 20000) {
   const deadline = Date.now() + ms;
@@ -32,15 +35,21 @@ async function until(fn, ms = 20000) {
 const metaFor = (state, pid) => readdirSync(join(state, 'jobs')).map(id => join(state, 'jobs', id)).find(dir => existsSync(join(dir, 'meta.json')) && JSON.parse(readFileSync(join(dir, 'meta.json'))).pid === pid);
 const preload = join(TEMP, 'preload.mjs');
 // 寫入計數包括後來刪掉的 launch/stdin 暫存檔；stdout/stderr 是 OS fd 直寫，另以 log size 計量。
+// 子孫紀錄（tree.json）另外計：它的寫入次數跟列舉次數走，不跟輸出量走。
 writeFileSync(preload, `import {createRequire,syncBuiltinESMExports} from 'node:module';
 import {join} from 'node:path';
 const fs=createRequire(import.meta.url)('node:fs'), original=fs.writeFileSync;
-let writes=0,bytes=0; const state=process.env.AI_CLI_STATE_DIR;
+let writes=0,bytes=0,treeWrites=0; const state=process.env.AI_CLI_STATE_DIR;
 fs.writeFileSync=function(path,data,...rest){
-if(String(path).startsWith(join(state,'jobs')+'/' ) || String(path).startsWith(join(state,'jobs')+'\\\\')) {writes++;bytes+=Buffer.byteLength(data);}return original.call(this,path,data,...rest);};
+if(String(path).startsWith(join(state,'jobs')+'/' ) || String(path).startsWith(join(state,'jobs')+'\\\\')) {if(String(path).includes('tree.json'))treeWrites++;else writes++;bytes+=Buffer.byteLength(data);}return original.call(this,path,data,...rest);};
 syncBuiltinESMExports();
-if(process.argv[1]?.endsWith('job-runner.js')) process.on('exit',()=>original(join(state,'io-'+process.pid+'.json'),JSON.stringify({writes,bytes})));
+if(process.argv[1]?.endsWith('job-runner.js')&&state?.endsWith('fallback-kill')){
+ const {WinJobClient}=await import(${JSON.stringify(pathToFileURL(join(ROOT,'dist/core/win-job-client.js')).href)});
+ WinJobClient.prototype.terminate=async()=>({state:'unknown'});
+}
+if(process.argv[1]?.endsWith('job-runner.js')) process.on('exit',()=>original(join(state,'io-'+process.pid+'.json'),JSON.stringify({writes,bytes,treeWrites})));
 if(process.argv[1]?.endsWith('ai-cli-mcp.js') || process.argv[1]?.endsWith('ai-cli.js')) {
+if(Number(process.env.DURABLE_FIXTURE_INIT_PAUSE_MS)>0)await new Promise(r=>setTimeout(r,Number(process.env.DURABLE_FIXTURE_INIT_PAUSE_MS)));
 const {getAgent}=await import(${JSON.stringify(pathToFileURL(join(ROOT, 'dist/agents/registry.js')).href)});
 for(const id of ['claude','codex'])getAgent(id).buildCommand=input=>({cliPath:process.execPath,args:[${JSON.stringify(join(ROOT, 'tools/stubs/durable-agent.mjs'))},id],cwd:input.cwd,agent:id,prompt:input.prompt,stdinPrompt:input.prompt,resolvedModel:'stub'});
 const request=join(state,'heap-request.json');
@@ -51,11 +60,11 @@ const envFor = state => ({ ...process.env, AI_CLI_STATE_DIR: state, AI_CLI_BREAK
 const proxy = join(TEMP, 'proxy.mjs');
 writeFileSync(proxy, `import{spawn}from'node:child_process';const c=spawn(process.execPath,process.argv.slice(2),{stdio:'inherit',windowsHide:true});c.on('close',code=>process.exitCode=code);`);
 const clients = new Set(), realStates = new Set();
-function client(state, differentParent = false) {
+function client(state, differentParent = false, initPauseMs = 0) {
   realStates.add(state);
   mkdirSync(state, { recursive: true });
   const args = ['--expose-gc', join(ROOT, 'dist/bin/ai-cli-mcp.js')];
-  const child = spawn(process.execPath, differentParent ? [proxy, ...args] : args, { env: envFor(state), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const child = spawn(process.execPath, differentParent ? [proxy, ...args] : args, { env: { ...envFor(state), DURABLE_FIXTURE_INIT_PAUSE_MS: String(initPauseMs) }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const closed = once(child, 'close');
   let buffer = '', errors = '', sequence = 0; const pending = new Map();
   child.stderr.on('data', b => errors += b);
@@ -101,22 +110,30 @@ try {
 if (!section || section === 'restart') {
   const state = join(TEMP, 'restart'); let c = client(state); await c.init();
   await check('MCP restart recovers running job without redispatch', async () => {
-    const job = await dispatch(c, state, { delay: 8000, filler: '中文字'.repeat(5000) }); const meta = readFileSync(join(job.dir, 'meta.json'), 'utf8');
+    const releaseFile = join(state, 'release-running-job');
+    try {
+    const job = await dispatch(c, state, { releaseFile, filler: '中文字'.repeat(5000) }); const meta = readFileSync(join(job.dir, 'meta.json'), 'utf8');
     assert.equal(job.meta.sessionId, 'original-session');
     assert.ok(!meta.includes('中文字'.repeat(200)), 'metadata must not contain the full prompt');
-    await c.stop(); c = client(state); await c.init();
+    await until(() => existsSync(join(job.dir, 'stdout.log')) && readFileSync(join(job.dir, 'stdout.log'), 'utf8').includes('thread.started'));
+    // The worker stays running until recovery is observed, regardless of host load.
+    // Optional bootstrap pause reproduces the former fixed-8s false failure.
+    await c.stop(); c = client(state, false, Number(process.env.DURABLE_RESTART_PAUSE_MS || 0)); await c.init();
     const row = (await c.call('list_processes')).find(j => j.pid === job.pid);
     assert.equal(row.recovered, true); assert.equal(row.status, 'running');
+    assert.equal(existsSync(join(job.dir, 'exit.json')), false, 'worker waits for the recovery assertion');
+    writeFileSync(releaseFile, 'release');
     const [result] = await c.call('wait', { pids: [job.pid], timeout: 20, verbose: true });
-    assert.equal(result.status, 'completed'); assert.equal(result.recovered, true); assert.equal(result.agentOutput.message, '完整輸出：PONG');
+    assertDurableStatus(result, 'completed', { name: 'durable-jobs', roots: [TEMP] }); assert.equal(result.recovered, true); assert.equal(result.agentOutput.message, '完整輸出：PONG');
     assert.equal(existsSync(join(job.dir, 'stdin.tmp')), false);
     assert.equal(readFileSync(join(job.dir, 'meta.json'), 'utf8'), meta); assert.equal(readdirSync(join(state, 'jobs')).length, 1);
+    } finally { writeFileSync(releaseFile, 'release'); }
   });
   await check('MCP recovers job completed while server was absent', async () => {
     const job = await dispatch(c, state, { delay: 2500 }, 'claude'); await c.stop();
     await until(() => existsSync(join(job.dir, 'exit.json'))); c = client(state); await c.init();
     const result = await c.call('get_result', { pid: job.pid });
-    assert.equal(result.status, 'completed'); assert.equal(result.recovered, true); assert.equal(result.agentOutput.message, '完整輸出：PONG');
+    assertDurableStatus(result, 'completed', { name: 'durable-jobs', roots: [TEMP] }); assert.equal(result.recovered, true); assert.equal(result.agentOutput.message, '完整輸出：PONG');
   });
   await check('MCP runner and worker dead without exit becomes lost with output', async () => {
     const job = await dispatch(c, state, { delay: 60000 });
@@ -148,7 +165,7 @@ if (!section || section === 'restart') {
     const { pid } = await cli(['run', '--cwd', ROOT, '--model', 'claude', '--prompt', JSON.stringify({ delay: 0 })]);
     const dir = metaFor(state, pid), before = readFileSync(join(dir, 'meta.json'), 'utf8');
     assert.ok((await cli(['ps'])).some(j => j.pid === pid));
-    assert.equal((await cli(['wait', String(pid), '--timeout', '15']))[0].status, 'completed');
+    assertDurableStatus((await cli(['wait', String(pid), '--timeout', '15']))[0], 'completed', {name:'durable-jobs',roots:[TEMP]});
     assert.equal((await cli(['result', String(pid)])).agentOutput.message, '完整輸出：PONG');
     assert.equal((await cli(['jobs', '--json'])).find(j => j.pid === pid).source, 'cli');
     assert.equal(readFileSync(join(dir, 'meta.json'), 'utf8'), before);
@@ -165,9 +182,23 @@ if (!section || section === 'kill') {
     const exit = JSON.parse(readFileSync(join(job.dir, 'exit.json'))); assert.equal(exit.killed, true); assert.equal(exit.timedOut, false);
     await until(async () => (await lookupIdentities([job.pid, job.meta.worker.pid, grandchild])).size === 0);
   });
+  if(process.platform==='win32')await check('Windows durable runner fallback records killed intent after broker unknown',async()=>{
+    const fallbackState=join(TEMP,'fallback-kill'),fallback=client(fallbackState);await fallback.init();
+    try{
+      const job=await dispatch(fallback,fallbackState,{delay:60000});
+      atomicJson(join(job.dir,'kill.json'),{runner:job.meta.runner,requestedAt:new Date().toISOString()});
+      await until(()=>existsSync(join(job.dir,'exit.json')));
+      const exit=JSON.parse(readFileSync(join(job.dir,'exit.json'),'utf8'));
+      assert.equal(exit.killed,true);assert.equal(exit.timedOut,false);
+      assert.equal(JSON.parse(readFileSync(join(job.dir,'containment-status.json'),'utf8')).state,'unknown');
+      assert.match(readFileSync(join(job.dir,'stderr.log'),'utf8'),/direct worker termination requested/);
+      await until(async()=>(await lookupIdentities([job.pid,job.meta.worker.pid])).size===0);
+    }finally{await fallback.stop();}
+  });
   await check('cleanup immediately removes finished disk jobs and keeps running jobs', async () => {
-    const running = await dispatch(c, state, { delay: 10000 });
+    const running = await dispatch(c, state, { delay: 60000 });
     const finished = await dispatch(c, state, { delay: 0 }); await c.call('wait', { pids: [finished.pid], timeout: 15 });
+    if(process.platform==='win32') await until(async()=> (await new WinJobClient().inspect(finished.meta.containment)).state==='drained');
     const cleaned = await c.call('cleanup_processes'); assert.ok(cleaned.removedPids.includes(finished.pid));
     assert.equal(existsSync(finished.dir), false); assert.equal(existsSync(running.dir), true);
     await c.call('kill_process', { pid: running.pid });
@@ -231,7 +262,7 @@ if (!section || section === 'gc') {
     const dir = join(state, 'jobs', readdirSync(join(state, 'jobs'))[0]); const meta = JSON.parse(readFileSync(join(dir, 'meta.json')));
     meta.runner.started = 'reused'; atomicJson(join(dir, 'meta.json'), meta);
     const store = new JobStore(state, 'cli', true, async () => new Map([[process.pid, live]])); await store.ready;
-    assert.equal(store.get(process.pid).status, 'lost'); assert.equal((await store.kill(process.pid)).status, 'lost'); assert.equal(existsSync(join(dir, 'kill.json')), false); store.dispose();
+    assert.equal(store.get(process.pid).status, 'lost'); if(process.platform==='win32') assert.equal((await store.kill(process.pid)).containment,'unknown'); else assert.equal((await store.kill(process.pid)).status, 'lost'); assert.equal(existsSync(join(dir, 'kill.json')), false); store.dispose();
   });
   await check('PID collision retains UUID jobs and resolves all PID operations to newest', async () => {
     const state = join(TEMP, 'gc-collision'), pid = 123456789;
@@ -243,7 +274,7 @@ if (!section || section === 'gc') {
     assert.equal(jobResult(store.get(pid, old.id)).jobId, old.id);
     assert.equal((await store.wait([pid], 1))[0].jobId, latest.id);
     assert.equal((await store.peek([pid], 1)).processes[0].jobId, latest.id);
-    assert.equal((await store.kill(pid)).jobId, latest.id);
+    if(process.platform==='win32') assert.equal((await store.kill(pid)).containment,'unknown'); else assert.equal((await store.kill(pid)).jobId, latest.id);
     // GC ? job ????? PID ??????
     store.collect(Date.parse(newerExit.endTime) + RETENTION_MS - 1);
     assert.equal(store.jobs.size, 1); assert.equal(store.get(pid).meta.jobId, latest.id);
@@ -264,7 +295,7 @@ if (!section || section === 'gc') {
       assert.equal(service.getProcessResult(pid, false, one.id).jobId, one.id);
       assert.equal((await service.waitForProcesses([pid], 1))[0].jobId, two.id);
       assert.equal((await service.peekProcesses([pid], 1)).processes[0].jobId, two.id);
-      assert.equal((await service.killProcess(pid)).jobId, two.id);
+      if(process.platform==='win32') assert.equal((await service.killProcess(pid)).containment,'unknown'); else assert.equal((await service.killProcess(pid)).jobId, two.id);
       service.collectExpired(Date.parse(JSON.parse(readFileSync(join(two.dir, 'exit.json'))).endTime) + RETENTION_MS - 1);
       assert.equal(service.listProcesses().length, 1); assert.equal(service.getProcessResult(pid).jobId, two.id);
     } finally { service.dispose(); process.env.AI_CLI_STATE_DIR = previousState; }
@@ -298,6 +329,8 @@ if (!section || section === 'memory') {
       // 同 heap()：io 檔在 runner 的 exit 事件以一般寫入產生，讀到一半要等下一輪。
       const io = await until(() => { try { return JSON.parse(readFileSync(join(state, 'io-' + job.pid + '.json'))); } catch { return undefined; } });
       assert.equal(io.writes, 2, 'runner must write only meta and exit, never per-chunk logs'); metadataBytes += io.bytes; metadataWrites += io.writes;
+      // 啟動時一次、worker 結束後一次；job 活超過一秒才會多出定期列舉的那幾次。1 MiB 的輸出不會讓它變多。
+      assert.ok(process.platform === 'win32' ? io.treeWrites === 0 : io.treeWrites >= 2 && io.treeWrites <= 4, `runner must write the descendant record once per scan, not per chunk: ${io.treeWrites}`);
       if ((i + 1) % 10 === 0) { samples.push({ jobs: i + 1, heapUsed: (await heap(state)).heapUsed }); console.log('HEAP ' + JSON.stringify(samples.at(-1))); }
     }
     const after = await heap(state); const growth = after.heapUsed - before.heapUsed;

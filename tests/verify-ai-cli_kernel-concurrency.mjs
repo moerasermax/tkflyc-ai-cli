@@ -117,6 +117,7 @@ function legacyStart(store) { assert.equal(acquireActiveLock(store.runId).ok, tr
 function legacyEnd(store) { store.append({ type: 'state', state: 'completed' }); legacyRelease(store.runId); }
 
 try {
+  await test('Phase3 cancel request fences delayed runner admission',async()=>{const a=fresh();await admit(a);a.requestCancel();assert.equal(await claimRunnerSlot(a,async()=>assert.fail('cancelled admission must not claim')),false);await finish(a);});
   await test('F1 new reservations exclude legacy launchers until final release', async () => {
     const a = fresh(), old = fresh(), marker = join(kernelStateDir(), 'active.lock');
     await admitRun(a, () => {

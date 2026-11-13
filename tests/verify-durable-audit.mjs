@@ -7,6 +7,8 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { runJob, verifiedTermination } from '../dist/core/job-runner.js';
 import { JobStore, atomicJson, collectStoreFiles, removeJobDirectory, jobResult, VERBOSE_MAX_BYTES, STARTUP_GRACE_MS, mayBeAlive } from '../dist/core/job-store.js';
 import { lookupIdentities, LiveJobPublisher } from '../dist/core/live-jobs.js';
@@ -50,6 +52,13 @@ await test('H2 identity lookup failure remains retryable and does not mark kille
   await assert.rejects(throws(), /timeout/); assert.equal(await throws(), true);
 });
 await test('M1 meta write failure stops newly spawned stub and persists error', async () => {
+  if(process.platform==='win32'){
+    const {id,dir}=directory();launch(dir,meta(id),['-e','setInterval(()=>{},1000)']);
+    const entry=join(TEMP,'meta-failure.mjs'),capture=join(TEMP,'meta-worker.json');
+    writeFileSync(entry,`import{runJob}from ${JSON.stringify(pathToFileURL(join(ROOT,'dist/core/job-runner.js')).href)};import{atomicJson}from ${JSON.stringify(pathToFileURL(join(ROOT,'dist/core/job-store.js')).href)};import{lookupNativeIdentities}from ${JSON.stringify(pathToFileURL(join(ROOT,'dist/core/win-job-client.js')).href)};await runJob(process.argv[2],{lookup:async pids=>{const ids=await lookupNativeIdentities(pids);if(pids.length===1)atomicJson(${JSON.stringify(capture)},ids.get(pids[0]));return ids;},save:(path,value)=>{if(path.endsWith('meta.json'))throw Error('EACCES injected');atomicJson(path,value);}});`);
+    const child=spawn(process.execPath,[entry,dir],{windowsHide:true,detached:true,stdio:'ignore'});await new Promise(r=>child.on('close',r));
+    const worker=JSON.parse(readFileSync(capture,'utf8'));assert.equal(mayBeAlive(worker.pid),false);assert.match(JSON.parse(readFileSync(join(dir,'exit.json'),'utf8')).error,/EACCES injected/);return;
+  }
   const { id, dir } = directory(); let workerPid;
   launch(dir, meta(id), ['-e', 'setInterval(()=>{},1000)']);
   const lookup = async pids => { const ids = await lookupIdentities(pids); for (const pid of pids) if (pid !== process.pid && pid !== process.ppid) workerPid = pid; return ids; };
@@ -58,6 +67,7 @@ await test('M1 meta write failure stops newly spawned stub and persists error', 
   assert.match(JSON.parse(readFileSync(join(dir, 'exit.json'))).error, /EACCES injected/); assert(!existsSync(join(dir, 'stdin.tmp')));
 });
 await test('H2 failed timeout verification retries and normal exit keeps both flags false', async () => {
+  if(process.platform==='win32'){console.log('SKIP POSIX PID timeout verification: Windows uses broker (PTY/live matrix)');return;}
   const { id, dir } = directory(); let lookups = 0;
   launch(dir, meta(id), ['-e', 'setTimeout(()=>process.exit(0),1500)']);
   const spec = JSON.parse(readFileSync(join(dir, 'launch.tmp'))); spec.timeoutMs = 50; atomicJson(join(dir, 'launch.tmp'), spec);
@@ -156,7 +166,9 @@ await test('L3 Grok prompt is moved into job and GC removes it', async () => {
   const staging = command.temporaryPromptFile; command.args = ['-e', 'process.exit(0)', ...command.args]; // Node would reject vendor args; only a stub exit is needed.
   command.args = ['-e', 'process.exit(0)', '--', staging];
   const job = await store.start(command); await store.wait([job.pid], 15);
-  assert(!existsSync(staging)); assert.equal(readFileSync(join(job.directory, 'prompt.txt'), 'utf8'), 'secret'); store.collect(Date.now(), true); assert(!existsSync(job.directory)); assert.equal(store.owned.size, 0); store.dispose();
+  assert(!existsSync(staging)); assert.equal(readFileSync(join(job.directory, 'prompt.txt'), 'utf8'), 'secret');
+  for(let i=0;i<100&&existsSync(job.directory);i++){store.collect(Date.now(), true);if(existsSync(job.directory))await new Promise(r=>setTimeout(r,100));}
+   assert(!existsSync(job.directory)); assert.equal(store.owned.size, 0); store.dispose();
 });
 await test('L4 checks own server only and shares cached identities with GC', async () => {
   const state = join(TEMP, 'cache'), a = directory(state), b = directory(state); let calls = 0;

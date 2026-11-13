@@ -1728,7 +1728,7 @@
     "file": "src/core/live-jobs.ts",
     "from": "    try { rmSync(this.filePath, { force: true }); } catch {}",
     "to": "    // mutation: no owner cleanup",
-    "expect": "dispose removes owner snapshot and timer",
+    "expect": "aggregate two OS processes and concurrent atomic reads",
     "script": "verify-jobs.mjs"
   },
   {
@@ -1736,7 +1736,7 @@
     "file": "src/core/file-process-service.ts",
     "from": "(identity && started !== undefined && identity.started !== started)",
     "to": "false",
-    "expect": "CLI detached stub included after launcher and readonly projection",
+    "expect": "CLI reused legacy PID is lost without changing metadata",
     "script": "verify-jobs.mjs"
   },
   {
@@ -1752,7 +1752,7 @@
     "file": "src/core/process-service.ts",
     "from": "queueMicrotask(() => this.publishJobs());",
     "to": "// mutation: no immediate terminal snapshot",
-    "expect": "MCP stub publishes start output terminal and cleanup",
+    "expect": "MCP direct close publishes terminal snapshot before any timer",
     "script": "verify-jobs.mjs"
   },
   {
@@ -1899,9 +1899,12 @@
     "file": "src/core/job-runner.ts",
     "script": "verify-durable-jobs.mjs",
     "section": "kill",
-    "from": "      if (sent) { timedOut = byTimeout; killed = !byTimeout; }",
-    "to": "      if (sent) { timedOut = byTimeout; killed = false; }",
-    "expect": "kill terminates runner worker and SIGTERM ignoring grandchild"
+    "from": "timedOut=byTimeout;killed=!byTimeout;",
+    "to": "timedOut=byTimeout;killed=false;",
+    "expect": "Windows durable runner fallback records killed intent after broker unknown",
+    "platforms": [
+      "win32"
+    ]
   },
   {
     "name": "Grok: rules 丟掉 worker lock",
@@ -1985,8 +1988,8 @@
   {
     "name": "6.8 audit: H1 unidentified runner starts worker",
     "file": "src/core/job-runner.ts",
-    "from": "  if (!runner.started) { fail('Cannot identify runner after 3 attempts; worker was not started'); if (failureFd !== undefined) closeSync(failureFd); return; }",
-    "to": "  if (runner.started === '__mutation__') { fail('Cannot identify runner after 3 attempts; worker was not started'); if (failureFd !== undefined) closeSync(failureFd); return; }",
+    "from": "  if (!runner.started) { fail('Cannot identify runner after 3 attempts; worker was not started'); return; }",
+    "to": "  if (runner.started === '__mutation__') { fail('Cannot identify runner after 3 attempts; worker was not started'); return; }",
     "expect": "H1 identity failure retries then fails before worker spawn",
     "script": "verify-durable-audit.mjs"
   },
@@ -2532,7 +2535,7 @@
     "script": "verify-pty-jobs.mjs",
     "from": "exitCode: spec.pty && killed ? 143 : exit.code",
     "to": "exitCode: exit.code",
-    "expect": "PTY kill_process writes killed true with failed 143 and terminates the tree"
+    "expect": "PTY killed native zero exit normalizes to 143"
   },
   {
     "name": "PTY: stdin prompt silently ignored",
@@ -2626,25 +2629,25 @@
     "name": "PTY audit: missing identity disables console kill",
     "file": "src/core/job-runner.ts",
     "script": "verify-pty-jobs.mjs",
-    "from": "if (spec.pty && !worker) {",
-    "to": "if (false) {",
-    "expect": "PTY missing worker identity uses owned console kill"
+    "from": "if(!ended&&child.exitCode===null&&child.signalCode===null)directSent=child.kill('SIGKILL')===true;",
+    "to": "if(false)directSent=child.kill('SIGKILL')===true;",
+    "expect": "PTY missing identity and lost broker use owned real console kill"
   },
   {
     "name": "PTY audit: console kill allowed after exit",
     "file": "src/core/job-runner.ts",
     "script": "verify-pty-jobs.mjs",
-    "from": "if (!ended) { ptyProc.kill(); sent = true; }",
-    "to": "if (true) { ptyProc.kill(); sent = true; }",
+    "from": "if(process.platform==='win32'&&ended&&terminationAttempts===0)return Promise.resolve();",
+    "to": "/* late signals accepted */",
     "expect": "PTY console fallback never kills after onExit"
   },
   {
-    "name": "PTY audit: failed kill sets flags",
+    "name": "PTY audit: failed held-console stop claims sent",
     "file": "src/core/job-runner.ts",
     "script": "verify-pty-jobs.mjs",
-    "from": "if (!ended) { ptyProc.kill(); sent = true; }",
-    "to": "if (!ended) { timedOut = byTimeout; killed = !byTimeout; ptyProc.kill(); sent = true; }",
-    "expect": "PTY failed console kill does not mark killed or timedOut"
+    "from": "writeSync(stderr,directSent?'\\nContainment unknown; direct worker termination requested\\n'",
+    "to": "writeSync(stderr,true?'\\nContainment unknown; direct worker termination requested\\n'",
+    "expect": "PTY failed held-console termination never claims request was sent"
   },
   {
     "name": "PTY audit: async failure hides reason",
@@ -2658,7 +2661,7 @@
     "name": "Launcher: server directly spawns runner",
     "file": "src/core/job-store.ts",
     "to": "const viaLauncher = false;",
-    "expect": "Windows server tree kill cannot terminate durable",
+    "expect": "Windows launcher returns runner PID and exits for pipe and PTY",
     "script": "verify-launcher-jobs.mjs",
     "from": "const viaLauncher = process.platform === 'win32';"
   },
@@ -2676,7 +2679,7 @@
     "to": "throw error;\n      }\n    } else",
     "expect": "Windows launcher failures persist failed exit",
     "script": "verify-launcher-jobs.mjs",
-    "from": "throw launchFailure(error);\n      }\n    } else"
+    "from": "throw await launchFailure(error);\n      }\n    } else"
   },
   {
     "name": "PTY audit: overlong control swallows same chunk text",
@@ -2738,8 +2741,8 @@
     "name": "Launcher: runner exception leaves launch.tmp",
     "file": "src/core/job-runner.ts",
     "script": "verify-launcher-jobs.mjs",
-    "from": "if (!options.waitForLauncher) return execute(directory, options);",
-    "to": "return execute(directory, options);",
+    "from": "    try { rmSync(join(directory, 'launch.tmp'), { force: true }); } catch (error) { console.error('ai-cli runner cleanup:', error); }",
+    "to": "",
     "expect": "Windows runner wait exceptions and identity failure never leave launch.tmp"
   },
   {
@@ -2754,7 +2757,7 @@
     "name": "Launcher: launcher.ready write failure ignored",
     "file": "src/core/job-store.ts",
     "script": "verify-launcher-jobs.mjs",
-    "from": "const failure = launchFailure(error); refreshJob(job); throw failure;",
+    "from": "const failure = await launchFailure(error); refreshJob(job); throw failure;",
     "to": "console.error(error);",
     "expect": "Windows launcher.ready write failure fails run"
   },
@@ -3266,7 +3269,7 @@
     "name": "kernel：閘等待後不重新檢查取消",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/loop.ts",
-    "from": "if (store.cancelRequested()) { setState('cancelled', 'user_cancelled'); return false; }",
+    "from": "if (store.cancelRequested()) { await enterTerminal('cancelled', 'user_cancelled'); return false; }",
     "to": "",
     "expect": "額度查詢期間被取消，不會再啟動 job"
   },
@@ -3314,16 +3317,16 @@
     "name": "kernel：讀不出 meta 也當作已經消失",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/executor.ts",
-    "from": "if (!meta) return false;\n",
-    "to": "if (!meta) return true;\n",
+    "from": "if (!meta) return blocked('job 目錄還在但讀不出 meta');\n",
+    "to": "if (!meta) return { gone: true, blockers: [], runnerGone: true, killable: [] };\n",
     "expect": "目錄還在卻讀不出 meta，不能當作已經消失"
   },
   {
     "name": "kernel：jobs 查不了也當作已經消失",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/executor.ts",
-    "from": "if (!statSync(jobsDir).isDirectory()) return false;",
-    "to": "if (!statSync(jobsDir).isDirectory()) return true;",
+    "from": "if (!statSync(jobsDir).isDirectory()) return blocked('jobs 目錄讀不了');",
+    "to": "if (!statSync(jobsDir).isDirectory()) return { gone: true, blockers: [], runnerGone: true, killable: [] };",
     "expect": "連 jobs 都讀不了時不能當作已經消失"
   },
   {
@@ -3418,8 +3421,8 @@
     "name": "kernel develop：worker 還活著就 commit",
     "script": "verify-ai-cli_kernel.mjs",
     "file": "src/ai-cli_kernel/loop.ts",
-    "from": "if (develop && record.spec.mode === 'write' && record.job && !await confirmWorkerGone(record.job)) {",
-    "to": "if (develop && record.spec.mode === 'write' && record.job && (false as boolean)) {",
+    "from": "if (develop && isFullPermission(record.spec) && record.job && !await confirmWorkerGone(record.job)) {",
+    "to": "if (develop && isFullPermission(record.spec) && record.job && (false as boolean)) {",
     "expect": "worker 回報結束但程序還在，不會 commit"
   },
   {
@@ -5353,8 +5356,8 @@
   {
     "name": "kernel D：依賴 cleanup 忽略未結束 run",
     "file": "src/ai-cli_kernel/api.ts",
-    "from": "      if (spec?.dependsOnRunId === input.runId && !isTerminalState(replayJournal(dependent.read()).state)) throw new Error(`拒絕 cleanup：尚未結束的 run ${runId} 依賴 ${input.runId} 的交付分支（baseRef ${spec.baseRef} @ ${spec.baseCommit}）`);",
-    "to": "      if ((false as boolean) && spec?.dependsOnRunId === input.runId && !isTerminalState(replayJournal(dependent.read()).state)) throw new Error(`拒絕 cleanup：尚未結束的 run ${runId} 依賴 ${input.runId} 的交付分支（baseRef ${spec.baseRef} @ ${spec.baseCommit}）`);",
+    "from": "      if (spec?.dependsOnRunId === store.runId && !isTerminalState(replayJournal(dependent.read()).state)) throw new Error(`拒絕 cleanup：尚未結束的 run ${runId} 依賴 ${store.runId} 的交付分支（baseRef ${spec.baseRef} @ ${spec.baseCommit}）`);",
+    "to": "      if ((false as boolean) && spec?.dependsOnRunId === store.runId && !isTerminalState(replayJournal(dependent.read()).state)) throw new Error(`拒絕 cleanup：尚未結束的 run ${runId} 依賴 ${store.runId} 的交付分支（baseRef ${spec.baseRef} @ ${spec.baseCommit}）`);",
     "script": "verify-ai-cli_kernel-base-archive.mjs",
     "expect": "B2 相同 commit 的其他 ref、直接 commit、不同行政 repo 不誤認依賴"
   },
@@ -5481,8 +5484,8 @@
   {
     "name": "kernel D：測試鎖等待耗用命令逾時",
     "file": "src/ai-cli_kernel/loop.ts",
-    "from": "  const runCheck = async (kind: 'setup' | 'test' | 'context', command: string, seq: number): Promise<{ exitCode: number | null; timedOut: boolean; tail: string; output?: string } | null> => {\n    const lease = kind === 'context' ? null : await waitForTestLock(store, () => store.cancelRequested() || superseded(read()), heldBy => commit(heldBy ? { type: 'test_lock_wait', heldBy } : { type: 'test_lock_acquired' }));\n    if (kind !== 'context' && !lease) {\n      if (store.cancelRequested() && !superseded(read())) setState('cancelled', 'user_cancelled');\n      return null;\n    }\n    let safeToRelease = true;\n    let handle: ReturnType<WorkspaceOps['startCheck']> | undefined;\n    try {\n    try { handle = ws!.startCheck(command, kind === 'context' ? contract.workFolder : workDir, join(store.dir, 'checks', `${kind}-${seq}.log`), kind === 'context' ? 8000 : undefined, kind !== 'context'); }\n    catch (error) {\n      if (kind !== 'context') throw error;\n      return { exitCode: null, timedOut: false, tail: (error as Error).message };\n    }\n    safeToRelease = false;\n    await lease?.command({ pid: handle.pid, started: '', name: '' });\n    /** 確認真的停了才算數。送出訊號不等於停了，舊程序可能還在動工作目錄。 */\n    const stopConfirmed = async (): Promise<boolean> => {\n      if (await handle!.kill()) { safeToRelease = true; commit({ type: 'check_finished', pid: handle!.pid }); return true; }\n      setState('stop_pending', 'check_still_alive', `kernel 跑的檢查指令（pid ${handle!.pid}）還沒確認停止`);\n      return false;\n    };\n    try {\n      // spawn 完馬上記 pid，查身分要好幾秒，不能等。這樣當機時最多只漏掉幾毫秒的窗口。\n      commit({ type: 'check_started', kind, pid: handle.pid, started: '', name: '' });\n      handle.begin?.();\n      const identity = await handle.identify();\n      await lease?.command({ pid: handle.pid, ...identity });\n      commit({ type: 'check_started', kind, pid: handle.pid, started: identity.started, name: identity.name });\n    } catch (error) { safeToRelease = await handle.kill(); throw error; }\n    // 總時間也要算進來：測試跑得比剩下的預算久時，不能等它自己跑完。\n    const startedAt = deps.now();\n",
-    "to": "  const runCheck = async (kind: 'setup' | 'test' | 'context', command: string, seq: number): Promise<{ exitCode: number | null; timedOut: boolean; tail: string; output?: string } | null> => {\n    const startedAt = deps.now();\n    const lease = kind === 'context' ? null : await waitForTestLock(store, () => store.cancelRequested() || superseded(read()), heldBy => commit(heldBy ? { type: 'test_lock_wait', heldBy } : { type: 'test_lock_acquired' }));\n    if (kind !== 'context' && !lease) {\n      if (store.cancelRequested() && !superseded(read())) setState('cancelled', 'user_cancelled');\n      return null;\n    }\n    let safeToRelease = true;\n    let handle: ReturnType<WorkspaceOps['startCheck']> | undefined;\n    try {\n    try { handle = ws!.startCheck(command, kind === 'context' ? contract.workFolder : workDir, join(store.dir, 'checks', `${kind}-${seq}.log`), kind === 'context' ? 8000 : undefined, kind !== 'context'); }\n    catch (error) {\n      if (kind !== 'context') throw error;\n      return { exitCode: null, timedOut: false, tail: (error as Error).message };\n    }\n    safeToRelease = false;\n    await lease?.command({ pid: handle.pid, started: '', name: '' });\n    /** 確認真的停了才算數。送出訊號不等於停了，舊程序可能還在動工作目錄。 */\n    const stopConfirmed = async (): Promise<boolean> => {\n      if (await handle!.kill()) { safeToRelease = true; commit({ type: 'check_finished', pid: handle!.pid }); return true; }\n      setState('stop_pending', 'check_still_alive', `kernel 跑的檢查指令（pid ${handle!.pid}）還沒確認停止`);\n      return false;\n    };\n    try {\n      // spawn 完馬上記 pid，查身分要好幾秒，不能等。這樣當機時最多只漏掉幾毫秒的窗口。\n      commit({ type: 'check_started', kind, pid: handle.pid, started: '', name: '' });\n      handle.begin?.();\n      const identity = await handle.identify();\n      await lease?.command({ pid: handle.pid, ...identity });\n      commit({ type: 'check_started', kind, pid: handle.pid, started: identity.started, name: identity.name });\n    } catch (error) { safeToRelease = await handle.kill(); throw error; }\n    // 總時間也要算進來：測試跑得比剩下的預算久時，不能等它自己跑完。\n",
+    "from": "  const runCheck = async (kind: 'setup' | 'test' | 'context', command: string, seq: number): Promise<{ exitCode: number | null; timedOut: boolean; tail: string; output?: string } | null> => {\n    const lease = kind === 'context' ? null : await waitForTestLock(store, () => store.cancelRequested() || superseded(read()), heldBy => commit(heldBy ? { type: 'test_lock_wait', heldBy } : { type: 'test_lock_acquired' }));\n    if (kind !== 'context' && !lease) {\n      if (store.cancelRequested() && !superseded(read())) await enterTerminal('cancelled', 'user_cancelled');\n      return null;\n    }\n    let safeToRelease = true, recorded = false;\n    let checkFailed = false;\n    let handle: ReturnType<WorkspaceOps['startCheck']> | undefined;\n    try {\n    try { handle = ws!.startCheck(command, kind === 'context' ? contract.workFolder : workDir, join(store.dir, 'checks', `${kind}-${seq}.log`), kind === 'context' ? 8000 : undefined, kind !== 'context'); }\n    catch (error) {\n      if (kind !== 'context') throw error;\n      return { exitCode: null, timedOut: false, tail: (error as Error).message };\n    }\n    safeToRelease = false;\n    await lease?.command({ pid: handle.pid, started: '', name: '' });\n    /** 確認真的停了才算數。送出訊號不等於停了，舊程序可能還在動工作目錄。 */\n    const stopConfirmed = async (): Promise<boolean> => {\n      if (await handle!.kill()) { safeToRelease = true; commit({ type: 'check_finished', pid: handle!.pid }); return true; }\n      setState('stop_pending', 'check_still_alive', `kernel 跑的檢查指令（pid ${handle!.pid}）還沒確認停止`);\n      return false;\n    };\n    try {\n      // spawn 完馬上記 pid，查身分要好幾秒，不能等。這樣當機時最多只漏掉幾毫秒的窗口。\n      commit({ type: 'check_started', kind, pid: handle.pid, started: '', name: '' });\n      handle.begin?.();\n      recorded = true; // First check_started is durable and begin returned; recovery can find this command.\n      const identity = await handle.identify();\n      await lease?.command({ pid: handle.pid, ...identity });\n      commit({ type: 'check_started', kind, pid: handle.pid, started: identity.started, name: identity.name });\n    } catch (error) { if (!(error instanceof JournalUnavailableError && recorded)) safeToRelease = await handle.kill().catch(() => false); throw error; }\n    // 總時間也要算進來：測試跑得比剩下的預算久時，不能等它自己跑完。\n    const startedAt = deps.now();\n",
+    "to": "  const runCheck = async (kind: 'setup' | 'test' | 'context', command: string, seq: number): Promise<{ exitCode: number | null; timedOut: boolean; tail: string; output?: string } | null> => {\n    const startedAt = deps.now();\n    const lease = kind === 'context' ? null : await waitForTestLock(store, () => store.cancelRequested() || superseded(read()), heldBy => commit(heldBy ? { type: 'test_lock_wait', heldBy } : { type: 'test_lock_acquired' }));\n    if (kind !== 'context' && !lease) {\n      if (store.cancelRequested() && !superseded(read())) await enterTerminal('cancelled', 'user_cancelled');\n      return null;\n    }\n    let safeToRelease = true, recorded = false;\n    let checkFailed = false;\n    let handle: ReturnType<WorkspaceOps['startCheck']> | undefined;\n    try {\n    try { handle = ws!.startCheck(command, kind === 'context' ? contract.workFolder : workDir, join(store.dir, 'checks', `${kind}-${seq}.log`), kind === 'context' ? 8000 : undefined, kind !== 'context'); }\n    catch (error) {\n      if (kind !== 'context') throw error;\n      return { exitCode: null, timedOut: false, tail: (error as Error).message };\n    }\n    safeToRelease = false;\n    await lease?.command({ pid: handle.pid, started: '', name: '' });\n    /** 確認真的停了才算數。送出訊號不等於停了，舊程序可能還在動工作目錄。 */\n    const stopConfirmed = async (): Promise<boolean> => {\n      if (await handle!.kill()) { safeToRelease = true; commit({ type: 'check_finished', pid: handle!.pid }); return true; }\n      setState('stop_pending', 'check_still_alive', `kernel 跑的檢查指令（pid ${handle!.pid}）還沒確認停止`);\n      return false;\n    };\n    try {\n      // spawn 完馬上記 pid，查身分要好幾秒，不能等。這樣當機時最多只漏掉幾毫秒的窗口。\n      commit({ type: 'check_started', kind, pid: handle.pid, started: '', name: '' });\n      handle.begin?.();\n      recorded = true; // First check_started is durable and begin returned; recovery can find this command.\n      const identity = await handle.identify();\n      await lease?.command({ pid: handle.pid, ...identity });\n      commit({ type: 'check_started', kind, pid: handle.pid, started: identity.started, name: identity.name });\n    } catch (error) { if (!(error instanceof JournalUnavailableError && recorded)) safeToRelease = await handle.kill().catch(() => false); throw error; }\n    // 總時間也要算進來：測試跑得比剩下的預算久時，不能等它自己跑完。\n",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "production loop journals waiting/status, excludes wait from deadlines, releases on success/failure/timeout"
   },
@@ -5585,8 +5588,8 @@
   {
     "name": "kernel F2F4：mutex 忙碌失去錯誤型別",
     "file": "src/ai-cli_kernel/process-mutex.ts",
-    "from": "throw new ProcessMutexBusy(name);",
-    "to": "throw new Error(name);",
+    "from": "if (now() >= deadline) throw new ProcessMutexBusy(name);",
+    "to": "if (now() >= deadline) throw new Error(name);",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "F2 mutex timeout is typed"
   },
@@ -5633,7 +5636,7 @@
   {
     "name": "kernel F2F4：runner claim 略過名額 fence",
     "file": "src/ai-cli_kernel/admission.ts",
-    "from": "if (!readActiveRuns().some(slot => slot.runId === store.runId)) return false;",
+    "from": "if (store.cancelRequested() || !readActiveRuns().some(slot => slot.runId === store.runId)) return false;",
     "to": "if (false) return false;",
     "script": "verify-ai-cli_kernel-concurrency.mjs",
     "expect": "F2 runner claim retries are bounded"
@@ -6761,8 +6764,8 @@
   {
     "name": "issue24：啟動 metadata 遺失 strict",
     "file": "src/core/job-store.ts",
-    "from": "    const metaBase: RunnerSpec['meta'] = { ...(cmd.strict ? { strict: true } : {}), version: 1, jobId, agent: cmd.agent, model, resolvedModel: cmd.resolvedModel, effort: cmd.reasoningEffort,",
-    "to": "    const metaBase: RunnerSpec['meta'] = { version: 1, jobId, agent: cmd.agent, model, resolvedModel: cmd.resolvedModel, effort: cmd.reasoningEffort,",
+    "from": "    const metaBase: RunnerSpec['meta'] = { ...(containment ? { containment, containmentProtocol: 1 as const } : {}), ...(cmd.strict ? { strict: true } : {}), version: 1, jobId, agent: cmd.agent, model, resolvedModel: cmd.resolvedModel, effort: cmd.reasoningEffort,",
+    "to": "    const metaBase: RunnerSpec['meta'] = { ...(containment ? { containment, containmentProtocol: 1 as const } : {}), version: 1, jobId, agent: cmd.agent, model, resolvedModel: cmd.resolvedModel, effort: cmd.reasoningEffort,",
     "script": "verify-mcp-capabilities.mjs",
     "expect": "issue24 啟動 metadata 保存 strict 身分"
   },
@@ -7165,5 +7168,2568 @@
     "to": "parts.evidence = 'target-output-v2'",
     "script": "verify-ai-cli_kernel-evidence.mjs",
     "expect": "issue24-router 證據版本更新"
+  },
+  {
+    "name": "issue17-P0：enterTerminal 跳過確認，直接寫終態",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "    if (!await settleFullPermission(state, reason, detail)) return 'stop_pending';\n    commit({ type: 'state', state,",
+    "to": "    commit({ type: 'state', state,",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T1 結果已落盤但程序還活著時取消"
+  },
+  {
+    "name": "issue17-P0：主迴圈取消出口退回直接寫 cancelled（原本的競態）",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "if (store.cancelRequested() && openActions(view).length === 0) return await enterTerminal('cancelled', 'user_cancelled');",
+    "to": "if (store.cancelRequested() && openActions(view).length === 0) { commit({ type: 'state', state: 'cancelled', reason: 'user_cancelled' }); return 'cancelled'; }",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T1 結果已落盤但程序還活著時取消"
+  },
+  {
+    "name": "issue17-P0：確認消失逾時當成已消失",
+    "file": "src/ai-cli_kernel/full-permission.ts",
+    "from": "    if (deps.now() >= deadline) return false;",
+    "to": "    if (deps.now() >= deadline) return true;",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T1 結果已落盤但程序還活著時取消"
+  },
+  {
+    "name": "issue17-P0：isFullPermission 恆為 false",
+    "file": "src/ai-cli_kernel/full-permission.ts",
+    "from": "  return spec.kind === 'worker' && spec.mode === 'write';",
+    "to": "  return false;",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T1 結果已落盤但程序還活著時取消"
+  },
+  {
+    "name": "issue17-P0：未結清只算還沒有結果的動作（漏掉已回結果、判定未落盤的）",
+    "file": "src/ai-cli_kernel/full-permission.ts",
+    "from": "filter(action => isFullPermission(action.spec) && !action.processed);",
+    "to": "filter(action => isFullPermission(action.spec) && !action.outcome && !action.abandoned);",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T1 結果已落盤但程序還活著時取消"
+  },
+  {
+    "name": "issue17-P0：isGone 丟例外當成已消失",
+    "file": "src/ai-cli_kernel/full-permission.ts",
+    "from": "isGone(job).catch(() => false) === true",
+    "to": "isGone(job).catch(() => true) === true",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T7 isGone 查不了"
+  },
+  {
+    "name": "issue17-P0：cancelWithoutRunner 拿掉確認",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "  if (block) {\n    store.append({ type: 'state', state: 'stop_pending', reason: block.reason, detail: block.detail });",
+    "to": "  if (block && Date.now() < 0) {\n    store.append({ type: 'state', state: 'stop_pending', reason: block.reason, detail: block.detail });",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T2 runner 不在時取消"
+  },
+  {
+    "name": "issue17-P0：stop_pending 上重查時直接放行",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "  if (block) {\n    store.append({ type: 'state', state: 'stop_pending', reason: block.reason, detail: block.detail });",
+    "to": "  if (block && before.state !== 'stop_pending') {\n    store.append({ type: 'state', state: 'stop_pending', reason: block.reason, detail: block.detail });",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T8 stop_pending 上再取消，程序還活著就維持 stop_pending"
+  },
+  {
+    "name": "issue17-P0：cleanup 拿掉全權限 job 的檢查",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "    if (block) throw new Error(`拒絕 cleanup：",
+    "to": "    if (block && Date.now() < 0) throw new Error(`拒絕 cleanup：",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T5 已是 cancelled 但全權限 job 還活著，cleanup 拒絕"
+  },
+  {
+    "name": "issue17-P0：cleanup 只查未結清的動作",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "  const records = fullPermissionRecords(view);\n  if (records.length > 0) {",
+    "to": "  const records = unsettledFullPermission(view);\n  if (records.length > 0) {",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T5 cleanup 連已結清的全權限動作也查"
+  },
+  {
+    "name": "issue17-P0：cleanup 檢查時順手終止程序",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "const block = await confirmFullPermissionGone(records, goneDeps(deps.executor ?? new FileJobExecutor(), 0, detail => { legacyNotices.add(detail); }), { kill: false });",
+    "to": "const block = await confirmFullPermissionGone(records, goneDeps(deps.executor ?? new FileJobExecutor(), 0, detail => { legacyNotices.add(detail); }), { kill: true });",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T5 cleanup 只查不砍"
+  },
+  {
+    "name": "issue17-P0：runner 收尾跳過確認，直接寫 failed",
+    "file": "src/ai-cli_kernel/runner-settle.ts",
+    "from": "    if (block) {\n      store.append({ type: 'state', state: 'stop_pending', reason: block.reason, detail: `${block.detail}。kernel 發生程式錯誤",
+    "to": "    if (block && Date.now() < 0) {\n      store.append({ type: 'state', state: 'stop_pending', reason: block.reason, detail: `${block.detail}。kernel 發生程式錯誤",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T6 kernel 例外而全權限 worker 還活著"
+  },
+  {
+    "name": "issue17-P0：委任書不符的出口退回直接寫 failed",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "    return enterTerminal('failed', 'contract_mismatch', '委任書內容和核准時的 digest 不一致，拒絕執行');",
+    "to": "    commit({ type: 'state', state: 'failed', reason: 'contract_mismatch', detail: '委任書內容和核准時的 digest 不一致，拒絕執行' });\n    return 'failed';",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T9 委任書不符而全權限 worker 還活著"
+  },
+  {
+    "name": "issue17-P0：--reconcile abandon 拿掉 job 存活檢查",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "    if (block) throw new Error(`拒絕 --reconcile abandon",
+    "to": "    if (block && Date.now() < 0) throw new Error(`拒絕 --reconcile abandon",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T10 全權限 job 還活著時 --reconcile abandon 被拒絕"
+  },
+  {
+    "name": "issue17-P0：setState 不再拒絕終態",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "    if (isTerminalState(state)) throw new Error(`終態 ${state} 只能由 enterTerminal 寫入`);\n",
+    "to": "",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "T11 loop 內的終態只由 enterTerminal 寫入"
+  },
+  {
+    "name": "issue17-tree-live：runner 被終止時不補砍已記錄的子孫",
+    "file": "src/core/job-runner.ts",
+    "from": "      if (killed || timedOut) await tracker.killRecorded();",
+    "to": "      if ((killed || timedOut) && Date.now() < 0) await tracker.killRecorded();",
+    "script": "verify-process-tree-live.mjs",
+    "expect": "真機：終止執行中的 job 會連同已記錄的孤兒一起砍掉",
+    "platforms": [
+      "linux",
+      "darwin"
+    ]
+  },
+  {
+    "name": "issue17-tree-live：runner 在 worker 結束後不補最後一次列舉",
+    "file": "src/core/job-runner.ts",
+    "from": "      await tracker.seal();",
+    "to": "",
+    "script": "verify-process-tree-live.mjs",
+    "expect": "真機：worker 立刻結束時，它留下的程序只記成不確定",
+    "platforms": [
+      "linux",
+      "darwin"
+    ]
+  },
+  {
+    "name": "issue17-tree-live：runner 沒在 meta 標記有追蹤子孫",
+    "file": "src/core/job-runner.ts",
+    "from": " ...(child.pid && process.platform !== 'win32' ? { tree: 1 as const } : {}),",
+    "to": "",
+    "script": "verify-process-tree-live.mjs",
+    "expect": "真機：runner 與 worker 消失後 isGone 仍為 false，擋住的只有那個孫程序",
+    "platforms": [
+      "linux",
+      "darwin"
+    ]
+  },
+  {
+    "name": "issue17-P0：啟動後拿不到 jobId 時不終止程序",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "      try { this.send(pid); } catch { /* 身分已核對，送出失敗仍須確認。 */ }\n",
+    "to": "",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "啟動後拿不到 jobId 時先終止那個程序"
+  },
+  {
+    "name": "issue17-P0：拿不到 jobId 時終止沒確認也當成單純的啟動失敗",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "      if (await this.untrackedState(job) === 'gone') return new Error(`${action.model} 沒有可接回的 jobId，kernel 不能追蹤它（pid ${pid}，已確認終止）`);",
+    "to": "      if (await this.untrackedState(job) === 'gone' || Date.now() > 0) return new Error(`${action.model} 沒有可接回的 jobId，kernel 不能追蹤它（pid ${pid}，已確認終止）`);",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "終止失敗而程序還活著：錯誤帶著 pid＋啟動時間"
+  },
+  {
+    "name": "issue17-P0：loop 不把追不到的程序記成動作的 job",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "from": "      if (error instanceof KernelUntrackedStartError) commit({ type: 'action_started', actionId: spec.actionId, job: error.job });\n",
+    "to": "",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "啟動後追不到又沒確認停掉的程序，身分記成這個動作的 job"
+  },
+  {
+    "name": "issue17-P0：pid 還在但查不到身分時當成已消失",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "    return mayBeAlive(job.pid) ? 'unknown' : 'gone';",
+    "to": "    return 'gone';",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "pid 還在但查不出身分：留下待查紀錄"
+  },
+  {
+    "name": "issue17-P0：沒記到啟動時間的程序當成已消失",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "      if (!job.untracked?.started) return 'unknown';\n",
+    "to": "      if (!job.untracked) return 'unknown';\n",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "查到程序但當初沒記到啟動時間：不能當作消失"
+  },
+  {
+    "name": "issue17-P0：對沒有 job 紀錄的程序不核對身分就送終止",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "      if (await this.untrackedState(job) !== 'alive') return true;\n",
+    "to": "",
+    "script": "verify-ai-cli_kernel-terminal.mjs",
+    "expect": "查不出身分、或 pid 已經換人時不會被送終止"
+  },
+  {
+    "name": "issue17-tree-A：啟動時間不符的成員仍當成還活著（pid 重用誤判）",
+    "file": "src/core/process-tree.ts",
+    "from": "    if (row) return row.started === member.started ? 'alive' : 'gone'; //",
+    "to": "    if (row) return 'alive'; //",
+    "script": "verify-process-tree.mjs",
+    "expect": "子孫的 pid 被重用（啟動時間不符）視為已消失"
+  },
+  {
+    "name": "issue17-tree-A：讀不出身分的成員當成不在了",
+    "file": "src/core/process-tree.ts",
+    "from": "    return unknownPids.has(member.pid) || !snapshot.complete ? 'unknown' : 'gone';",
+    "to": "    return 'gone';",
+    "script": "verify-process-tree.mjs",
+    "expect": "讀不出身分的成員列為未知"
+  },
+  {
+    "name": "issue17-tree-A：父程序不在時仍把孤兒推定為確定（時間窗推論）",
+    "file": "src/core/process-tree.ts",
+    "from": "      verdict ??= 'loose';\n    };\n    if (row.ppid === root.pid)",
+    "to": "      verdict = 'sure';\n    };\n    if (row.ppid === root.pid)",
+    "script": "verify-process-tree.mjs",
+    "expect": "Windows：時間窗再短也不推定是子孫"
+  },
+  {
+    "name": "issue17-tree-A：啟動時間比較壓成毫秒",
+    "file": "src/core/process-tree.ts",
+    "from": "  if (DOTNET_UTC.test(a) && DOTNET_UTC.test(b)) return a < b ? -1 : a > b ? 1 : 0;\n",
+    "to": "",
+    "script": "verify-process-tree.mjs",
+    "expect": "Windows：比父程序早不到一毫秒出生的也不算它生的"
+  },
+  {
+    "name": "issue17-tree-A：Windows 認親不排除父程序死後才出生的程序",
+    "file": "src/core/process-tree.ts",
+    "from": "      if (parent.gone) { const upper = compareStarted(row.started, parent.gone); if (upper !== null && upper > 0) return; }\n",
+    "to": "",
+    "script": "verify-process-tree.mjs",
+    "expect": "Windows：父程序確認不在之後才出生的不算子孫"
+  },
+  {
+    "name": "issue17-tree-A：Windows 認親不排除 pid 新佔用者生的程序",
+    "file": "src/core/process-tree.ts",
+    "from": "      if (holder && holder.started !== parent.started) { const order = compareStarted(row.started, holder.started); if (order !== null && order >= 0) return; }\n",
+    "to": "",
+    "script": "verify-process-tree.mjs",
+    "expect": "Windows：pid 被重用後，新佔用者生的程序不算子孫"
+  },
+  {
+    "name": "issue17-tree-A：Windows 認親不排除比父程序早出生的程序",
+    "file": "src/core/process-tree.ts",
+    "from": "        if (order !== null && order < 0) return;\n",
+    "to": "",
+    "script": "verify-process-tree.mjs",
+    "expect": "Windows：比父程序早出生的不算子孫"
+  },
+  {
+    "name": "issue17-tree-A：不確定的父程序生的也當成確定",
+    "file": "src/core/process-tree.ts",
+    "from": "        if (order !== null && !parent.uncertain) verdict = 'sure';",
+    "to": "        if (order !== null) verdict = 'sure';",
+    "script": "verify-process-tree.mjs",
+    "expect": "不確定成員的子孫沿用不確定"
+  },
+  {
+    "name": "issue17-tree-A：POSIX 無條件信任 process group",
+    "file": "src/core/process-tree.ts",
+    "from": "      const proven = held || members.some(",
+    "to": "      const proven = Date.now() > 0 || members.some(",
+    "script": "verify-process-tree.mjs",
+    "expect": "POSIX：worker 結束後沒有已記錄成員可證明時，同 group 的孤兒只列為不確定"
+  },
+  {
+    "name": "issue17-tree-A：POSIX 用不確定的成員證明 group 延續",
+    "file": "src/core/process-tree.ts",
+    "from": "const sureAlive = (member: TreeMember): boolean => !member.loose && !member.weak && stateOf(member) === 'alive';",
+    "to": "const sureAlive = (member: TreeMember): boolean => stateOf(member) === 'alive';",
+    "script": "verify-process-tree.mjs",
+    "expect": "POSIX：不確定的成員不能用來證明 group 延續"
+  },
+  {
+    "name": "issue17-tree-A：秒級啟動時間不標記精度不足",
+    "file": "src/core/process-tree.ts",
+    "from": "      const weak = coarse && !(Number.isFinite(born) && born + 1000 <= options.before);",
+    "to": "      const weak = coarse && !Number.isFinite(born);",
+    "script": "verify-process-tree.mjs",
+    "expect": "macOS：出生的那一秒內第一次看到的成員標成精度不足"
+  },
+  {
+    "name": "issue17-tree-A：讀不出身分又指向成員的 pid 不列入",
+    "file": "src/core/process-tree.ts",
+    "from": "const unverified = snapshot.unknown.filter(item => item.ppid !== null && knownPids.has(item.ppid) && !knownPids.has(item.pid)).map(item => item.pid);",
+    "to": "const unverified: number[] = [];",
+    "script": "verify-process-tree.mjs",
+    "expect": "讀不出身分、父程序指向已知成員的 pid 列為無法核對"
+  },
+  {
+    "name": "issue17-tree-A：程序表不完整時照樣修剪紀錄",
+    "file": "src/core/process-tree.ts",
+    "from": "!blind && !pointedAt.has(member.pid)",
+    "to": "!pointedAt.has(member.pid)",
+    "script": "verify-process-tree.mjs",
+    "expect": "程序表不完整時，缺席的成員是未知而不是不在了，紀錄不修剪"
+  },
+  {
+    "name": "issue17-tree-A：ps 看不懂的行默默略過",
+    "file": "src/core/process-tree.ts",
+    "from": "      else complete = false;\n",
+    "to": "",
+    "script": "verify-process-tree.mjs",
+    "expect": "ps 輸出解析：看不懂的行不略過"
+  },
+  {
+    "name": "issue17-tree-A：/proc 讀取錯誤一律當成程序已結束",
+    "file": "src/core/process-tree.ts",
+    "from": "      if (code !== 'ENOENT' && code !== 'ESRCH') unknown.push({ pid, ppid: null });\n",
+    "to": "",
+    "script": "verify-process-tree.mjs",
+    "expect": "/proc 讀取：ENOENT／ESRCH 當成已結束，權限、I/O 與格式錯誤列為未知"
+  },
+  {
+    "name": "issue17-tree-A：終止前不重新核對身分",
+    "file": "src/core/process-tree.ts",
+    "from": "    if (!current || current.started !== member.started || Date.now() >= deadline) continue;\n",
+    "to": "",
+    "script": "verify-process-tree.mjs",
+    "expect": "終止前逐筆重新核對身分"
+  },
+  {
+    "name": "issue17-tree-A：終止時不排除不確定的成員",
+    "file": "src/core/process-tree.ts",
+    "from": "    if (member.loose || member.weak || !member.started || Date.now() >= deadline) continue;",
+    "to": "    if (!member.started || Date.now() >= deadline) continue;",
+    "script": "verify-process-tree.mjs",
+    "expect": "終止時一次只查一個 pid，不確定與精度不足的成員連查都不查"
+  },
+  {
+    "name": "issue17-tree-B：沒有封存的紀錄不算缺口",
+    "file": "src/core/process-tree.ts",
+    "from": "  if (!record.sealed) return `worker 結束後沒有成功列舉過（列舉失敗 ${record.failed} 次）`;\n",
+    "to": "",
+    "script": "verify-process-tree.mjs",
+    "expect": "追蹤缺口：worker 結束後沒有成功列舉過"
+  },
+  {
+    "name": "issue17-tree-B：worker 結束時不結算最後一段沒列舉的時間",
+    "file": "src/core/process-tree.ts",
+    "from": ", maxGapMs: Math.max(record.maxGapMs, now - lastOkMs) };",
+    "to": " };",
+    "script": "verify-process-tree.mjs",
+    "expect": "存活期間從沒成功列舉過，結束後才成功：仍算追蹤缺口"
+  },
+  {
+    "name": "issue17-tree-B：不完整的列舉也算成功",
+    "file": "src/core/process-tree.ts",
+    "from": "      if (survey.blind) { failures++; record = { ...record, failed: record.failed + 1 }; persist(); return false; }\n",
+    "to": "",
+    "script": "verify-process-tree.mjs",
+    "expect": "程序表不完整的列舉不算成功、不能封存"
+  },
+  {
+    "name": "issue17-tree-B：追蹤器啟動時不先落紀錄",
+    "file": "src/core/process-tree.ts",
+    "from": "  // 先落一份：meta 說有追蹤卻沒有這個檔，讀端會判成「查不了」而不是「沒有子孫」。\n  persist(true);\n",
+    "to": "  // 先落一份：meta 說有追蹤卻沒有這個檔，讀端會判成「查不了」而不是「沒有子孫」。\n",
+    "script": "verify-process-tree.mjs",
+    "expect": "追蹤器一啟動就先落一份紀錄"
+  },
+  {
+    "name": "issue17-tree-B：追蹤器不做定期列舉",
+    "file": "src/core/process-tree.ts",
+    "from": "      await scan(false).catch(() => false);\n",
+    "to": "",
+    "script": "verify-process-tree.mjs",
+    "expect": "worker 存活期間定期列舉"
+  },
+  {
+    "name": "issue17-tree-B：列舉連續失敗不退避",
+    "file": "src/core/process-tree.ts",
+    "from": "      if (!stopped) await nap(failures === 0 ? interval : Math.min(Math.min(1000, interval) * 2 ** (failures - 1), 30000));",
+    "to": "      if (!stopped) await nap(interval);",
+    "script": "verify-process-tree.mjs",
+    "expect": "列舉連續失敗時逐次拉長間隔"
+  },
+  {
+    "name": "issue17-tree-B：收尾不受時間上限約束",
+    "file": "src/core/process-tree.ts",
+    "from": "      const deadline = Date.now() + (options.sealBudgetMs ?? TREE_SEAL_BUDGET_MS);\n      // 進行中的那次列舉",
+    "to": "      const deadline = Date.now() + TREE_SEAL_BUDGET_MS;\n      // 進行中的那次列舉",
+    "script": "verify-process-tree.mjs",
+    "expect": "收尾有時間上限"
+  },
+  {
+    "name": "issue17-tree-B：程序表列舉失敗當成空表",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "    try { snapshot = await this.table(); } catch (error) { tableError = (error as Error).message; }",
+    "to": "    try { snapshot = await this.table(); } catch (error) { tableError = (error as Error).message; snapshot = { rows: [], unknown: [], complete: true }; }",
+    "script": "verify-process-tree.mjs",
+    "expect": "程序表列舉失敗時 isGone 不得為 true"
+  },
+  {
+    "name": "issue17-tree-B：isGone 不看子孫紀錄",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "    if (meta.tree !== 1) { this.unhold(job.jobId); return GONE; }",
+    "to": "    if (meta.tree !== 1 || Date.now() > 0) { this.unhold(job.jobId); return GONE; }",
+    "script": "verify-process-tree.mjs",
+    "expect": "worker 已退出但記錄的子孫還活著，isGone 不得為 true"
+  },
+  {
+    "name": "issue17-tree-B：子孫紀錄讀不出來當成沒有子孫",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "return strict ? blocked('子孫紀錄（tree.json）讀不出來，無法確認子孫是否還在', true) : GONE;",
+    "to": "return GONE;",
+    "script": "verify-process-tree.mjs",
+    "expect": "子孫紀錄損毀時 isGone 不得為 true"
+  },
+  {
+    "name": "issue17-tree-B：執行器不檢查追蹤缺口",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "      if (gap) blockers.push(`追蹤缺口：${gap}`);\n",
+    "to": "",
+    "script": "verify-process-tree.mjs",
+    "expect": "追蹤全部失敗的紀錄交給執行器：看不到子孫也不得判定消失"
+  },
+  {
+    "name": "issue17-tree-B：查不出狀態的成員不擋 isGone",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "        ...survey.unknown.map(member => `子孫 pid ${member.pid}（${member.name || '?'}）查不出還在不在`),\n",
+    "to": "",
+    "script": "verify-process-tree.mjs",
+    "expect": "子孫的 pid 讀不出身分時 isGone 不得為 true"
+  },
+  {
+    "name": "issue17-tree-B：程序表不完整不擋 isGone",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "        ...(survey.blind ? ['程序表不完整，無法確認沒有別的子孫'] : []),\n",
+    "to": "",
+    "script": "verify-process-tree.mjs",
+    "expect": "程序表不完整時 isGone 不得為 true"
+  },
+  {
+    "name": "issue17-tree-B：讀不出身分的疑似子孫不擋 isGone",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "        ...survey.unverified.map(pid => `pid ${pid} 讀不出身分，可能是子孫`),\n",
+    "to": "",
+    "script": "verify-process-tree.mjs",
+    "expect": "讀不出身分又指向已知成員的 pid 會擋住 isGone"
+  },
+  {
+    "name": "issue17-tree-B：kill 連親子關係不確定的程序也砍",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "killable: survey.alive.filter(member => !member.loose && !member.weak) };",
+    "to": "killable: survey.alive };",
+    "script": "verify-process-tree.mjs",
+    "expect": "kill 不會終止親子關係不確定的程序"
+  },
+  {
+    "name": "issue17-tree-B：拿不到開機識別也當成重開過",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "    if (record.boot && snapshot.boot && record.boot !== snapshot.boot) return GONE;",
+    "to": "    if (record.boot !== snapshot.boot) return GONE;",
+    "script": "verify-process-tree.mjs",
+    "expect": "拿不到開機識別時不能當成重開過"
+  },
+  {
+    "name": "issue17-tree-B：全權限 job 的目錄不見了直接放行",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "      if (job.tracked) return blocked(`job ${job.jobId} 的目錄不見了",
+    "to": "      if (job.tracked && Date.now() < 0) return blocked(`job ${job.jobId} 的目錄不見了",
+    "script": "verify-process-tree.mjs",
+    "expect": "全權限 job 的目錄不見了、又從沒查過：isGone 不得為 true"
+  },
+  {
+    "name": "issue17-tree-B：還不能確認消失時不放保留標記",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "    if (inspection.gone) this.unhold(job.jobId); else this.hold(job.jobId);",
+    "to": "    if (inspection.gone) this.unhold(job.jobId);",
+    "script": "verify-process-tree.mjs",
+    "expect": "還不能確認消失時，在 job 目錄放保留標記"
+  },
+  {
+    "name": "issue17-tree-B：啟動全權限 job 時不放保留標記",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "    this.hold(started.jobId);\n    return { pid: started.pid, jobId: started.jobId, tracked: true, ...(this.platform==='win32'?{containmentProtocol:1 as const}:{}) };",
+    "to": "    return { pid: started.pid, jobId: started.jobId, tracked: true, ...(this.platform==='win32'?{containmentProtocol:1 as const}:{}) };",
+    "script": "verify-process-tree.mjs",
+    "expect": "啟動全權限 job 時放保留標記並標成 tracked"
+  },
+  {
+    "name": "issue17-tree-B：到期回收不理保留標記",
+    "file": "src/core/job-store.ts",
+    "from": "    if (jobHeld(job.directory)) continue;\n    if (removeJobDirectory(job.directory)) { count--; size -= job.size;",
+    "to": "    if (removeJobDirectory(job.directory)) { count--; size -= job.size;",
+    "script": "verify-process-tree.mjs",
+    "expect": "到期回收跳過有保留標記的 job 目錄"
+  },
+  {
+    "name": "issue17-tree-B：立即回收不理保留標記",
+    "file": "src/core/job-store.ts",
+    "from": "      if (jobHeld(job.directory)) continue;\n      if (removeJobDirectory(job.directory)) { total -= bytes(job);",
+    "to": "      if (removeJobDirectory(job.directory)) { total -= bytes(job);",
+    "script": "verify-process-tree.mjs",
+    "expect": "立即回收（cleanup_processes）也跳過有保留標記的 job 目錄"
+  },
+  {
+    "name": "jobobj-v2：略過 mutex",
+    "file": "src/core/win-job-native.ts",
+    "from": "uint wait=WaitForSingleObject(Mutex,0);",
+    "to": "uint wait=0;",
+    "script": "verify-win-job-broker.mjs",
+    "expect": "mutex ownership required before publishing broker"
+  },
+  {
+    "name": "jobobj-v2：接受錯 generation",
+    "file": "src/core/win-job-native.ts",
+    "from": "    if(!Jobs.TryGetValue(gen,out j)) {",
+    "to": "    if(!Jobs.TryGetValue(gen,out j) && !((j=new List<Job>(Jobs.Values)[0])!=null)) {",
+    "script": "verify-win-job-broker.mjs",
+    "expect": "native rejects incorrect generation"
+  },
+  {
+    "name": "jobobj-v2：略過 capability",
+    "file": "src/core/win-job-native.ts",
+    "from": "Require(S(r,\"capability\")==S(j.record,register?\"launchCapability\":\"controlCapability\") && S(r,\"capability\").Length>=40,",
+    "to": "Require(true,",
+    "script": "verify-win-job-broker.mjs",
+    "expect": "native rejects incorrect capability"
+  },
+  {
+    "name": "jobobj-v2：活躍時退出",
+    "file": "src/core/win-job-native.ts",
+    "from": "if(S(j.record,\"phase\")!=\"drained\") drained=false;",
+    "to": "if(S(j.record,\"phase\")!=\"drained\") drained=true;",
+    "script": "verify-win-job-broker.mjs",
+    "expect": "active job prevents idle exit"
+  },
+  {
+    "name": "jobobj-v2：失聯舊 generation 永久阻止閒置交接",
+    "file": "src/core/win-job-native.ts",
+    "from": "Requests==0 && drained &&",
+    "to": "Requests==0 && drained && Directory.GetFiles(directory,\"*.json\").Length==1 &&",
+    "script": "verify-win-job-broker.mjs",
+    "expect": "lost generations do not prevent idle handoff"
+  },
+  {
+    "name": "jobobj-v2：READY 前 spawn",
+    "file": "src/core/job-runner.ts",
+    "from": "await new WinJobClient().register(spec.meta.containment);",
+    "to": "void spec.meta.containment;",
+    "script": "verify-win-job-gates.mjs",
+    "expect": "READY rejection prevents worker spawn"
+  },
+  {
+    "name": "jobobj-v2：失聯當零",
+    "file": "src/core/win-job-client.ts",
+    "from": "return { state: 'unknown', reason: `containment_lost or unavailable:",
+    "to": "return { state: 'drained', reason: `containment_lost or unavailable:",
+    "script": "verify-win-job-gates.mjs",
+    "expect": "missing containment never becomes zero"
+  },
+  {
+    "name": "jobobj-v2：已完成不終止孤兒",
+    "file": "src/core/job-store.ts",
+    "from": "      const status = await new WinJobClient().terminate(job.meta.containment);",
+    "to": "      if (job.status !== 'running') return { pid, jobId: job.meta.jobId, status: 'terminated', message: 'already done' };\n      const status = await new WinJobClient().terminate(job.meta.containment);",
+    "script": "verify-process-tree-live.mjs",
+    "expect": "Windows grok completed job kill drains orphan"
+  },
+  {
+    "name": "jobobj-v2：主機遺失 windowsHide",
+    "file": "src/core/win-job-host.ts",
+    "from": "{detached:true,windowsHide:true,stdio:'ignore',env:{...process.env,...env}}",
+    "to": "{detached:true,windowsHide:false,stdio:'ignore',env:{...process.env,...env}}",
+    "script": "verify-win-job-windowless.mjs",
+    "expect": "Windows spawn hides windows: src/core/win-job-host.ts"
+  },
+  {
+    "name": "jobobj-v2：未設定 CREATE_NO_WINDOW",
+    "file": "src/core/win-job-host.ts",
+    "from": "false,0x08000004u,IntPtr.Zero",
+    "to": "false,0x00000004u,IntPtr.Zero",
+    "script": "verify-win-job-windowless.mjs",
+    "expect": "native host uses GUI subsystem and CREATE_NO_WINDOW"
+  },
+  {
+    "name": "jobobj-v2：Windows 無 jobId 誤信 PID 已退出",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "    if (this.platform === 'win32') return 'unknown'; // PID death cannot prove untracked descendants have stopped.\n",
+    "to": "",
+    "script": "verify-win-job-gates.mjs",
+    "expect": "missing jobId stays blocked even after Windows PID disappears"
+  },
+  {
+    "name": "jobobj-fix1：省略 ExecutionPolicy",
+    "file": "src/core/win-job-host.ts",
+    "from": "-ExecutionPolicy Bypass -File",
+    "to": "-File",
+    "script": "verify-win-job-fix1.mjs",
+    "expect": "process ExecutionPolicy Bypass"
+  },
+  {
+    "name": "jobobj-fix1：省略 bootstrap ExecutionPolicy",
+    "file": "src/core/win-job-host.ts",
+    "from": "'-ExecutionPolicy','Bypass',",
+    "to": "",
+    "script": "verify-win-job-fix1.mjs",
+    "expect": "process ExecutionPolicy Bypass"
+  },
+  {
+    "name": "jobobj-fix1：省略 SID",
+    "file": "src/core/win-job-native.ts",
+    "from": "Require(!requireOwner || sid==SID,\"owner SID mismatch\")",
+    "to": "Require(true,\"owner SID mismatch\")",
+    "script": "verify-win-job-fix1.mjs",
+    "expect": "native verifies owner SID"
+  },
+  {
+    "name": "jobobj-fix1：省略 pipe PID",
+    "file": "src/core/win-job-native.ts",
+    "from": "Require(actual==server.pid && !server.Exited",
+    "to": "Require(!server.Exited",
+    "script": "verify-win-job-broker.mjs",
+    "expect": "actual pipe PID rejects same-SID wrong registry identity"
+  },
+  {
+    "name": "jobobj-fix1：READY 不 Assign",
+    "file": "src/core/win-job-native.ts",
+    "from": "if(!AssignProcessToJobObject(job,runner.handle)) throw Error(\"AssignProcessToJobObject\");",
+    "to": "if(runner.pid<0 && !AssignProcessToJobObject(job,runner.handle)) throw Error(\"AssignProcessToJobObject\");",
+    "script": "verify-win-job-broker.mjs",
+    "expect": "instant intermediate descendants remain active after runner exit"
+  },
+  {
+    "name": "jobobj-fix1：退出但成員未零",
+    "file": "src/core/win-job-native.ts",
+    "from": "if(exited && a.active==0)",
+    "to": "if(exited)",
+    "script": "verify-win-job-broker.mjs",
+    "expect": "instant intermediate descendants remain active after runner exit"
+  },
+  {
+    "name": "jobobj-fix1：省略 FIRST_PIPE_INSTANCE",
+    "file": "src/core/win-job-native.ts",
+    "from": "(first?0x00080000u:0u)",
+    "to": "0u",
+    "script": "verify-win-job-broker.mjs",
+    "expect": "FIRST_PIPE_INSTANCE rejects an occupied pipe"
+  },
+  {
+    "name": "jobobj-fix1：覆蓋自然結果",
+    "file": "src/core/win-job-native.ts",
+    "from": "if(File.Exists(file)) return; // Preserve natural result.",
+    "to": "",
+    "script": "verify-win-job-broker.mjs",
+    "expect": "broker preserves existing natural exit result"
+  },
+  {
+    "name": "jobobj-fix1：省略 durable proof",
+    "file": "src/core/win-job-client.ts",
+    "from": "if (status.state === 'drained' && !drainedProof(ref, this.config))",
+    "to": "if (false)",
+    "script": "verify-win-job-fix1.mjs",
+    "expect": "broker drained without durable proof remains unknown"
+  },
+  {
+    "name": "jobobj-fix1：新版缺索引降級",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "if(job.containmentProtocol||job.untracked||hasContainmentIntent(jobStateDir(),job.jobId))return blocked",
+    "to": "if(false)return blocked",
+    "script": "verify-win-job-fix1.mjs",
+    "expect": "executor missing modern index stays blocked"
+  },
+  {
+    "name": "jobobj-fix1：終止無上限",
+    "file": "src/core/job-runner.ts",
+    "from": "terminationAttempts>=3||Date.now()<nextTerminationAt",
+    "to": "false",
+    "script": "verify-win-job-fix2.mjs",
+    "expect": "kill retries exactly three times with backoff"
+  },
+  {
+    "name": "jobobj-fix1：省略 boot 差異",
+    "file": "src/core/win-job-native.ts",
+    "from": "&& p!=c",
+    "to": "&& p==c",
+    "script": "verify-win-job-fix1.mjs",
+    "expect": "previous boot publishes reboot drained proof"
+  },
+  {
+    "name": "jobobj-fix1：省略查身分 Bypass src/core/live-jobs.ts",
+    "file": "src/core/live-jobs.ts",
+    "from": "'-ExecutionPolicy', 'Bypass', ",
+    "to": "",
+    "script": "verify-win-job-fix1.mjs",
+    "expect": "identity PowerShell process Bypass src/core/live-jobs.ts"
+  },
+  {
+    "name": "jobobj-fix1：省略查身分 Bypass src/core/process-tree.ts",
+    "file": "src/core/process-tree.ts",
+    "from": "'-ExecutionPolicy', 'Bypass', ",
+    "to": "",
+    "script": "verify-win-job-fix1.mjs",
+    "expect": "identity PowerShell process Bypass src/core/process-tree.ts"
+  },
+  {
+    "name": "jobobj-fix1：legacy jobs 不可讀誤當回收",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "if((error as NodeJS.ErrnoException).code!=='ENOENT')return blocked('Windows legacy jobs 目錄讀不了');",
+    "to": "if(false)return blocked('Windows legacy jobs 目錄讀不了');",
+    "script": "verify-win-job-fix1.mjs",
+    "expect": "legacy unreadable jobs root stays blocked"
+  },
+  {
+    "name": "jobobj-fix2: unknown kill drops file",
+    "file": "src/core/job-store.ts",
+    "from": "if (status.state === 'unknown') {",
+    "to": "if (false) {",
+    "expect": "broker loss kill stops held direct worker",
+    "script": "verify-win-job-unknown.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: timeout cannot retry",
+    "file": "src/core/job-runner.ts",
+    "from": "terminationUnknown=status.state!=='drained';",
+    "to": "terminationUnknown=false;terminationAttempts=3;",
+    "expect": "timeout retries exactly three times with backoff",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: read JobRef marker lost",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "if (!write) return { pid: started.pid, jobId: started.jobId, ...(this.platform==='win32'?{containmentProtocol:1 as const}:{}) };",
+    "to": "if (!write) return { pid: started.pid, jobId: started.jobId };",
+    "expect": "JobRef and journal preserve read containment marker",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: write JobRef marker lost",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "return { pid: started.pid, jobId: started.jobId, tracked: true, ...(this.platform==='win32'?{containmentProtocol:1 as const}:{}) };",
+    "to": "return { pid: started.pid, jobId: started.jobId, tracked: true };",
+    "expect": "JobRef and journal preserve write containment marker",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: journal marker ignored",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "if(job.containmentProtocol||job.untracked||hasContainmentIntent",
+    "to": "if(job.untracked||hasContainmentIntent",
+    "expect": "journal marker blocks missing read containment record",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: same boot publishes",
+    "file": "src/core/win-job-native.ts",
+    "from": "&& p!=c",
+    "to": "&& p==c",
+    "expect": "same boot lost and missing boot remain unknown",
+    "script": "verify-win-job-fix1.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: missing boot publishes",
+    "file": "src/core/win-job-native.ts",
+    "from": "long.TryParse(prior,out p) && p>0",
+    "to": "(long.TryParse(prior,out p) || prior==\"\")",
+    "expect": "same boot lost and missing boot remain unknown",
+    "script": "verify-win-job-fix1.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: DLL missing sidecar trusted",
+    "file": "src/core/win-job-broker.ts",
+    "from": "if(!$valid) {",
+    "to": "if(![IO.File]::Exists($dll)) {",
+    "expect": "missing DLL sidecar self heals",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: DLL corruption trusted",
+    "file": "src/core/win-job-broker.ts",
+    "from": "$valid=([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-','')) -eq [IO.File]::ReadAllText($dll+'.sha256')",
+    "to": "$valid=$true",
+    "expect": "corrupt DLL is rebuilt before loading",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: intent access error downgraded",
+    "file": "src/core/containment-store.ts",
+    "from": "return (error as NodeJS.ErrnoException).code !== 'ENOENT';",
+    "to": "return false;",
+    "expect": "unreadable intent refuses legacy downgrade",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: PTY kill reopens PID",
+    "file": "src/core/pty-runner.ts",
+    "from": "agent._ptyNative.kill(agent._pty, agent._useConptyDll);",
+    "to": "ptyProc.kill();",
+    "expect": "PTY termination uses owned native baton once",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: platform typo ignored",
+    "file": "tools/mutation-selection.mjs",
+    "from": "m.platforms.some(p=>!platforms.has(p))",
+    "to": "false",
+    "expect": "mutation validation unknown platform",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: skipped source unchecked",
+    "file": "tools/mutation-selection.mjs",
+    "from": "for (const m of selected) {",
+    "to": "for (const m of selected) { if(m.platforms?.every(p=>p!==platform)){skipped.push(m);continue;}",
+    "expect": "mutation validation skipped missing from",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: boot absence prevents startup",
+    "file": "src/core/win-job-native.ts",
+    "from": "if(h==IntPtr.Zero) return \"\";",
+    "to": "if(h==IntPtr.Zero) throw Error(\"boot identity unavailable\");",
+    "expect": "unavailable boot identity returns empty without throwing",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: DLL rereads file after verification",
+    "file": "src/core/win-job-broker.ts",
+    "from": "[Reflection.Assembly]::Load($bytes) | Out-Null",
+    "to": "Add-Type -Path $dll",
+    "expect": "DLL loads exactly verified bytes",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: skip exit reports success",
+    "file": "tools/mutation-test.mjs",
+    "from": "process.exit(2);",
+    "to": "process.exit(0);",
+    "expect": "all skipped CLI returns explicit non-success summary",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix2: premature lost before broker publication",
+    "file": "src/core/job-store.ts",
+    "from": "await new WinJobClient().inspect(job.meta.containment);",
+    "to": "/* omit publication synchronization */",
+    "expect": "broker timeout publication wins over premature lost",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: startup scans all retained records",
+    "file": "src/core/win-job-native.ts",
+    "from": "      listener=Listener(name,true);",
+    "to": "      foreach(var historical in Directory.GetFiles(directory,\"*.json\")) { File.ReadAllText(historical); }\n      listener=Listener(name,true);",
+    "expect": "startup does not enumerate historical records",
+    "script": "verify-win-job-phase3-foundation.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: startup reapplies inheritable ACL",
+    "file": "src/core/win-job-native.ts",
+    "from": "if(!protectedOwner) Directory.SetAccessControl(path,acl);",
+    "to": "Directory.SetAccessControl(path,acl);",
+    "expect": "startup independent of 10000 drained history",
+    "script": "verify-win-job-scale.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: identity asks query information",
+    "file": "src/core/win-job-native.ts",
+    "from": "0x00101000 | extra",
+    "to": "0x00101400 | extra",
+    "expect": "identity requests only synchronize and limited query",
+    "script": "verify-win-job-phase3-foundation.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: objects lose Medium label",
+    "file": "src/core/win-job-native.ts",
+    "from": "S:(ML;;NW;;;ME)",
+    "to": "",
+    "expect": "pipe has actual Medium mandatory label and owner ACL",
+    "script": "verify-win-job-phase3-foundation.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: empty proof boot falls back",
+    "file": "src/core/win-job-native.ts",
+    "from": "old.ContainsKey(\"proofBootId\")?S(old,\"proofBootId\"):S(old,\"bootId\")",
+    "to": "S(old,\"proofBootId\")!=\"\"?S(old,\"proofBootId\"):S(old,\"bootId\")",
+    "expect": "explicit empty proofBootId blocks numeric fallback",
+    "script": "verify-win-job-fix1.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: executor loses unknown direct fallback",
+    "file": "src/ai-cli_kernel/executor.ts",
+    "from": "if (status.state === 'unknown') await this.service.killProcess(job.pid, job.jobId).catch(() => undefined);",
+    "to": "if (false) await this.service.killProcess(job.pid, job.jobId).catch(() => undefined);",
+    "expect": "broker loss executor-kill stops held direct worker",
+    "script": "verify-win-job-unknown.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: child exit closes retry budget",
+    "file": "src/core/job-runner.ts",
+    "from": "while(process.platform==='win32' && terminationUnknown && terminationAttempts<3)",
+    "to": "while(false)",
+    "expect": "timeout-fast retries exactly three times with backoff",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: retry omits end based backoff",
+    "file": "src/core/job-runner.ts",
+    "from": "nextTerminationAt=Date.now()+1000*2**(terminationAttempts-1)",
+    "to": "nextTerminationAt=Date.now()",
+    "expect": "timeout-fast retries exactly three times with backoff",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: failed direct kill reports sent",
+    "file": "src/core/job-runner.ts",
+    "from": "writeSync(stderr,directSent?'\\nContainment unknown; direct worker termination requested\\n':'\\nContainment unknown; no direct worker termination request was sent\\n');",
+    "to": "writeSync(stderr,'\\nContainment unknown; direct worker termination requested\\n');",
+    "expect": "timeout-fast direct termination hints match actual requests",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: late result remains lost",
+    "file": "src/core/job-store.ts",
+    "from": "if(job.status==='lost' && (job.meta.containment || job.meta.containmentProtocol))",
+    "to": "if(false as boolean)",
+    "expect": "late exit repairs cached lost result",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: active generation still exempted",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "    if(typeof status.activeProcesses==='number'&&status.activeProcesses>0)throw Error(`ActiveProcesses > 0: ${job.jobId}; refused, use normal cancel/drain`);\n    if(status.state==='drained'&&drainedProof(ref,client.config))continue;\n    if(status.state==='active'||status.state==='preparing'){\n      if((await client.terminate(ref)).state==='drained')continue;\n      result.blockers.push(`${job.jobId}: tracking restored; normal termination has not drained`);continue;\n    }\n",
+    "to": "    // mutation: treat active tracking as lost\n",
+    "expect": "confirmation refuses active correct",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: flag alone skips typed confirmation",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "if(answer.trim()!==`${runId} ${code}`)throw Error('runId or confirmation code mismatch');",
+    "to": "void answer;",
+    "expect": "confirmation refuses good wrong-code",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: cancelled before event fsync",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "    store.append(event); // fsync must succeed before cancellation or cleanup.",
+    "to": "    if(scope==='cancel')store.append({type:'state',state:'cancelled',reason:'containment_lost_confirmed'});\n    store.append(event); // mutation: too late",
+    "expect": "confirmation refuses fsync correct",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: nonTTY reaches console check",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "if(process.platform!=='win32'||!process.stdin.isTTY||!process.stdout.isTTY)",
+    "to": "if(process.platform!=='win32')",
+    "expect": "nonTTY pipeline or worker rejected good",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: worker bypasses interactive ban",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "if(process.env.AI_CLI_WORKER==='1')throw Error('worker cannot confirm containment loss');",
+    "to": "// mutation: no worker fence",
+    "expect": "confirmation refuses worker correct",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: no second diagnosis",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "const recheck=await diagnose(store,executor,client);",
+    "to": "const recheck=first;",
+    "expect": "confirmation refuses recovered correct",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: cleanup inherits cancel exception",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "  if (records.length > 0) {",
+    "to": "  if (records.length > 0 && !store.read().some(e=>e.type==='containment_lost_confirmed'&&e.scope==='cancel')) {",
+    "expect": "ordinary cleanup never inherits cancel exemption",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: MCP ignores exception fields",
+    "file": "src/ai-cli_kernel/mcp-tools.ts",
+    "from": "      for(const key of Object.keys(args))if(key!=='runId')throw Error('MCP cancel rejects exception fields: '+key);",
+    "to": "      // mutation: silently discard fields",
+    "expect": "MCP rejects exception fields",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: journal failed fsync still visible",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "from": "try{const rollback=openSync(this.journalPath,'r+');try{ftruncateSync(rollback,length);fsyncSync(rollback);}finally{closeSync(rollback);}}catch{writeFileSync(join(this.dir,'journal.durability-unknown'),'fsync/rollback failed');}",
+    "to": "void length;",
+    "expect": "confirmation refuses fsync correct",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: journal writer not exclusive",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "from": "return takeJournalLock(this.dir);",
+    "to": "return ()=>{};",
+    "expect": "exclusive journal blocks competing writer throughout prompt",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: cancel request does not fence late runner",
+    "file": "src/ai-cli_kernel/admission.ts",
+    "from": "if (store.cancelRequested() || !readActiveRuns().some(slot => slot.runId === store.runId)) return false;",
+    "to": "if (!readActiveRuns().some(slot => slot.runId === store.runId)) return false;",
+    "expect": "Phase3 cancel request fences delayed runner admission",
+    "script": "verify-ai-cli_kernel-concurrency.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: late signal starts new cancellation",
+    "file": "src/core/job-runner.ts",
+    "from": "    if(process.platform==='win32'&&ended&&terminationAttempts===0)return Promise.resolve();",
+    "to": "    // mutation: late signal starts termination",
+    "expect": "PTY console fallback never kills after onExit",
+    "script": "verify-pty-jobs.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: dashboard rejects ordinary confirmation metadata",
+    "file": "src/ai-cli_kernel/dashboard-api.ts",
+    "from": "if(key!=='confirmedCommit'&&/containment|confirm|scope|requestId/i.test(key))",
+    "to": "if(/containment|confirm|scope|requestId/i.test(key))",
+    "expect": "Phase3 dashboard confirmation metadata remains ordinary without granting exceptions",
+    "script": "verify-ai-cli_kernel-dashboard.mjs"
+  },
+  {
+    "name": "jobobj-phase3: lost runner and worker are not checked",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "      try{death=await evidence(identity);}catch{death={state:'unknown',reason:'identity unavailable',at:new Date().toISOString()};}",
+    "to": "      death={state:'dead',reason:'mutated',at:new Date().toISOString()};",
+    "expect": "live runner or worker cannot be exempted runner-worker-alive",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: lost worker identity is omitted",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "['worker',meta?.worker]",
+    "to": "['worker',meta?.runner]",
+    "expect": "live runner or worker cannot be exempted worker-alive",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: cancel skips executor fallback",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "if(scope==='cancel')for(const action of before.actions.values())if(action.job)await executor.kill(action.job);",
+    "to": "// no fallback",
+    "expect": "live runner or worker cannot be exempted worker-alive",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: native ancestry fence removed",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "if(ancestry!=='none')",
+    "to": "if(false as boolean)",
+    "expect": "cleared worker environment cannot bypass native ancestor check",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: stdout TTY requirement removed",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "||!process.stdout.isTTY",
+    "to": "",
+    "expect": "stdout-only redirection refuses interactive exception",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: duplicate replay loses sequence",
+    "file": "src/ai-cli_kernel/replay.ts",
+    "from": "{view.lastSeq=Math.max(view.lastSeq,event.seq);continue;}",
+    "to": "{continue;}",
+    "expect": "confirmation replay is idempotent and advances sequence",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: dead journal owner never reclaimed",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "from": "dead=writerDead(row.owner,Math.max(1,totalUntil-Date.now()))",
+    "to": "dead=false",
+    "expect": "native-dead writer ticket is safely reclaimed",
+    "script": "verify-ai-cli_kernel-journal-lock.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: journal contention fails immediately",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "from": "if(Date.now()>=until)",
+    "to": "if(true)",
+    "expect": "later journal writer waits and succeeds",
+    "script": "verify-ai-cli_kernel-journal-lock.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: unknown journal owner reclaimed",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "from": "dead=writerDead(row.owner,Math.max(1,totalUntil-Date.now()))",
+    "to": "dead=row.owner.started==='unknown'||writerDead(row.owner)",
+    "expect": "unknown writer is never reclaimed",
+    "script": "verify-ai-cli_kernel-journal-lock.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: close process times falsely prove death",
+    "file": "src/core/win-job-native.ts",
+    "from": "bool different=parsed && Math.Abs((new DateTimeOffset(DateTime.FromFileTimeUtc(p.ticks))-expected).TotalSeconds)>=1;",
+    "to": "bool different=!same;",
+    "expect": "native death evidence preserves ambiguous milliseconds and CIM precision",
+    "script": "verify-win-job-phase3-foundation.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: pipe natural exit forgets ended",
+    "file": "src/core/job-runner.ts",
+    "from": "pipeChild.once('exit', () => { ended = true; });",
+    "to": "// no pipe exit guard",
+    "expect": "pipe natural exit ignores later kill request",
+    "script": "verify-win-job-late-exit.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: bootstrap grace skips containment inspect",
+    "file": "src/core/job-store.ts",
+    "from": "const status=await new WinJobClient().inspect(ref);refreshJob(job);",
+    "to": "const status=await Promise.resolve({state:'unknown' as 'unknown'|'active'|'preparing'|'drained'});refreshJob(job);",
+    "expect": "bootstrap grace inspects before marking lost",
+    "script": "verify-win-job-fix2.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-phase3: journal identity helper shows console",
+    "file": "src/ai-cli_kernel/journal-owner.ts",
+    "from": "{windowsHide:true,timeout:Math.min(15000,budget),killSignal:",
+    "to": "{windowsHide:false,timeout:Math.min(15000,budget),killSignal:",
+    "expect": "Windows spawn hides windows: src/ai-cli_kernel/journal-owner.ts",
+    "script": "verify-win-job-windowless.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix4: descendants omitted",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "await inspectDescendants([{pid:record.runnerPid,started:record.runnerStarted},meta?.worker])",
+    "to": "await Promise.resolve({alive:[] as {pid:number;name:string;started:string}[],unknown:[] as string[]})",
+    "expect": "live orphan refuses cancel",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix4: descendant unknown ignored",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "if(descendants.unknown.length)",
+    "to": "if(false as boolean)",
+    "expect": "failed descendant enumeration remains blocker",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix4: runner identity omitted",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "['runner',{pid:record.runnerPid,started:record.runnerStarted}]",
+    "to": "['runner',meta?.worker]",
+    "expect": "live runner or worker cannot be exempted runner-alive",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix4: SIGINT release omitted",
+    "file": "src/ai-cli_kernel/containment-exception.ts",
+    "from": "interrupt=()=>abort.abort(new Error('confirmation interrupted'))",
+    "to": "interrupt=()=>{}",
+    "expect": "Ctrl+C releases writer with no cancellation side effects",
+    "script": "verify-ai-cli_kernel-containment-exception.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix4: evidence grace omitted",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "from": "now-firstSeen.get(key)!>=300",
+    "to": "now-firstSeen.get(key)!>=0",
+    "expect": "journal grace evidence wait succeeds",
+    "script": "verify-ai-cli_kernel-journal-lock.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix4: evidence consumes wait budget",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "from": "until+=Date.now()-start;",
+    "to": "",
+    "expect": "journal budget evidence wait succeeds",
+    "script": "verify-ai-cli_kernel-journal-lock.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix4: evidence never refreshed",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "from": "now-(checked.get(key)??0)>=500",
+    "to": "!checked.has(key)",
+    "expect": "journal refresh evidence wait succeeds",
+    "script": "verify-ai-cli_kernel-journal-lock.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix4: lock timeout kills actions",
+    "file": "src/ai-cli_kernel/runner-settle.ts",
+    "from": "if(error instanceof JournalUnavailableError)",
+    "to": "if(error instanceof JournalUnavailableError && error.code!=='JOURNAL_UNAVAILABLE')",
+    "expect": "journal timeout preserves open actions without kill",
+    "script": "verify-jobobj-fix4.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix4: journal helper deadline omitted",
+    "file": "src/ai-cli_kernel/journal-owner.ts",
+    "from": "timeout:Math.min(15000,budget),",
+    "to": "",
+    "expect": "FIX5 real synchronous helper timeout reaps detached host tree",
+    "script": "verify-jobobj-fix5.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix4: compiler deadline omitted",
+    "file": "src/core/win-job-host.ts",
+    "from": "$until=[DateTime]::UtcNow.AddSeconds(25)",
+    "to": "$until=[DateTime]::UtcNow.AddSeconds(120)",
+    "expect": "FIX5 real compiler deadline reaps owned compiler tree and reports failure",
+    "script": "verify-jobobj-fix5.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix4: timezone absent accepted",
+    "file": "src/core/win-job-native.ts",
+    "from": "if(!System.Text.RegularExpressions.Regex.IsMatch(value,@\"(?:[zZ]|[+-]\\d{2}:\\d{2})$\"))return false;",
+    "to": "// timezone check omitted",
+    "expect": "timezone-free identity remains unknown",
+    "script": "verify-win-job-phase3-foundation.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix4: foreign SID ancestry never ends",
+    "file": "src/core/win-job-native.ts",
+    "from": "return parentTicks>childTicks || sid!=SID;",
+    "to": "return parentTicks>childTicks;",
+    "expect": "ancestry stops at foreign SID or reused parent but detects worker",
+    "script": "verify-win-job-phase3-foundation.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix5: reused parent upper bound omitted",
+    "file": "src/ai-cli_kernel/containment-descendants.ts",
+    "script": "verify-jobobj-fix5.mjs",
+    "from": "if(born>=upper)continue;",
+    "to": "if(false)continue;",
+    "expect": "FIX5 reused root occupant excludes new children but retains old orphans",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix5: unknown parent upper bound accepted",
+    "file": "src/ai-cli_kernel/containment-descendants.ts",
+    "script": "verify-jobobj-fix5.mjs",
+    "from": "if(!Number.isFinite(upper)||upper<parent){",
+    "to": "if(false){",
+    "expect": "FIX5 descendant uncertainty never becomes an empty safe snapshot",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix5: unknown occupant ignored",
+    "file": "src/ai-cli_kernel/containment-descendants.ts",
+    "script": "verify-jobobj-fix5.mjs",
+    "from": "if(snapshot.unknown.some(p=>p.pid===row.ppid)){",
+    "to": "if(false){",
+    "expect": "FIX5 descendant uncertainty never becomes an empty safe snapshot",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix5: descendant recursion stops early",
+    "file": "src/ai-cli_kernel/containment-descendants.ts",
+    "script": "verify-jobobj-fix5.mjs",
+    "from": "known.set(key(row),row);",
+    "to": "/* descendant identity not retained */",
+    "expect": "FIX5 reused root occupant excludes new children but retains old orphans",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix5: journal total deadline removed",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "script": "verify-jobobj-fix5.mjs",
+    "from": "const totalUntil=Date.now()+20000;",
+    "to": "const totalUntil=Infinity;",
+    "expect": "FIX5 repeated evidence timeouts reach total deadline without reclaim",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix5: reconcile marker hidden",
+    "file": "src/ai-cli_kernel/api.ts",
+    "script": "verify-jobobj-fix5.mjs",
+    "from": "const reconcile=readJournalReconcile(store.dir);",
+    "to": "const reconcile=readJournalReconcile('');",
+    "expect": "FIX5 status and dashboard expose reconciliation for stop_pending",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix5: successful resume keeps old marker",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-jobobj-fix5.mjs",
+    "from": "clearJournalReconcile(store.dir,reconcile);",
+    "to": "/* omitted */",
+    "expect": "FIX5 successful runner reattach clears marker only after durable start",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix5: protected ancestor blocks external caller",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix5.mjs",
+    "from": "return depth>0 && (error==5 || error==87);",
+    "to": "return false;",
+    "expect": "FIX5 Toolhelp external ancestor tail still rejects known worker",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix5: known worker check omitted",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix5.mjs",
+    "from": "foreach(var target in targets)if(N(target,\"pid\")==pid) {",
+    "to": "foreach(var target in targets)if(false) {",
+    "expect": "FIX5 Toolhelp external ancestor tail still rejects known worker",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix6: host kill-on-close omitted",
+    "file": "src/core/win-job-host.ts",
+    "script": "verify-jobobj-fix6.mjs",
+    "from": "Marshal.WriteInt32(info,16,0x2000);",
+    "to": "Marshal.WriteInt32(info,16,0);",
+    "expect": "FIX6 outer host deadline reaps a tree before native wait begins",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix5: compiler descendant assignment omitted",
+    "file": "src/core/win-job-host.ts",
+    "script": "verify-jobobj-fix5.mjs",
+    "from": "-or !$native::AssignProcessToJobObject($job,$native::GetCurrentProcess())",
+    "to": "",
+    "expect": "FIX5 real compiler deadline reaps owned compiler tree and reports failure",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix5: killed compiler becomes success",
+    "file": "src/core/win-job-host.ts",
+    "script": "verify-jobobj-fix5.mjs",
+    "from": "code??124",
+    "to": "code||0",
+    "expect": "FIX5 killed compiler never becomes success",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix5: compiler shows visible console",
+    "file": "src/core/win-job-host.ts",
+    "script": "verify-win-job-windowless.mjs",
+    "from": "$start.CreateNoWindow=$true;",
+    "to": "$start.CreateNoWindow=$false;",
+    "expect": "native compiler starts without a console shell or visible window",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix6: reused root identity excluded by PID",
+    "file": "src/ai-cli_kernel/containment-descendants.ts",
+    "from": "row=>!known.has(key(row))",
+    "to": "row=>![...known.values()].some(p=>p.pid===row.pid)",
+    "expect": "FIX6 reused root occupant and its children remain real descendants",
+    "script": "verify-jobobj-fix6.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix6: snapshot order hides descendant parent",
+    "file": "src/ai-cli_kernel/containment-descendants.ts",
+    "from": ".sort((a,b)=>order(a)-order(b))",
+    "to": "",
+    "expect": "FIX6 reused root occupant and its children remain real descendants",
+    "script": "verify-jobobj-fix6.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix6: system birth fallback omitted",
+    "file": "src/core/win-job-native.ts",
+    "from": "try{ticks=SystemStarted(pid);}catch{}",
+    "to": "try{ticks=0;}catch{}",
+    "expect": "FIX6 inaccessible identity uses real system birth without declaring same identity dead",
+    "script": "verify-jobobj-fix6.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix6: near system birth proves death",
+    "file": "src/core/win-job-native.ts",
+    "from": "different=ticks>0 && TryStarted(started,out expected) && Math.Abs((new DateTimeOffset(DateTime.FromFileTimeUtc(ticks))-expected).TotalSeconds)>=1;",
+    "to": "different=ticks>0 && TryStarted(started,out expected) && Math.Abs((new DateTimeOffset(DateTime.FromFileTimeUtc(ticks))-expected).TotalSeconds)>=0;",
+    "expect": "FIX6 inaccessible identity uses real system birth without declaring same identity dead",
+    "script": "verify-jobobj-fix6.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix6: inaccessible intermediary ends ancestry",
+    "file": "src/core/win-job-native.ts",
+    "from": "if(!InaccessibleAncestorTail(depth,e.NativeErrorCode))return \"unknown\";",
+    "to": "if(true)return \"none\";",
+    "expect": "FIX6 inaccessible intermediary cannot hide a known worker ancestor",
+    "script": "verify-jobobj-fix6.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix6: host outer deadline omitted",
+    "file": "src/core/win-job-host.ts",
+    "from": "},remainingTime(deadline,Math.max(1,Math.min(45000,timeoutMs))+5000));",
+    "to": "},120000);",
+    "expect": "FIX6 outer host deadline reaps a tree before native wait begins",
+    "script": "verify-jobobj-fix6.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix6: compiler diagnostics read sequentially",
+    "file": "src/core/win-job-host.ts",
+    "from": "$compilerOutput=$compiler.StandardOutput.ReadToEndAsync();$compilerError=$compiler.StandardError.ReadToEndAsync()",
+    "to": "$compilerOutput=[Threading.Tasks.Task[string]]::FromResult($compiler.StandardOutput.ReadToEnd());$compilerError=[Threading.Tasks.Task[string]]::FromResult($compiler.StandardError.ReadToEnd())",
+    "expect": "FIX6 compiler preserves large diagnostics without pipe deadlock",
+    "script": "verify-jobobj-fix6.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix6: reconciliation replaces original reason",
+    "file": "src/ai-cli_kernel/api.ts",
+    "from": "reason: view.reason ?? null, reconciliation:",
+    "to": "reason: reconcile ? \"journal_unavailable\" : view.reason ?? null, reconciliation:",
+    "expect": "FIX5 status and dashboard expose reconciliation for stop_pending",
+    "script": "verify-jobobj-fix5.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "jobobj-fix7: bootstrap caller deadline omitted",
+    "file": "src/core/win-job-host.ts",
+    "script": "verify-jobobj-fix7.mjs",
+    "platforms": [
+      "win32"
+    ],
+    "from": "    const timer=setTimeout(()=>{try{child.kill('SIGKILL');}catch{}reject(new Error('Windowless bootstrap deadline; containment unknown'));},remainingTime(deadline,55000));",
+    "to": "    const timer=setTimeout(()=>{try{child.kill('SIGKILL');}catch{}reject(new Error('Windowless bootstrap deadline; containment unknown'));},120000);",
+    "expect": "FIX7 startProcess bootstrap never-close is bounded for MCP and CLI"
+  },
+  {
+    "name": "jobobj-fix7: bootstrap waits for absent close",
+    "file": "src/core/win-job-host.ts",
+    "script": "verify-jobobj-fix7.mjs",
+    "platforms": [
+      "win32"
+    ],
+    "from": "    const timer=setTimeout(()=>{try{child.kill('SIGKILL');}catch{}reject(new Error('Windowless bootstrap deadline; containment unknown'));},remainingTime(deadline,55000));",
+    "to": "    const timer=setTimeout(()=>{try{child.kill('SIGKILL');}catch{}},remainingTime(deadline,55000));",
+    "expect": "FIX7 startProcess bootstrap never-close is bounded for MCP and CLI"
+  },
+  {
+    "name": "jobobj-fix7: bootstrap retained handle stop omitted",
+    "file": "src/core/win-job-host.ts",
+    "script": "verify-jobobj-fix7.mjs",
+    "platforms": [
+      "win32"
+    ],
+    "from": "    const timer=setTimeout(()=>{try{child.kill('SIGKILL');}catch{}reject(new Error('Windowless bootstrap deadline; containment unknown'));},remainingTime(deadline,55000));",
+    "to": "    const timer=setTimeout(()=>{try{}catch{}reject(new Error('Windowless bootstrap deadline; containment unknown'));},remainingTime(deadline,55000));",
+    "expect": "FIX7 startProcess bootstrap never-close is bounded for MCP and CLI"
+  },
+  {
+    "name": "jobobj-fix7: host waits for absent close",
+    "file": "src/core/win-job-host.ts",
+    "script": "verify-jobobj-fix7.mjs",
+    "platforms": [
+      "win32"
+    ],
+    "from": "    const timer=setTimeout(()=>{expired=true;try{child.kill('SIGKILL');}catch{}reject(new Error('Windowless host deadline; containment unknown'));},remainingTime(deadline,Math.max(1,Math.min(45000,timeoutMs))+5000));",
+    "to": "    const timer=setTimeout(()=>{expired=true;try{child.kill('SIGKILL');}catch{}},remainingTime(deadline,Math.max(1,Math.min(45000,timeoutMs))+5000));",
+    "expect": "FIX7 startProcess host never-close is bounded for MCP and CLI"
+  },
+  {
+    "name": "jobobj-fix7: host retained handle stop omitted",
+    "file": "src/core/win-job-host.ts",
+    "script": "verify-jobobj-fix7.mjs",
+    "platforms": [
+      "win32"
+    ],
+    "from": "    const timer=setTimeout(()=>{expired=true;try{child.kill('SIGKILL');}catch{}reject(new Error('Windowless host deadline; containment unknown'));},remainingTime(deadline,Math.max(1,Math.min(45000,timeoutMs))+5000));",
+    "to": "    const timer=setTimeout(()=>{expired=true;try{}catch{}reject(new Error('Windowless host deadline; containment unknown'));},remainingTime(deadline,Math.max(1,Math.min(45000,timeoutMs))+5000));",
+    "expect": "FIX7 startProcess host never-close is bounded for MCP and CLI"
+  },
+  {
+    "name": "kernel mutex：移除 delete-pending 讀取重試",
+    "from": "          Atomics.wait(readPause, 0, 0, Math.min(5, remaining));",
+    "to": "          throw error;",
+    "expect": "mutex delete-pending closes during retry and acquires normally",
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "script": "verify-ai-cli_kernel-process-mutex.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "kernel mutex：讀取重試耗盡誤當 ticket 不存在",
+    "from": "          if (remaining <= 0) ticketReadBusy(name, ticketPath, error);",
+    "to": "          if (remaining <= 0) break;",
+    "expect": "mutex persistent delete-pending is typed busy and never executes work",
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "script": "verify-ai-cli_kernel-process-mutex.mjs",
+    "platforms": [
+      "win32"
+    ]
+  },
+  {
+    "name": "kernel mutex：忙碌遺失原始 cause 與檔名",
+    "from": "  throw new ProcessMutexBusy(name, { cause: error, ticket: file });",
+    "to": "  throw new ProcessMutexBusy(name);",
+    "expect": "mutex persistent delete-pending is typed busy and never executes work",
+    "platforms": [
+      "win32"
+    ],
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "script": "verify-ai-cli_kernel-process-mutex.mjs"
+  },
+  {
+    "name": "kernel mutex：EACCES 持續錯誤永遠當忙碌",
+    "from": "  if (performance.now() - failure.since >= 2000) throw new ProcessMutexReadError(name, file, error as NodeJS.ErrnoException);",
+    "to": "  if (code !== 'EACCES' && performance.now() - failure.since >= 2000) throw new ProcessMutexReadError(name, file, error as NodeJS.ErrnoException);",
+    "expect": "mutex persistent errno escapes retryProcessMutex with typed cause",
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "script": "verify-ai-cli_kernel-process-mutex.mjs"
+  },
+  {
+    "name": "kernel mutex：每張 ticket 各自取得讀取期限",
+    "from": "    const readDeadline = Math.min(performance.now() + 80, deps.maxWaitMs === undefined ? Infinity : startedAt + deps.maxWaitMs);\n    const tickets = new Map<string, Ticket>();\n    for (const file of readdirSync(directory).filter(file => file.endsWith('.json'))) {\n      const ticketPath = join(directory, file);\n      for (;;) {",
+    "to": "    const tickets = new Map<string, Ticket>();\n    for (const file of readdirSync(directory).filter(file => file.endsWith('.json'))) {\n      const ticketPath = join(directory, file);\n      const readDeadline = Math.min(performance.now() + 80, deps.maxWaitMs === undefined ? Infinity : startedAt + deps.maxWaitMs);\n      for (;;) {",
+    "expect": "mutex scan shares one wall-clock budget across tickets and blocking IO",
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "script": "verify-ai-cli_kernel-process-mutex.mjs"
+  },
+  {
+    "name": "kernel mutex：讀到 ticket 卻未納入互斥",
+    "from": "          if (!tickets.has(ticket.id) || tickets.get(ticket.id)!.number < ticket.number) tickets.set(ticket.id, ticket);",
+    "to": "          if (false) tickets.set(ticket.id, ticket);",
+    "expect": "mutex EACCES recovery still respects a live ticket",
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "script": "verify-ai-cli_kernel-process-mutex.mjs"
+  },
+  {
+    "name": "kernel mutex：成功讀取未清除持續錯誤觀察",
+    "from": "          const contents = readFileSync(ticketPath, 'utf8');\n          ticketReadFailures.delete(ticketPath);",
+    "to": "          const contents = readFileSync(ticketPath, 'utf8');",
+    "expect": "mutex successful read resets persistent errno observations",
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "script": "verify-ai-cli_kernel-process-mutex.mjs"
+  },
+  {
+    "name": "kernel mutex：每次耗盡重設兩秒起點",
+    "from": "  if (performance.now() - failure.since >= 2000) throw new ProcessMutexReadError(name, file, error as NodeJS.ErrnoException);",
+    "to": "  failure.since = performance.now();\n  if (performance.now() - failure.since >= 2000) throw new ProcessMutexReadError(name, file, error as NodeJS.ErrnoException);",
+    "expect": "mutex same errno after two seconds surfaces without a third exhaustion",
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "script": "verify-ai-cli_kernel-process-mutex.mjs"
+  },
+  {
+    "script": "verify-ai-cli_kernel-process-mutex.mjs",
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "name": "kernel mutex：持續錯誤失去專用型別",
+    "from": "  if (performance.now() - failure.since >= 2000) throw new ProcessMutexReadError(name, file, error as NodeJS.ErrnoException);",
+    "to": "  if (performance.now() - failure.since >= 2000) throw error;",
+    "expect": "mutex persistent errno escapes retryProcessMutex with typed cause"
+  },
+  {
+    "script": "verify-ai-cli_kernel-process-mutex.mjs",
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "name": "kernel mutex：並行呼叫以三次耗盡提早升級",
+    "from": "  ticketReadFailures.set(file, failure);",
+    "to": "  const counted = failure as typeof failure & { count?: number };\n  counted.count = (counted.count ?? 0) + 1;\n  if (counted.count >= 3) throw new ProcessMutexReadError(name, file, error as NodeJS.ErrnoException);\n  ticketReadFailures.set(file, failure);",
+    "expect": "mutex concurrent callers cannot accelerate persistence or contaminate other tickets"
+  },
+  {
+    "script": "verify-ai-cli_kernel-process-mutex.mjs",
+    "file": "src/ai-cli_kernel/test-lock.ts",
+    "name": "kernel mutex：持續讀取錯誤使測試租約釋放失敗",
+    "from": "    if (!(error instanceof ProcessMutexBusy) && !(error instanceof ProcessMutexReadError)) throw error;",
+    "to": "    if (!(error instanceof ProcessMutexBusy)) throw error;",
+    "expect": "mutex persistent test lease release preserves passed run and records deferred diagnosis"
+  },
+  {
+    "script": "verify-ai-cli_kernel-process-mutex.mjs",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "name": "kernel mutex：持續讀取錯誤使名額釋放失敗",
+    "from": "    if (!(error instanceof ProcessMutexBusy) && !(error instanceof ProcessMutexReadError)) throw error;",
+    "to": "    if (!(error instanceof ProcessMutexBusy)) throw error;",
+    "expect": "mutex persistent slot release preserves terminal run and records slot failure"
+  },
+  {
+    "script": "verify-ai-cli_kernel-process-mutex.mjs",
+    "file": "src/ai-cli_kernel/process-mutex.ts",
+    "name": "kernel mutex：持續讀取錯誤遺失原始 cause",
+    "from": "    super(`${mutex} 票券持續讀取失敗；${cause.code ?? 'UNKNOWN'} ${ticket}`, { cause });",
+    "to": "    super(`${mutex} 票券持續讀取失敗；${cause.code ?? 'UNKNOWN'} ${ticket}`);",
+    "expect": "mutex persistent errno escapes retryProcessMutex with typed cause"
+  },
+  {
+    "script": "verify-ai-cli_kernel-process-mutex.mjs",
+    "file": "src/ai-cli_kernel/test-lock.ts",
+    "name": "kernel mutex：持續讀取錯誤延後租約釋放卻不記錄",
+    "from": "      store.append({ type: 'test_lock_release_deferred', detail: `test-lease 票券持續讀取失敗；保留租約供身分回收（${error.message}）` });",
+    "to": "      // Mutant: silently defer.",
+    "expect": "mutex persistent test lease release preserves passed run and records deferred diagnosis"
+  },
+  {
+    "script": "verify-ai-cli_kernel-process-mutex.mjs",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "name": "kernel mutex：持續讀取錯誤延後名額釋放卻不記錄",
+    "from": "    recordSlotReleaseFailed(runId, `${SLOT_RELEASE_DEFERRED_NOTE}（${error.message}）`);",
+    "to": "    if (!(error instanceof ProcessMutexReadError)) recordSlotReleaseFailed(runId, `${SLOT_RELEASE_DEFERRED_NOTE}（${error.message}）`);",
+    "expect": "mutex persistent slot release preserves terminal run and records slot failure"
+  },
+  {
+    "script": "verify-ai-cli_kernel-process-mutex.mjs",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "name": "kernel mutex：loop 成功檢查後不釋放租約",
+    "from": "if (safeToRelease) try { await lease?.release(); }",
+    "to": "if (false) try { await lease?.release(); }",
+    "expect": "mutex production loop preserves successful check when release ticket stays unreadable"
+  },
+  {
+    "name": "jobobj-fix8: terminate before READY reason",
+    "file": "src/core/job-runner.ts",
+    "from": "fail(`Containment READY failed; worker was not started: ${(error as Error).message}`);if(spec.meta.containment)await new WinJobClient().terminate(spec.meta.containment).catch(()=>undefined);",
+    "to": "if(spec.meta.containment)await new WinJobClient().terminate(spec.meta.containment).catch(()=>undefined);fail(`Containment READY failed; worker was not started: ${(error as Error).message}`);",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 assigned runner persists reason before self termination"
+  },
+  {
+    "name": "jobobj-fix8: outer failure reason omitted",
+    "file": "src/core/job-runner.ts",
+    "from": "recordRunnerFailure(directory, `Runner failed: ${(error as Error).message}`);",
+    "to": "/* lost original outer cause */",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 outer runner failure persists reason before terminate"
+  },
+  {
+    "name": "jobobj-fix8: register transport retry omitted",
+    "file": "src/core/win-job-client.ts",
+    "from": "!(error instanceof ContainmentTransportError) || attempt >= 2",
+    "to": "true || !(error instanceof ContainmentTransportError) || attempt >= 2",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 register transient bridge failure retries and completes"
+  },
+  {
+    "name": "jobobj-fix8: register replay request identity changes",
+    "file": "src/core/win-job-client.ts",
+    "from": "bridgeCall(this.config, request, deadline) as ContainmentRef",
+    "to": "bridgeCall(this.config, { ...request, requestId: randomUUID() }, deadline) as ContainmentRef",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 register lost reply replays assigned runner without duplicate assignment"
+  },
+  {
+    "name": "jobobj-fix8: register retries explicit rejection",
+    "file": "src/core/win-job-client.ts",
+    "from": "!(error instanceof ContainmentTransportError) || attempt >= 2",
+    "to": "false || attempt >= 2",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 broker rejection and READY mismatch are never retried"
+  },
+  {
+    "name": "jobobj-fix8: register exceeds retry count",
+    "file": "src/core/win-job-client.ts",
+    "from": "!(error instanceof ContainmentTransportError) || attempt >= 2",
+    "to": "!(error instanceof ContainmentTransportError) || attempt >= 3",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 register exhaustion records original reason before terminate"
+  },
+  {
+    "name": "jobobj-fix8: transient error loses classification",
+    "file": "src/core/win-job-broker.ts",
+    "from": "throw new ContainmentTransportError(message);",
+    "to": "throw new Error(message);",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 transport tags retry while validation and policy errors stay permanent"
+  },
+  {
+    "name": "jobobj-fix8: pipe busy is single shot",
+    "file": "src/core/win-job-native.ts",
+    "from": "if((error!=231 && error!=2) || attempt>=199 || clock.ElapsedMilliseconds>=5000)",
+    "to": "if((error!=232 && error!=2) || attempt>=199 || clock.ElapsedMilliseconds>=5000)",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 pipe busy retries before write and stays bounded"
+  },
+  {
+    "name": "jobobj-fix8: pipe permission denial retries",
+    "file": "src/core/win-job-native.ts",
+    "from": "if((error!=231 && error!=2) || attempt>=199 || clock.ElapsedMilliseconds>=5000)",
+    "to": "if((error!=231 && error!=2 && error!=5) || attempt>=199 || clock.ElapsedMilliseconds>=5000)",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 pipe busy retries before write and stays bounded"
+  },
+  {
+    "name": "jobobj-fix8: atomic rename retry omitted",
+    "file": "src/core/job-store.ts",
+    "from": "|| attempt >= 7 || remaining <= 0",
+    "to": "|| attempt >= 0 || remaining <= 0",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 atomic rename retries transient errors and preserves destination on exhaustion"
+  },
+  {
+    "name": "jobobj-fix8: atomic rename retries permanent error",
+    "file": "src/core/job-store.ts",
+    "from": "!['EPERM', 'EBUSY', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '') || attempt >= 7",
+    "to": "false || attempt >= 7",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 atomic rename retries transient errors and preserves destination on exhaustion"
+  },
+  {
+    "name": "jobobj-fix8: reader ignores independent failure",
+    "file": "src/core/job-store.ts",
+    "from": "if (failure?.exitCode === 1 && failure.killed === false",
+    "to": "if (failure?.exitCode === 2 && failure.killed === false",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 failure record overrides old broker killed result without drained proof"
+  },
+  {
+    "name": "jobobj-fix8: broker ignores runner failure",
+    "file": "src/core/win-job-native.ts",
+    "from": "string failureFile=Path.Combine(directory,\"runner-error.json\");",
+    "to": "string failureFile=Path.Combine(directory,\"ignored-runner-error.json\");",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 failed exit rename preserves original reason through broker publication"
+  },
+  {
+    "name": "jobobj-fix8: failure evidence drops job directory",
+    "file": "tests/helpers/durable-failure-evidence.mjs",
+    "from": "copy(dir, join(target, label));",
+    "to": "/* job evidence omitted */",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 durable evidence preserves result and files before cleanup"
+  },
+  {
+    "name": "jobobj-fix8: launcher terminates before reason",
+    "file": "src/core/job-store.ts",
+    "from": "recordJobFailure(directory, message);\n      if (containment) await new WinJobClient().terminate(containment).catch(() => undefined);",
+    "to": "if (containment) await new WinJobClient().terminate(containment).catch(() => undefined);\n      recordJobFailure(directory, message);",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 launcher and pre-launch failure persist cause before terminate"
+  },
+  {
+    "name": "jobobj-fix8: pre-launch original cause omitted",
+    "file": "src/core/job-store.ts",
+    "from": "recordJobFailure(directory, `Job startup failed: ${(error as Error).message}`);",
+    "to": "/* pre-launch reason lost */",
+    "script": "verify-jobobj-fix8.mjs",
+    "expect": "FIX8 launcher and pre-launch failure persist cause before terminate"
+  },
+  {
+    "name": "jobobj-fix9: failure publication is non atomic",
+    "file": "src/core/job-store.ts",
+    "from": "atomicJson(join(directory, 'runner-error.json'), result);",
+    "to": "writeFileSync(join(directory, 'runner-error.json'), JSON.stringify(result));",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 diagnostic publication is atomic bounded and retains first reason"
+  },
+  {
+    "name": "jobobj-fix9: failure message bound relaxed",
+    "file": "src/core/job-store.ts",
+    "from": "message = message.slice(0, 4096);",
+    "to": "message = message.slice(0, 8192);",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 diagnostic publication is atomic bounded and retains first reason"
+  },
+  {
+    "name": "jobobj-fix9: reader accepts excessive diagnostic",
+    "file": "src/core/job-store.ts",
+    "from": "failure.error.length <= 4096",
+    "to": "failure.error.length <= 8192",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 diagnostic publication is atomic bounded and retains first reason"
+  },
+  {
+    "name": "jobobj-fix9: invalid diagnostic blocks drained",
+    "file": "src/core/win-job-native.ts",
+    "from": "catch(Exception e) {\n      failure=null;\n      // Diagnostic availability",
+    "to": "catch(Exception e) {\n      if(e!=null)throw;\n      failure=null;\n      // Diagnostic availability",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 invalid diagnostic never blocks drained or broker idle exit"
+  },
+  {
+    "name": "jobobj-fix9: register total deadline extended",
+    "file": "src/core/win-job-client.ts",
+    "from": "const deadline = performance.now() + 50000;",
+    "to": "const deadline = performance.now() + 100000;",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 register shares one total deadline across attempts"
+  },
+  {
+    "name": "jobobj-fix9: register helper gets fresh deadline",
+    "file": "src/core/win-job-client.ts",
+    "from": "bridgeCall(this.config, request, deadline) as ContainmentRef",
+    "to": "bridgeCall(this.config, request) as ContainmentRef",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 register shares one total deadline across attempts"
+  },
+  {
+    "name": "jobobj-fix9: host ignores caller deadline",
+    "file": "src/core/win-job-host.ts",
+    "from": "},remainingTime(deadline,Math.max(1,Math.min(45000,timeoutMs))+5000));",
+    "to": "},remainingTime(undefined,Math.max(1,Math.min(45000,timeoutMs))+5000));",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 host total deadline settles without close and stops retained handle"
+  },
+  {
+    "name": "jobobj-fix9: policy failure becomes transient",
+    "file": "src/core/win-job-broker.ts",
+    "from": "if (!permanent && (detail.includes",
+    "to": "if (true && (detail.includes",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 recognizable policy errors without error txt are permanent"
+  },
+  {
+    "name": "jobobj-fix9: outer unknown is omitted",
+    "file": "src/core/job-runner.ts",
+    "from": "atomicJson(join(directory,'containment-status.json'),{state:'unknown',reason:'outer runner failure termination unconfirmed'});",
+    "to": "void 0;",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 outer failure preserves containment unknown and fail logs once"
+  },
+  {
+    "name": "jobobj-fix9: failure logged twice",
+    "file": "src/core/job-runner.ts",
+    "from": "    recordRunnerFailure(directory, message);",
+    "to": "    recordRunnerFailure(directory, message); recordRunnerFailure(directory, message);",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 outer failure preserves containment unknown and fail logs once"
+  },
+  {
+    "name": "jobobj-fix9: caller identity removed from replay key",
+    "file": "src/core/win-job-native.ts",
+    "from": "string replayKey=caller.pid+\"|\"+caller.started+\"|\"+op+\"|\"+request;",
+    "to": "string replayKey=op+\"|\"+request;",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 real broker denies different caller replay and invalid capability"
+  },
+  {
+    "name": "jobobj-fix9: mutation failure evidence enabled",
+    "file": "tests/helpers/durable-failure-evidence.mjs",
+    "from": "if (process.env.AI_CLI_MUTATION_TEST === '1') return;",
+    "to": "if (process.env.AI_CLI_MUTATION_TEST === 'disabled') return;",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 evidence is bounded namespace scoped and disabled during mutations"
+  },
+  {
+    "name": "jobobj-fix9: evidence count exceeds cap",
+    "file": "tests/helpers/durable-failure-evidence.mjs",
+    "from": "while(remaining>=20 || existingBytes>28*1024*1024)",
+    "to": "while(remaining>=21 || existingBytes>28*1024*1024)",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 evidence is bounded namespace scoped and disabled during mutations"
+  },
+  {
+    "name": "jobobj-fix9: evidence artifact exceeds byte cap",
+    "file": "tests/helpers/durable-failure-evidence.mjs",
+    "from": "Math.min(4*1024*1024,32*1024*1024-existingBytes)",
+    "to": "Math.min(20*1024*1024,32*1024*1024-existingBytes)",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 evidence is bounded namespace scoped and disabled during mutations"
+  },
+  {
+    "name": "jobobj-fix9: evidence ignores namespace",
+    "file": "tests/helpers/durable-failure-evidence.mjs",
+    "from": "if(!fs.readFileSync(source,'utf8').includes(config.name))return;",
+    "to": "if(false)return;",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 evidence is bounded namespace scoped and disabled during mutations"
+  },
+  {
+    "name": "jobobj-fix9: evidence ignores test start",
+    "file": "tests/helpers/durable-failure-evidence.mjs",
+    "from": "info.mtimeMs<TEST_STARTED",
+    "to": "false",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 evidence is bounded namespace scoped and disabled during mutations"
+  },
+  {
+    "name": "jobobj-fix9: evidence global byte cap omitted",
+    "file": "tests/helpers/durable-failure-evidence.mjs",
+    "from": "existingBytes>28*1024*1024",
+    "to": "false",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 evidence is bounded namespace scoped and disabled during mutations"
+  },
+  {
+    "name": "jobobj-fix9: prepare cause omitted before cleanup",
+    "file": "src/core/win-job-client.ts",
+    "from": "if(directory)recordJobFailure(directory,`Containment prepare failed: ${(error as Error).message}`);",
+    "to": "/* original prepare cause lost */",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 prepare lost reply and mismatch persist cause before native termination"
+  },
+  {
+    "name": "jobobj-fix9: prepare outside startup catch",
+    "file": "src/core/job-store.ts",
+    "from": "    let containment: ContainmentRef | undefined;\n    try {\n    containment = process.platform === 'win32' ? await new WinJobClient().prepare(jobId, directory) : undefined;",
+    "to": "    const containment = process.platform === 'win32' ? await new WinJobClient().prepare(jobId, directory) : undefined;\n    try {",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 prepare unavailable broker still persists startup cause"
+  },
+  {
+    "name": "jobobj-fix9: evidence capture lock is not exclusive",
+    "file": "tests/helpers/durable-failure-evidence.mjs",
+    "from": "lock=fs.openSync(lockPath,'wx');",
+    "to": "lock=fs.openSync(lockPath,'w');",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 evidence is bounded namespace scoped and disabled during mutations"
+  },
+  {
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix10.mjs",
+    "name": "jobobj-fix10: Persist retry omitted",
+    "from": "(error!=5 && error!=32 && error!=33) || attempt>=31 || remaining<=0",
+    "to": "(error!=5 && error!=32 && error!=33) || attempt>=1 || remaining<=0",
+    "expect": "FIX10 ordinary reader during register recovers and job completes"
+  },
+  {
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix10.mjs",
+    "name": "jobobj-fix10: Persist retries only sharing violation",
+    "from": "(error!=5 && error!=32 && error!=33)",
+    "to": "(error!=32)",
+    "expect": "FIX10 ordinary reader during register recovers and job completes"
+  },
+  {
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix10.mjs",
+    "name": "jobobj-fix10: Persist retry bounds relaxed",
+    "from": "long remaining=750-clock.ElapsedMilliseconds;\n      if(background || (error!=5 && error!=32 && error!=33) || attempt>=31 || remaining<=0)",
+    "to": "long remaining=75000-clock.ElapsedMilliseconds;\n      if(background || (error!=5 && error!=32 && error!=33) || attempt>=3100 || remaining<=0)",
+    "expect": "FIX10 exhausted reader preserves Win32 cause next job and idle exit"
+  },
+  {
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix10.mjs",
+    "name": "jobobj-fix10: Persist Win32 code omitted",
+    "from": "\"durable registry replace: win32=\"+error+\" after \"+attempt+\" attempt(s)\"",
+    "to": "\"durable registry replace after \"+attempt+\" attempt(s)\"",
+    "expect": "FIX10 exhausted reader preserves Win32 cause next job and idle exit"
+  },
+  {
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix10.mjs",
+    "name": "jobobj-fix10: pre Assign rollback omitted",
+    "from": "CloseHandle(job); runner.Dispose(); j.handle=IntPtr.Zero; j.runner=null;\n        j.record[\"phase\"]=\"preparing\"; j.record.Remove(\"runnerPid\"); j.record.Remove(\"runnerStarted\");",
+    "to": "/* rollback omitted */",
+    "expect": "FIX10 pre Assign Save rollback permits identical request replay once"
+  },
+  {
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "name": "jobobj-fix10: exit Persist skips retry",
+    "from": "long remaining=750-clock.ElapsedMilliseconds;",
+    "to": "long remaining=Path.GetFileName(path)==\"exit.json\"?0:750-clock.ElapsedMilliseconds;",
+    "expect": "FIX11 exit temp reader retries and Error retains Win32 code"
+  },
+  {
+    "name": "jobobj-fix11: background retries full budget",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "if(background || (error!=5",
+    "to": "if((error!=5",
+    "expect": "FIX11 background single attempt foreground backoff and temp cleanup"
+  },
+  {
+    "name": "jobobj-fix11: idle uses foreground write",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "Status(pending,true)",
+    "to": "Status(pending)",
+    "expect": "FIX12 idle reader yields Gate and serves accepted hello under 400ms"
+  },
+  {
+    "name": "jobobj-fix11: fixed backoff delays",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "attempt==1?1:attempt==2?2:attempt==3?5:attempt==4?10:25",
+    "to": "25",
+    "expect": "FIX11 background single attempt foreground backoff and temp cleanup"
+  },
+  {
+    "name": "jobobj-fix11: failed Persist temp retained",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "finally { try { File.Delete(temp); } catch {} }",
+    "to": "finally { /* temp leaked */ }",
+    "expect": "FIX11 background single attempt foreground backoff and temp cleanup"
+  },
+  {
+    "name": "jobobj-fix11: preparing auto drain omitted",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "if(phase==\"preparing\" && j.handle==IntPtr.Zero && S(j.record,\"termination\")!=\"\")",
+    "to": "if(false)",
+    "expect": "FIX11 rolled back runner self heals after reader spans register and terminate"
+  },
+  {
+    "name": "jobobj-fix11: memory termination admission reopened",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "if(register) Require(S(j.record,\"termination\")==\"\",\"runner admission closed by termination\");",
+    "to": "/* admission reopened */",
+    "expect": "FIX11 rolled back runner self heals after reader spans register and terminate"
+  },
+  {
+    "name": "jobobj-fix11: exit replaces winner",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix10.mjs",
+    "from": "createOnly?8u:9u",
+    "to": "9u",
+    "expect": "FIX10 exit publication preserves competing natural result"
+  },
+  {
+    "name": "jobobj-fix11: exit existing winner rejected",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix10.mjs",
+    "from": "if(createOnly && (error==183 || error==80)) return false;",
+    "to": "/* winner rejected */",
+    "expect": "FIX10 exit publication preserves competing natural result"
+  },
+  {
+    "name": "jobobj-fix11: native error code omitted",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "message+\": win32=\"+error",
+    "to": "message",
+    "expect": "FIX11 exit temp reader retries and Error retains Win32 code"
+  },
+  {
+    "name": "jobobj-fix11: pipe connect budget one second",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "clock.ElapsedMilliseconds>=5000",
+    "to": "clock.ElapsedMilliseconds>=1000",
+    "expect": "FIX11 real pipe busy and missing retry beyond one second before write"
+  },
+  {
+    "name": "jobobj-fix11: missing pipe is permanent",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "(error!=231 && error!=2)",
+    "to": "(error!=231)",
+    "expect": "FIX11 real pipe busy and missing retry beyond one second before write"
+  },
+  {
+    "name": "jobobj-fix11: journal ticket rename retry omitted",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "retryJournalIO(()=>renameSync(tmp,path),totalUntil)",
+    "to": "renameSync(tmp,path)",
+    "expect": "FIX11 journal ticket overwrite retries real reader"
+  },
+  {
+    "name": "jobobj-fix11: journal ticket read retry omitted",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "retryJournalIO(()=>readFileSync(file,'utf8'),totalUntil)",
+    "to": "readFileSync(file,'utf8')",
+    "expect": "FIX11 journal ticket read retries real exclusive handle"
+  },
+  {
+    "name": "jobobj-fix11: journal lease rename retry omitted",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "retryJournalIO(()=>renameSync(temp, path))",
+    "to": "renameSync(temp, path)",
+    "expect": "FIX11 journal atomicWrite retries real reader and preserves old lease on exhaustion"
+  },
+  {
+    "name": "jobobj-fix11: journal short retry bound relaxed",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "performance.now()+250",
+    "to": "performance.now()+2500",
+    "expect": "FIX11 journal atomicWrite retries real reader and preserves old lease on exhaustion"
+  },
+  {
+    "name": "jobobj-fix11: journal ignores total deadline",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "Math.min(until-performance.now(),totalUntil-Date.now())",
+    "to": "until-performance.now()",
+    "expect": "FIX11 journal retry total deadline and error classes stay bounded"
+  },
+  {
+    "name": "jobobj-fix11: journal retries permanent errors",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "!['EPERM','EACCES','EBUSY'].includes(code??'')",
+    "to": "false",
+    "expect": "FIX11 journal retry total deadline and error classes stay bounded"
+  },
+  {
+    "name": "jobobj-fix11: idle ignores accepted request",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "expect": "FIX12 idle reader yields Gate and serves accepted hello under 400ms",
+    "from": "if(accepting.IsCompleted) break;",
+    "to": "/* accepted request ignored */"
+  },
+  {
+    "name": "jobobj-fix12: ticket IO escapes classification",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "throw journalUnavailable(error);}",
+    "to": "throw error;}",
+    "expect": "FIX12 real ticket exhaustion reconciles without killing worker"
+  },
+  {
+    "name": "jobobj-fix12: atomic write IO escapes classification",
+    "file": "src/ai-cli_kernel/journal.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "throw journalUnavailable(error);\n  }",
+    "to": "throw error;\n  }",
+    "expect": "FIX12 real lease exhaustion reconciles without killing worker"
+  },
+  {
+    "name": "jobobj-fix12: mkdir outside journal boundary",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "  try {\n    mkdirSync(tickets,{recursive:true});",
+    "to": "  mkdirSync(tickets,{recursive:true});\n  try {",
+    "expect": "FIX12 filesystem boundaries retain cause and existing journal error identity"
+  },
+  {
+    "name": "jobobj-fix12: original journal error replaced",
+    "file": "src/ai-cli_kernel/journal-lock.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "return error instanceof JournalUnavailableError ? error : new JournalUnavailableError",
+    "to": "return new JournalUnavailableError",
+    "expect": "FIX12 filesystem boundaries retain cause and existing journal error identity"
+  },
+  {
+    "name": "jobobj-fix12: lease inner catch kills check",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "if (!(error instanceof JournalUnavailableError && recorded)) safeToRelease = await handle.kill().catch(() => false);",
+    "to": "safeToRelease = await handle.kill().catch(() => false);",
+    "expect": "FIX12 lease identified lease write failure has safe disposition"
+  },
+  {
+    "name": "jobobj-fix12: lease outer catch kills check",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "if (!(error instanceof JournalUnavailableError && recorded) && handle && !safeToRelease)",
+    "to": "if (handle && !safeToRelease)",
+    "expect": "FIX12 lease identified lease write failure has safe disposition"
+  },
+  {
+    "name": "jobobj-fix12: idle exits with accepted client",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "if(!accepting.IsCompleted && Requests==0 && drained",
+    "to": "if(Requests==0 && drained",
+    "expect": "FIX12 idle exit preserves an accepted unserved client"
+  },
+  {
+    "name": "jobobj-fix12: missing pipe ignores server death",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "if(server!=null && server.Exited) throw new IOException(\"containment-transport: broker exited during pipe-connect\");",
+    "to": "/* dead server ignored */",
+    "expect": "FIX12 missing pipe notices original server death promptly"
+  },
+  {
+    "name": "jobobj-fix12: preserved exit logs synthetic termination",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix10.mjs",
+    "from": "    if(Persist(file,new {exitCode=143,signal=(string)null,endTime=S(proof,\"at\"),killed=termination==\"kill\",timedOut=termination==\"timeout\"},true,background))\n      File.AppendAllText(Path.Combine(directory,\"stderr.log\"),termination==\"kill\"?\"\\nProcess terminated by user\\n\":termination==\"timeout\"?\"\\nProcess timed out\\n\":\"\\nProcess stopped by system reboot\\n\");",
+    "to": "    Persist(file,new {exitCode=143,signal=(string)null,endTime=S(proof,\"at\"),killed=termination==\"kill\",timedOut=termination==\"timeout\"},true,background);\n      File.AppendAllText(Path.Combine(directory,\"stderr.log\"),termination==\"kill\"?\"\\nProcess terminated by user\\n\":termination==\"timeout\"?\"\\nProcess timed out\\n\":\"\\nProcess stopped by system reboot\\n\");",
+    "expect": "FIX10 exit publication preserves competing natural result"
+  },
+  {
+    "name": "jobobj-fix12: failed runner identity leaks",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "catch { runner.Dispose(); throw; }",
+    "to": "catch { throw; }",
+    "expect": "FIX12 terminated register rejects cached READY and disposes failed identity"
+  },
+  {
+    "name": "jobobj-fix12: cached READY bypasses termination",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "    if(register) Require(S(j.record,\"termination\")==\"\",\"runner admission closed by termination\");\n    object cached; if(j.replies.TryGetValue(replayKey,out cached)) return cached;",
+    "to": "    object cached; if(j.replies.TryGetValue(replayKey,out cached)) return cached;\n    if(register) Require(S(j.record,\"termination\")==\"\",\"runner admission closed by termination\");",
+    "expect": "FIX12 terminated register rejects cached READY and disposes failed identity"
+  },
+  {
+    "name": "jobobj-fix12: idle drain removed only",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix11.mjs",
+    "from": "Status(pending,true);",
+    "to": "/* idle drain removed */;",
+    "expect": "FIX11 rolled back runner self heals after reader spans register and terminate"
+  },
+  {
+    "name": "jobobj-fix12: terminate drain removed only",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "      result=Status(j);\n    } else throw",
+    "to": "      result=new {state=\"preparing\"};\n    } else throw",
+    "expect": "FIX12 terminate itself publishes drained before reply"
+  },
+  {
+    "name": "jobobj-fix12: Gate held across background jobs",
+    "file": "src/core/win-job-native.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "          foreach(var gen in generations) {\n            if(accepting.IsCompleted) break; // Serve an accepted request before more background I/O.\n            lock(Gate) {\n              Job pending;\n              if(Jobs.TryGetValue(gen,out pending)) {\n                try { if(S(pending.record,\"phase\")!=\"drained\") Status(pending,true); if(S(pending.record,\"phase\")==\"drained\") Jobs.Remove(gen); }\n                catch { /* Retain hold; a background write has no retry sleep. */ }\n              }\n            }\n            Thread.Yield(); // No registry I/O for another job under this hold.\n          }\n",
+    "to": "          lock(Gate) { foreach(var gen in generations) {\n            if(accepting.IsCompleted) break; // Serve an accepted request before more background I/O.\n            {\n              Job pending;\n              if(Jobs.TryGetValue(gen,out pending)) {\n                try { if(S(pending.record,\"phase\")!=\"drained\") Status(pending,true); if(S(pending.record,\"phase\")==\"drained\") Jobs.Remove(gen); }\n                catch { /* Retain hold; a background write has no retry sleep. */ }\n              }\n            }\n            Thread.Yield(); // No registry I/O for another job under this hold.\n          }\n          }\n",
+    "expect": "FIX12 idle reader yields Gate and serves accepted hello under 400ms"
+  },
+  {
+    "name": "jobobj-fix12b: context unrecorded command kept",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "    let safeToRelease = true, recorded = false;",
+    "to": "    let safeToRelease = true, recorded = kind === 'context';",
+    "expect": "FIX12B context first journal has safe disposition"
+  },
+  {
+    "name": "jobobj-fix12b: setup unrecorded command kept",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "    let safeToRelease = true, recorded = false;",
+    "to": "    let safeToRelease = true, recorded = kind === 'setup';",
+    "expect": "FIX12B setup first journal has safe disposition"
+  },
+  {
+    "name": "jobobj-fix12b: test unrecorded command kept",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "    let safeToRelease = true, recorded = false;",
+    "to": "    let safeToRelease = true, recorded = kind === 'test';",
+    "expect": "FIX12B test first journal has safe disposition"
+  },
+  {
+    "name": "jobobj-fix12b: recorded command killed after second journal failure",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "      recorded = true; // First check_started is durable and begin returned; recovery can find this command.",
+    "to": "      recorded = false; // tracking ignored",
+    "expect": "FIX12B test second journal has safe disposition"
+  },
+  {
+    "name": "jobobj-fix12b: recorded before begin returns",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "      handle.begin?.();\n      recorded = true; // First check_started is durable and begin returned; recovery can find this command.",
+    "to": "      recorded = true;\n      handle.begin?.();",
+    "expect": "FIX12B context begin has safe disposition"
+  },
+  {
+    "name": "jobobj-fix12c: inner kill rejection replaces original",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "if (!(error instanceof JournalUnavailableError && recorded)) safeToRelease = await handle.kill().catch(() => false);",
+    "to": "if (!(error instanceof JournalUnavailableError && recorded)) safeToRelease = await handle.kill();",
+    "expect": "FIX12C test first journal kill throws"
+  },
+  {
+    "name": "jobobj-fix12c: release failure replaces original",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "if (!checkFailed) throw releaseError;",
+    "to": "throw releaseError;",
+    "expect": "FIX12C test release remove preserves original"
+  },
+  {
+    "name": "jobobj-fix12c: ignore kill result releases lease",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "if (!(error instanceof JournalUnavailableError && recorded)) safeToRelease = await handle.kill().catch(() => false);",
+    "to": "if (!(error instanceof JournalUnavailableError && recorded)) { await handle.kill().catch(() => false); safeToRelease = true; }",
+    "expect": "FIX12C test first journal kill false"
+  },
+  {
+    "name": "jobobj-fix12c: outer catch skips unrecorded retry",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "if (!(error instanceof JournalUnavailableError && recorded) && handle && !safeToRelease)",
+    "to": "if (!(error instanceof JournalUnavailableError) && handle && !safeToRelease)",
+    "expect": "FIX12C test first journal kill false"
+  },
+  {
+    "name": "jobobj-fix12c: release failure without original swallowed",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "if (!checkFailed) throw releaseError;",
+    "to": "/* swallowed release failure */",
+    "expect": "FIX12C release remove without original propagates"
+  },
+  {
+    "name": "jobobj-fix12c: secondary release annotation omitted",
+    "file": "src/ai-cli_kernel/loop.ts",
+    "script": "verify-jobobj-fix12.mjs",
+    "from": "console.error('test lease release failed while preserving original check error:', releaseError);",
+    "to": "/* secondary release diagnostic lost */",
+    "expect": "FIX12C test release read preserves original"
+  },
+  {
+    "name": "fix13: full retention skips latest",
+    "file": "tests/helpers/durable-failure-evidence.mjs",
+    "from": "const victim=oldest.shift();",
+    "to": "return; const victim=oldest.shift();",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 evidence is bounded namespace scoped and disabled during mutations"
+  },
+  {
+    "name": "fix13: retention evicts newest",
+    "file": "tests/helpers/durable-failure-evidence.mjs",
+    "from": "a.mtime-b.mtime||a.path.localeCompare(b.path)",
+    "to": "b.mtime-a.mtime||a.path.localeCompare(b.path)",
+    "script": "verify-jobobj-fix9.mjs",
+    "expect": "FIX9 evidence is bounded namespace scoped and disabled during mutations"
+  },
+  {
+    "name": "fix13: running recovery worker ignores release gate",
+    "file": "tools/stubs/durable-agent.mjs",
+    "from": "if (spec.releaseFile) {",
+    "to": "if (false) {",
+    "script": "verify-durable-jobs.mjs",
+    "expect": "MCP restart recovers running job without redispatch"
+  },
+  {
+    "name": "fix13: running recovery releases before restart",
+    "file": "tests/verify-durable-jobs.mjs",
+    "from": "await c.stop(); c = client(state, false, Number(process.env.DURABLE_RESTART_PAUSE_MS || 0));",
+    "to": "writeFileSync(releaseFile, 'too early'); await c.stop(); c = client(state, false, Number(process.env.DURABLE_RESTART_PAUSE_MS || 0));",
+    "script": "verify-durable-jobs.mjs",
+    "expect": "MCP restart recovers running job without redispatch"
   }
 ]

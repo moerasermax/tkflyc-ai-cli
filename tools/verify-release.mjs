@@ -33,17 +33,17 @@ function check(ok, name, detail = '') {
   results.push(ok);
   console.log(`  ${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
 }
-const git = (...args) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' }).trim();
+const git = (...args) => execFileSync('git', args, { cwd: ROOT, windowsHide: true, encoding: 'utf8' }).trim();
 
 // npm 底下跑時用同一支 npm（npm_execpath），單獨執行時退回 PATH 上的 npm。
 function npm(args) {
   const viaNpm = process.env.npm_execpath;
   const r = viaNpm
-    ? spawnSync(process.execPath, [viaNpm, ...args], { cwd: ROOT, encoding: 'utf8' })
+    ? spawnSync(process.execPath, [viaNpm, ...args], { cwd: ROOT, windowsHide: true, encoding: 'utf8' })
     // Windows 的 npm 是 .cmd，要經過 shell；參數都是本檔寫死的字串，組成單一命令即可（避開 DEP0190）。
     : process.platform === 'win32'
-      ? spawnSync(`npm ${args.join(' ')}`, { cwd: ROOT, encoding: 'utf8', shell: true })
-      : spawnSync('npm', args, { cwd: ROOT, encoding: 'utf8' });
+      ? spawnSync(`npm ${args.join(' ')}`, { cwd: ROOT, windowsHide: true, encoding: 'utf8', shell: true })
+      : spawnSync('npm', args, { cwd: ROOT, windowsHide: true, encoding: 'utf8' });
   return r;
 }
 

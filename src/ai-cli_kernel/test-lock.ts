@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { ProcessIdentity } from '../core/live-jobs.js';
 import { mayBeAlive } from '../core/job-store.js';
 import { atomicWrite, kernelStateDir, RunStore, kernelRunDir } from './journal.js';
-import { identityAlive, processIdentity, withProcessMutex, ProcessMutexBusy, retryProcessMutex, type MutexRetryDeps } from './process-mutex.js';
+import { identityAlive, processIdentity, withProcessMutex, ProcessMutexBusy, ProcessMutexReadError, retryProcessMutex, type MutexRetryDeps } from './process-mutex.js';
 
 interface TestLease { runId: string; token: string; owner: ProcessIdentity; command?: ProcessIdentity }
 const path = () => join(kernelStateDir(), 'test.lock');
@@ -25,10 +25,14 @@ export interface TestLockDeps extends MutexRetryDeps {
 async function releaseLease(store: RunStore, work: () => void | Promise<void>, deps: Partial<MutexRetryDeps>): Promise<void> {
   try { await retryProcessMutex('test-lease', work, deps); }
   catch (error) {
-    if (!(error instanceof ProcessMutexBusy)) throw error;
+    if (!(error instanceof ProcessMutexBusy) && !(error instanceof ProcessMutexReadError)) throw error;
     // Release is called only after stop confirmation. The lease command identity
     // belongs to the ended test command, so another run can prove death and reclaim
     // it. Contention in finally must not turn a passing test into kernel_error.
+    if (error instanceof ProcessMutexReadError) {
+      store.append({ type: 'test_lock_release_deferred', detail: `test-lease 票券持續讀取失敗；保留租約供身分回收（${error.message}）` });
+      return;
+    }
     store.append({ type: 'test_lock_release_deferred', detail: 'test-lease 協調忙碌；釋放重試耗盡，保留租約供身分回收' });
   }
 }

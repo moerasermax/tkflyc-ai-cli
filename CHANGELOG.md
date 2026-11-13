@@ -1,5 +1,10 @@
 # 變更紀錄（Changelog）
 
+## FIX7：Windows containment helper 等待與測試替身
+
+- bootstrap 與 GUI host 的呼叫端逾時直接回 containment unknown，不再依賴 helper 的 close 事件；只使用原 ChildProcess handle 停止自己啟動的程序。
+- strict metadata／啟動 warning 測試明確替換 containment 邊界，保留真正的 JobStore 啟動流程與 launcher 攔截，沒有執行 vendor CLI。
+
 本檔記錄所有對使用者/協作者可見的改動。格式參考
 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循
 [語意化版本](https://semver.org/lang/zh-TW/)。每筆結尾以括號標註作者。
@@ -7,6 +12,33 @@
 維護規則見 [CONTRIBUTING.md](./CONTRIBUTING.md)：**每次改動都要在此補一行。**
 
 ## [Unreleased]
+### 修正（P0 FIX8＋FIX9）
+
+- FIX13：durable restart 驗收改用測試完成閘門，避免機器負載吃掉固定 8 秒餘裕；失敗證據滿額時淘汰最舊擷取，保留最新一次並維持數量／容量上限。（@moerasermax）
+- FIX12c：停止或釋放測試租約時的次要錯誤不再蓋掉原始失敗；補上未確認停止的跨平台回歸與突變。
+- FIX12b：journal 不可用時只保留已記錄且已 begin 的檢查；未追蹤的 context／setup／test 仍先確認停止再釋放 lease，避免 context 成為無人追蹤的程序與未啟動指令留下 PID-only 租約。（@moerasermax）
+- FIX12：journal／lease 寫入失敗保留原始 cause，改為保留 worker、檢查程序及名額待對帳，避免把讀者鎖或磁碟故障當成程式錯誤誤殺；broker 保留已接收請求、連線等候辨識原 server 退出，且只為自己發布的 exit 記錄終止原因。以實際鎖檔及 pipe 行為測試鎖住背景讓出與兩次 terminate 後的 idle 自癒。（@moerasermax）
+- FIX11：背景 drain 改為逐 job 單次落盤並補回 admission 關閉後的自癒，避免讀者鎖拖住整個 broker；連線前重試涵蓋短暫忙碌／不存在，exit 採先寫者保留，journal ticket 與 lease 原子覆寫採短有界重試，避免輪詢造成永久 preparing 或單發失敗。（@moerasermax）
+- FIX10：broker durable 覆寫遇到一般讀者 handle 時，以 750ms／31 次有界重試處理 Win32 5／32／33，避免輪詢讀取造成 job 單發啟動失敗；保存錯誤碼，並回滾 Assign 前未落盤的狀態，失敗仍不放行。（@moerasermax）
+
+- 診斷失敗檔改為原子、有界寫入；無效診斷不阻擋 drained。register 共用 50 秒期限、已辨識政策錯誤不重試，outer runner 終止未確認時保存 containment unknown。測試證據限制數量、容量與 namespace，突變期間停用自動擷取。（@moerasermax）
+
+- Windows READY／runner 例外先保存原始原因再終止 containment；獨立錯誤檔可在 exit.json 改名失敗或舊 broker 回填 143 時保留真正失敗，不當成 drained 證據。（@moerasermax）
+- register 僅對明確傳輸錯誤重送同一 requestId／payload，最多三次；拒絕、權限與身分錯誤不重試。pipe busy 僅在尚未送出請求時最多等待一秒／32次；原子 JSON 改名僅對 EPERM／EBUSY／EACCES 重試，最多250ms／8次。（@moerasermax）
+- durable 測試失敗保留完整結果、job、containment 與無視窗 helper 診斷，新增回覆遺失、持續故障、改名與 pipe busy 注入測試及指定突變。（@moerasermax）
+
+### 其他修正
+
+- Windows containment 人工出口加查孤兒後代（只加嚴）；journal 慢查證不耗等待預算，暫時寫入受阻保留 action 並標示人工對帳，避免誤終止。
+
+- Job Object 第③④階段：broker 改按 generation 延遲恢復、有效 ACL 不重套，避免永久保留的 drained 歷史讓冷啟動逐年變慢。另保存原 epoch 身分，讓舊記錄在交接後仍可查證 broker 死亡。（Codex）
+- 修正 kernel cancel 的 kill.json 後援與真 ConPTY 終止驗證；直接 child 快速退出後仍完成最多三次 broker 重試，退避從呼叫結束起算，但自然退出後的晚到訊號不開啟新取消，避免誤標 killed。晚到 exit.json 可修正 cached lost，避免錯誤結果永久留存。QUERY_LIMITED 與 Medium pipe／mutex 標籤旨在減少同 SID 不同完整性控制端的非必要拒絕（跨完整性尚未實測），保留原授權與 fail-closed。（Codex）
+- 新增僅限互動 TTY 的 Windows 的 kernel cancel／cleanup `--confirm-containment-lost`：僅承認已證實 broker 死亡後的追蹤遺失，不宣稱程序已停。獨占 journal、重新診斷、隨機確認碼與 fsync 事件防止單一旗標繞過；cleanup 需重新確認，其他 blocker 不豁免，避免誤拆仍可能被寫入的 worktree。新增行為、ConPTY、失敗注入與定向突變。（Codex）
+- DLL／錯誤快取採七天回收與 publisher lock，保留 assembly／owner 清理錯誤，避免長期殘留及模糊的防毒載入失敗；手動一般權限矩陣、精確突變名稱與 SKIP 數明示未驗條件。（Codex）
+
+- Job Object FIX1：補開機證明、舊 job 警示相容、process ExecutionPolicy、受保護 DLL 快取／helper 重建；終止失聯改有限退避與直接 child 後援，prepare 例外清理、idle 升版交接與 proof 保留策略見技術手冊。
+
+- Windows durable job 改用共用 Job Object broker（READY 前指派、generation／epoch／capability、持久 drained 證明、已完成 job 清孤兒），停用 Windows 樹輪詢／taskkill；新增無主控台 native host、舊 server spec 升級與 broker 終止結果回填。失聯維持 unknown；人工例外見本節第③階段規則。kernel abandon 補查無 job 的全權限動作，正常完成待清空時保留 completion_pending；POSIX 全權限 tracked job 的歷史未知持續阻擋並逐筆驗身分。相關真機、回歸與定向突變證據見本輪交付報告。（Codex）
 
 - 新增正式 Claude Code plugin `ai-cli_kernel_panel` 0.1.0：`/kernel` 開 Terminal 新分頁、`/kernel side` 開 session 側邊面板，未知參數回用法；操作改讀 CLI actions JSON、確認時重查 commit 與操作內容，支援多 run 及完整失敗輸出，並將無 Claude CLI 的核心回歸納入 npm test。（@moerasermax）
 
@@ -25,6 +57,7 @@
 - B 段（#17～#22 整合議題）：kernel archive list（CLI／MCP）改回固定欄位摘要：goal 前 80 字、evidence 序號與候選記憶數量；完整包改由既有 archive show 讀取，避免 list 塞滿交接脈絡。新增 repo／workFolder 精確篩選，格式移轉見 `docs/ai-cli_kernel/base-archive.md`。develop start 新增 baseRef，委任書固定解析 commit、保留分支漂移閘門，並持久記錄交付分支依賴；尚有未結束的依賴 run 時拒絕 cleanup，避免清除其基準來源。省略 baseRef 維持原行為。
 
 ### 修正
+- kernel process mutex 讀取 ticket 遇到 EPERM／EACCES／EBUSY 時，每次掃描共用 80ms wall-clock 重試期限（I/O 與同步等待一併計入，並受整次 maxWaitMs 剩餘時間限制；無法截斷正在執行的 syscall／OS 排程）。整合 npm test 曾觀察到 ticket 開啟 EPERM，根因推定為 Windows delete-pending，與 Job Object P0 分開修正。短暫耗盡回附 cause、errno 與檔名的 ProcessMutexBusy；admission／釋放／runner claim／test-lock command 等 retryProcessMutex 呼叫端最多三次、間隔一秒，test-lock 等待逐輪重試，marker check 下次週期再試。相同 ticket／errno 再次耗盡距首次至少兩秒才升級為 ProcessMutexReadError（cause 保留原錯誤，帶 errno 與檔名；不按並行呼叫次數累積），避免永久權限問題被無限等待或默默略過；成功讀取／ENOENT 清除觀察。取得仍 fail-closed 上拋；釋放則記 test_lock_release_deferred／slot_release_failed，保留租約／名額供回收，不覆蓋 run 結果。Fable 唯讀稽核後補上期限、診斷、持續錯誤與測試清理。（Codex）
 - kernel dashboard 新分頁支援 Windows Terminal Store execution alias：以 PATH、lstat 與執行存取檢查定位，保持無 shell spawn 及既有退出碼；失敗時提供引用目前 Node／CLI 入口的 PowerShell 指令，正確處理空白及單引號。（@moerasermax）
 - kernel dashboard 的手動更新與輪詢同時完成時，只保留一個更新計時器，確保離開後完整清理。確認指令依 POSIX／PowerShell 引用參數，保護分支名中的 shell 展開字元；新分頁入口的相對路徑以啟動工作目錄解析。（@moerasermax）
 - G1（c646 交付後的獨立稽核）：kernel 釋放名額遇到 admission 協調忙碌時，有限重試（3 次、間隔 1 秒）後只記一筆新的 `slot_release_failed` journal 事件，不再丟出例外。原本 runner 把釋放放在 loop 的 try 裡，忙碌逾時會落進 catch 寫成 `failed／kernel_error`，replay 以最後一筆為準，已交付的 run 因此變成失敗、runner 以 exit 1 結束且名額檔留著。現在收尾抽到 `runner-settle.ts`：只有 loop 丟出的程式錯誤才寫 kernel_error，已是終止狀態的 run 不被改寫，runner 照常結束。殘留名額由之後的 admission 回收（指向已終止 run 的名額檔本來就會清掉，補上同 repo 回收的回歸檢查）。cancel 在 run 已寫成 cancelled 後釋放忙碌，仍回 cancelled，detail 附說明。releaseRunSlot 改走 retryProcessMutex 後，既有突變「kernel F1F3：釋放略過 admission 臨界區」的片段已不在原始碼，只更新它的 from／to 對應新寫法（名稱、expect、位置不變），實跑仍由原斷言抓到。
@@ -55,6 +88,28 @@
 - 安全修正（issue #24）：Codex strict 原本仍載入使用者 allow 規則，可繞過唯讀沙箱；而 Windows headless approval=never 且未啟用沙箱 backend 時，未命中 allow 的讀取也會被 policy 拒絕。現在所有平台的新開／續接都帶 `--ignore-rules`，Windows 另帶 `windows.sandbox='elevated'`，提示改為 OS 唯讀沙箱。strict 的工具事件若回報沙箱初始化失敗，結果保留 `agentOutput.sandbox_warning` 與原始錯誤摘要、持久化 job 判為 failed（保留 vendor exitCode，即使為 0），不退回無沙箱或提權；原始 `exec` 串流仍由呼叫端檢查工具輸出。探針辨識中英文 OS 寫入拒絕，模型回覆與沙箱啟動失敗不算證據。**Codex boundary key 已改，使用者須重跑 `ai-cli kernel probe --agent codex`**。Fable 5.2 已完成唯讀獨立稽核，主 session 逐條對照原始碼（含 `src/core/job-store.ts`）：F1 修正為僅 Windows、工具 exit_code 非 0（含缺值）、輸出前 300 字元的初始化錯誤才警示，避免正常讀碼誤判；F2 shell 拒絕與唯一目標檔名須同在工具輸出，patch 僅接受 item.completed／file_change、status=failed 且 changes[].path 的結構化路徑只點名一個目標，匿名或多目標拒絕不替任何目標背書，檔案全不存在仍為必要條件，另更新 Codex 證據版本使舊 PASS 快取失效；F3 補稽核與實測紀錄；F4 模型提示移除 elevated 設定字面；F5 修正舊突變名稱並於 finally 清理測試自建暫存目錄；F6 kernel 結果訊息保留 sandbox_warning 原因與原始錯誤；F7 更新探針及手冊過時敘述；F8 增加具名「存取被拒」辨識。稽核提到的既有 adopt 候選只讀 exit.json 狀態問題涉及跨 agent 接管語意，本次未擴大修改；metadata／bootstrapping／adopt 其餘路徑由稽核讀碼確認保留 strict，未新增全路徑動態驗證；亂碼拒絕尚無可靠解碼證據，維持 UNKNOWN，不猜測放行。
   - 舊結論更正（僅追加，保留 2026-10-12 原紀錄）：codex-cli 0.162.1 的 elevated 曾回 helper_unknown_error 而被判不可行；2026-11-10 主 session 於 codex-cli 0.167.0 實測 elevated 可讀不可寫，因此改採此 backend；不據此推斷差異一定來自版本。
   - 主 session 回報真機驗收（2026-11-10，這台 Windows 11、codex-cli 0.167.0、新 dist）：新開 strict job 的 Get-ChildItem、rg 讀到隨機 token；Copy-Item、Set-Content、git add 皆被 OS 拒絕，磁碟無新檔且 index 未變，即使使用者規則允許相關命令；續接同一 session 再寫仍被拒。當時 `ai-cli kernel probe --agent codex` 回 PASS（4 目標皆記拒絕）；沙箱成功啟動，未取得 sandbox_warning 真機樣本。本輪離線核對該探針原始日誌，僅三個目標有具名輸出，probe-write.txt 只有匿名 patch 拒絕、沒有 file_change 事件；新規則無法替缺失的結構化證據補名，因此該舊樣本仍為 UNKNOWN。新版解析器依官方事件格式支援具名失敗 patch，合成三筆 shell 加一筆結構化 patch 可 PASS；主 session 須重跑確認實際 CLI 有發出所需事件，未發出時不能宣稱已驗證。 後續主 session 重跑確認 codex-cli 0.167.0 的 apply_patch 被拒仍不產生 file_change，僅在 CLI 自己的 stderr 記 `codex_core::tools::router: error=patch rejected: writing is blocked by read-only sandbox`；因此新增窄歸屬：只有 stderr 這個 router 前綴、patch rejected 動作與唯讀拒絕原因可替唯一要求 apply_patch 的 probe-write.txt 作證，不能替其他三目標或由 stdout 取得。結構化 file_change 支援保留，檔案不存在、process completed、exit 0 條件不變；證據版本升為 target-output-router-patch-v3，須重跑探針。（@moerasermax）
+- 取消／終態競態修正與子孫程序追蹤（issue #17 驗證步驟設計的 P0）：
+  - 為什麼：issue #17 的設計審查發現一個既有競態。全權限（write）worker 的 job 已回結果、判定還沒落盤、程序卻還活著時取消，loop 看到「沒有進行中的動作」就直接寫 `cancelled`，確認程序消失的那一步被跳過；`cancelled` 是終態，`cleanup` 接著就能拆掉它還在寫的 worktree。runner 收尾（kernel 例外）也有同樣的洞：只砍進行中的動作就寫 `failed`。另外 `isGone` 只看 runner 與 worker 兩個 pid，worker 退出後被過繼的子孫（它在背景啟動的 node／測試／git）看不到。
+  - 改了什麼（kernel）：新檔 `full-permission.ts` 集中「哪些動作算全權限」與「怎樣算確認消失」。loop 內所有終態只能由 `enterTerminal` 寫入：未結清的全權限動作（沒結果，或有結果但判定未落盤）先送終止、輪詢 `isGone`，只有明確回 true 才算消失，確認不了就寫 `stop_pending`；`setState` 收到終態直接丟例外。runner 收尾與 runner 不在時的取消改用同一個函式。`cleanup` 多一關（派過的所有全權限動作只查不砍，有一個確認不了就拒絕）；`approve --reconcile abandon` 遇到還活著的全權限 job 拒絕；執行器拿不到 jobId 時先終止已啟動的程序。沒有新增事件型別或狀態，舊日誌 replay 不變。
+  - 改了什麼（core，子孫追蹤）：新檔 `src/core/process-tree.ts`。每個 job 的 runner 在 worker 存活期間定期列舉程序表（Windows 讀 `Win32_Process`、Linux 讀 `/proc`、其他 POSIX 用 `ps`；不加原生模組），把 worker 的子孫（pid＋啟動時間）累積寫進 job 目錄的 `tree.json`，worker 結束後再列舉一次；meta 多一個 `tree: 1`。原則是「寧可擋住，也不能誤殺別人的程序」：只有列舉當下父程序還活著、身分相符，才把子程序列為確定（可終止）；只有間接跡象的（Windows 上 `ParentProcessId` 指向已不在的成員、POSIX 上同一個 process group 但沒有已記錄成員能證明它沒被重用）標成不確定，只擋判定、不自動終止。終止時每一筆送出前重新核對 pid＋啟動時間，直接對那個 pid 送終止，不用 `taskkill /t`。列舉分三種狀態（存在／確定不存在／未知），未知不當成不在、也不拿來修剪紀錄。紀錄裡留下追蹤品質（有沒有記到結束、有沒有封存、存活期間最長多久沒有成功列舉），讀端據此判斷有沒有追蹤缺口。JobStore 回收（到期、超過容量、`cleanup_processes`）跳過放了 `hold.json` 的 job 目錄。
+  - 改了什麼（kernel 用子孫紀錄）：`isGone` 除了 runner 與 worker，也要求已記錄的子孫都消失（pid 與啟動時間都對得上才算活著，pid 被重用視為已消失）。全權限 job 啟動時就放 `hold.json`、日誌裡標 `tracked`，另外要求證據齊全：程序表列舉失敗或不完整、成員查不出狀態、紀錄讀不出來、有追蹤缺口、job 目錄不見了，都不算消失；唯一例外是開機識別變了（機器重開過）。非全權限 job 與舊日誌只多擋「紀錄裡確定還活著的子孫」。執行器啟動後拿不到 jobId 時，先終止並確認程序不在；確認不了就把 pid＋啟動時間記成那個動作的 job，之後的關卡照樣查它。
+  - 一般 job 會感覺到的變化：`kill_process`／逾時終止**執行中**的 job 時，runner 也會砍已脫離 worker 那棵樹、但**確定**是它子孫的程序（Windows 原本砍不到父程序已死的孤兒）。自然結束的 job 留下的背景程序不動；對已結束的 job 呼叫 `kill_process` 仍然什麼都不做。runner 寫完 `exit.json` 之後會多留一下做最後一次列舉才退出（Windows 正常不到 1 秒；上限 20 秒，被終止時補砍子孫另加最多 15 秒），結果回報不受影響。Windows 上每個執行中的 job 每 5 秒多啟動一次 PowerShell（`AI_CLI_TREE_SCAN_MS` 可調；列舉連續失敗時逐次拉長到最長 30 秒）。job 目錄裡有 `hold.json` 時不會被回收。
+  - 使用者決定（2026-11-11）：① worker 永遠確認不了停止時不提供人工覆寫，停在 `stop_pending`，說明印出 pid、jobId，由人處理後再 cancel；手冊寫明怎麼查那個 pid。② 子孫程序在 P0 就追蹤，不是只寫進手冊；kernel 全權限 job 與一般 job 都維持每 5 秒追蹤，一般 job 的 `kill_process` 也砍確定是它子孫的孤兒。③ kernel 例外且 worker 未確認時，之後 cancel 確認消失，最後顯示「已取消」而非「失敗」，錯誤留在 `stop_pending` 事件的說明。④ 寧可擋住，也不能誤殺別人的程序。
+  - 限制：這是事後追蹤，不是隔離。中間程序在兩次列舉之間出生又結束（Windows）、daemon 化後父程序馬上結束（POSIX）、透過系統服務啟動的程序追不到，手冊「追不到的情況」有列。反過來會多擋：不確定的成員可能其實是無關的程序，它活著時 run 會停在 `stop_pending` 等人看過；「worker 一啟動背景程序就結束」留下的程序只會是不確定，要人自己結束。追蹤缺口與 job 目錄被人刪掉這兩種沒有 pid 可處理，目前只有重開機會放行。POSIX 的列舉與認親只跑過假資料的規則測試，真機測試只在一台 Windows 上跑過。
+  - 獨立稽核（Codex Astra，唯讀讀碼，2026-11-11）：第一版被判有阻擋 commit 的問題，共 7 條高、3 條中，全部成立並已修：
+    - 高 1：Windows 上「父程序剛死、時間窗不到 15 秒」就把孤兒推定為子孫並可終止——拿掉時間窗推定，父程序不在時一律只算不確定。
+    - 高 2：POSIX 的最後一次列舉無條件信任 process group——拿掉，只有身分相符的已記錄成員還活著才算證明。
+    - 高 3：終止用的是先前的快照、Windows 用 `taskkill /t` 連帶砍沒核對過的後代，真機測試的清理也對裸 pid 送訊號——改成每一筆送出前重查身分、只對那個 pid 送終止；測試清理同樣先核對身分。
+    - 高 4：Linux 讀 `/proc` 吞掉所有錯誤、`ps` 看不懂的行默默略過，缺席被當成不在並修剪紀錄——列舉改成三種狀態，未知一律擋住。
+    - 高 5：追蹤全部失敗或沒封存的紀錄，之後列舉一恢復就判定消失——紀錄留下追蹤缺口，執行器檢查。這一條和稽核建議略有不同：稽核舉的缺口是 `failed > 0`，這裡用的是「存活期間任兩次成功列舉相隔不超過間隔＋17 秒、有記到結束、有封存」；偶發失敗一次、馬上重試成功的不算缺口。理由是缺口一旦成立就沒有出路（不提供覆寫），而單次失敗重試成功並沒有比一次慢列舉多出空白。
+    - 高 6：job 目錄被回收、kernel 又還沒存過紀錄時直接放行——改成全權限 job 啟動時就放保留標記，JobStore 不回收；目錄不見了就是無法確認。原本 kernel 另存一份紀錄的做法拿掉。
+    - 高 7：拿不到 jobId 而終止又沒確認時，只在錯誤訊息裡提一句，之後的關卡看不到——改成留下 pid＋啟動時間並記進日誌。
+    - 中 8：啟動時間比較經過 `Date` 被壓成毫秒；macOS 的 `ps` 只到秒——Windows 改用原始精度比較，macOS 上出生那一秒內第一次看到的成員只擋不殺。
+    - 中 9：收尾最壞可拖一分鐘以上、每次列舉都寫檔、失敗不退避——收尾設上限（20 秒＋15 秒）、沒有新發現不重寫、連續失敗逐次拉長間隔。每 5 秒列舉、所有 job 都追蹤這兩點依使用者決定維持。
+    - 中 10：真機測試用 `kill(pid, 0)` 判活、沒先確認 runner 與 worker 消失就斷言——改用程序表的身分判活，先確認兩者消失，再斷言擋住的只有那個孫程序。
+    - 稽核者因讀檔額度沒做完的三項，由實作者補做：① loop 以外會寫終態的只有 `cancelWithoutRunner`、runner 收尾（都過關卡）與觸發在核准前失敗時的 `cancelled`（那個 run 剛建立、沒有任何動作）。② JobStore 刪 job 目錄的三條路都加了保留標記的檢查；runner 終止 worker 那棵樹時原有的 `taskkill /t`（先核對 worker 身分）是這次改動之前就有的行為，沒有動。③ 片段被改到的 5 筆既有突變的實跑結果見下一條。
+  - 測試：新增 `verify-ai-cli_kernel-terminal.mjs`（設計的 T1～T12 與出口 #11 的失敗路徑，54 條）、`verify-process-tree.mjs`（認親規則、列舉三態、追蹤缺口、追蹤器、執行器、回收保留，假資料，101 條）、`verify-process-tree-live.mjs`（真的 runner 與程序，不啟動模型，16 條）。`tools/mutations.json` 新增 62 筆，全部實跑、都由指定的斷言抓到；另有 5 筆既有突變因片段改動而更新（實跑結果寫在交付回報）。`verify-durable-jobs.mjs` 的寫入次數斷言把 `tree.json` 分開計數（「runner 只寫 meta 與 exit、不逐塊寫 log」那條維持等於 2）。
+  - **`src/core` 有改動（`process-tree.ts` 新增、`job-runner.ts`、`job-store.ts` 的 `JobMeta` 與回收保留標記）。修正後的版本還沒有再經過一次獨立稽核。**（@moerasermax）
 
 - 修正跨平台 CI 的 kernel 測試 fixture：獨立執行 kernel／evidence 測試時補齊 POSIX stub 執行權限；e2e 假 Codex 改輸出 0.167 的 stdout OS 拒絕事件與 stderr readonly patch 拒絕，符合 issue #24 的逐目標證據規則；dashboard 測試改用本機絕對工作路徑，並驗證 Linux／macOS 不會啟動 Windows Terminal。產品安全規則與 POSIX CI 閘門不變。（Codex Astra）
 
@@ -2619,3 +2674,17 @@ Antigravity 可用；**Kiro 沒額度**（CLI 回 `Not logged in`）、**Forge �
 [4.0.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v3.1.0...v4.0.0
 [3.1.0]: https://github.com/moerasermax/tkflyc-ai-cli/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/moerasermax/tkflyc-ai-cli/releases/tag/v3.0.0
+
+### Windows containment FIX5 稽核修正
+
+- 加嚴人工出口的 PID 重用後代查證；Toolhelp 父鏈允許外部權限鏈尾，但保留已知 worker 拒絕。
+- journal 查證單次 15 秒、取鎖總時限 20 秒；status／dashboard 顯示對帳標記，成功接回落盤後清除。kernel 自己的檢查指令維持原有 handle 清理。
+- 無視窗 helper／compiler 使用原生持有 handle 與私有 Job 清理逾時子孫，編譯被殺不再誤報成功。加入真實卡住、外部祖先、PID 重用與既有 jobs／PTY 突變保護。
+- 完全消失的中介祖先所留孤兒仍為人工出口已知風險，未新增歷史追蹤。
+
+### Windows containment FIX6 稽核修正
+
+- 後代使用 PID＋建立時間識別，補回重用根 PID 的真後代及子樹；無關佔用者仍可排除。
+- 不可讀／不同 SID 的 PID 以系統列表建立時間補死亡查證；不可讀祖先繼續上溯，unknown 不放寬。
+- 前景 host 先納入私有 Job，增加 Node 外層期限並保留無視窗；compiler 同時讀取診斷輸出，期限放寬至 25 秒。
+- 對帳資訊改用 reconciliation 欄位，保留原 reason。加鎖總時限測試自帶程序逾時；補強 Windows durable runner 後援 killed 紀錄及對應突變。

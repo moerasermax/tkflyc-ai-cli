@@ -48,6 +48,24 @@ function fixture(d = detail()) {
 }
 const writes = calls => calls.filter(c => c === 'create' || Array.isArray(c) && ['execute', 'release'].includes(c[0]));
 
+await test('Phase3 dashboard confirmation metadata remains ordinary without granting exceptions', async () => {
+  const calls=[],raw={runId:id,effectiveState:'running',template:'develop',goal:'confirmation adapter',develop:{repoRoot:'/repo',branch:'feature',verifiedCommit:commit}};
+  const effects=createDashboardEffects({
+    async aiCliKernelStatus(){return raw;},
+    async aiCliKernelCancel(){calls.push('cancel');},
+    async aiCliKernelCleanup(){calls.push('cleanup');return{worktreeRemoved:true};},
+  });
+  for(const operation of ['cancel','cleanup']){
+    raw.effectiveState=operation==='cancel'?'running':'cancelled';
+    const action=rules.actionsFor(await effects.detail(id)).find(a=>a.id===operation);
+    // The real confirmation controller adds confirmedCommit before perform().
+    await perform(effects,{...action,confirmedCommit:commit});
+    await assert.rejects(()=>effects.execute({...action,confirmedCommit:commit,confirmContainmentLost:true}),/rejects containment exception fields/);
+    await assert.rejects(()=>effects.execute({...action,confirmedCommit:commit,args:[...action.args,'--confirm-containment-lost']}),/rejects exception flags/);
+  }
+  assert.deepEqual(calls,['cancel','cleanup']);
+});
+
 await test('正式 adapter 直接組裝 API 參數、查 git、時間及失敗結果', async () => {
   const calls = [], gitCalls = [];
   let cleanup = { worktreeRemoved: true }, releaseStatus = 'succeeded';

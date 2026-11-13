@@ -38,6 +38,21 @@ export function releaseExitedPty(ptyProc: any): boolean {
   return typeof input?.destroy === 'function' || typeof conout?.dispose === 'function';
 }
 
+const stoppedPtys = new WeakSet<object>();
+/** node-pty 0.13.1 ConPTY native baton owns HPCON/hShell. Bypass its JS
+ * console PID enumeration (which races PID reuse). Never fall back to kill(pid).
+ * ClosePseudoConsole is called at most once; whole-tree proof still belongs to broker.
+ */
+export function stopOwnedPty(ptyProc: any): boolean {
+  if (process.platform !== 'win32') { ptyProc.kill(); return true; }
+  const agent = ptyProc?._agent;
+  if (!agent?._useConpty || typeof agent._ptyNative?.kill !== 'function' || typeof agent._pty !== 'number') return false;
+  if (stoppedPtys.has(ptyProc)) return false;
+  stoppedPtys.add(ptyProc);
+  agent._ptyNative.kill(agent._pty, agent._useConptyDll);
+  return true;
+}
+
 /** ChildProcess-like 介面，供 process-service 統一處理。 */
 export interface PtyChild extends EventEmitter {
   stdout: PassThrough;
@@ -97,7 +112,7 @@ export function spawnPty(
     if (closed) return false;
     killedByUser = true;
     try {
-      ptyProc.kill();
+      if (!stopOwnedPty(ptyProc)) return false;
     } catch {
       /* ignore */
     }

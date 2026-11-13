@@ -493,9 +493,10 @@ export class FileProcessService {
     };
   }
 
-  async killProcess(pid: number) {
+  async killProcess(pid: number, jobId?: string) {
     await this.store.ready; this.store.scan();
-    if (this.store.hasPid(pid)) return this.store.kill(pid);
+    if (jobId || this.store.hasPid(pid)) return this.store.kill(pid, jobId);
+    if (process.platform === 'win32') throw new Error('No Windows containment record; refusing unverified PID/group termination');
     const proc = this.readProcess(pid);
     const refreshed = this.refreshStatus(proc);
     if (refreshed.status !== 'running') {

@@ -1,6 +1,6 @@
 /** 持久化 job 驗收 stub；只吃 stdin JSON，完全不呼叫模型。 */
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 let prompt = '';
 for await (const chunk of process.stdin) prompt += chunk;
 const spec = JSON.parse(prompt);
@@ -12,6 +12,15 @@ if (spec.mode === 'tree') {
   const agent = process.argv[2] || 'codex';
   const message = spec.mode === 'large' ? 'x'.repeat(1024 * 1024) : '完整輸出：PONG';
   console.log(JSON.stringify(agent === 'claude' ? { type: 'system', session_id: 'stub' } : { type: 'thread.started', thread_id: 'stub' }));
+  // Test-owned handshake: recovery assertions release the worker explicitly.
+  // The watchdog bounds an abandoned fixture; it is not its normal lifetime.
+  if (spec.releaseFile) {
+    const deadline = Date.now() + 90000;
+    while (!existsSync(spec.releaseFile)) {
+      if (Date.now() >= deadline) throw Error('Durable fixture release deadline exceeded');
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  }
   await new Promise(resolve => setTimeout(resolve, spec.delay ?? 0));
   const text = JSON.stringify(agent === 'claude' ? { type: 'result', result: message, is_error: !!spec.error } : { type: 'item.completed', item: { type: 'agent_message', text: message } });
   // 含切開的 UTF-8；reader 不可整檔重讀或破壞字元。

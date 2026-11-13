@@ -10,8 +10,8 @@ import { digestText } from './journal.js';
 import { FABLE_QUOTA_KEY } from './model-select.js';
 
 const WATCHED = [
-  '../core/job-store.js', '../core/job-runner.js', '../core/file-process-service.js', '../core/command-builder.js',
-  './loop.js', './runner.js', './executor.js', './journal.js', './replay.js', './verdict.js', './plan.js', './probe.js', './workspace.js', './admission.js', './process-mutex.js', './test-lock.js', './check-supervisor.js', './runtime.js', './model-select.js',
+  '../core/job-store.js', '../core/job-runner.js', '../core/process-tree.js', '../core/file-process-service.js', '../core/command-builder.js',
+  './loop.js', './runner.js', './runner-settle.js', './full-permission.js', './executor.js', './journal.js', './replay.js', './verdict.js', './plan.js', './probe.js', './workspace.js', './admission.js', './process-mutex.js', './test-lock.js', './check-supervisor.js', './runtime.js', './model-select.js',
 ];
 
 /** dist 被原地重建時這個值會變。查不到的檔案也算進指紋，不會誤判成沒變。 */

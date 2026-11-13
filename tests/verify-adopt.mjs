@@ -1,3 +1,4 @@
+import { assertDurableStatus, preserveDurableFailure } from './helpers/durable-failure-evidence.mjs';
 /** 接管回歸：注入 OS 身分與存活資料，不啟動任何 AI CLI，也不接觸正式 job store。 */
 import '../tools/stubs/catalog-test-env.mjs';
 import assert from 'node:assert/strict';
@@ -42,7 +43,7 @@ const stores = [];
 let passed = 0, failed = 0;
 async function test(name, fn) {
   try { await fn(); passed++; console.log('PASS ' + name); }
-  catch (error) { failed++; console.log('FAIL ' + name + '\n' + error.stack); }
+  catch (error) { failed++; preserveDurableFailure({name, result: { assertionError: String(error) }, roots: [temp]}); console.log('FAIL ' + name + '\n' + error.stack); }
 }
 function fixture(dir, options = {}) {
   const jobId = randomUUID(), runner = options.runner ?? id('runner', true);
@@ -104,9 +105,9 @@ try {
     assert.equal(ps.getProcessResult(f.meta.pid).adopted, true);
     assert.equal(ps.getProcessResult(f.meta.pid).adoptedFrom, undefined);
     assert.deepEqual(ps.getProcessResult(f.meta.pid, true).adoptedFrom, metaOf(f).adoptedFrom);
-    assert.equal((await ps.waitForProcesses([f.meta.pid], 1))[0].status, 'completed');
-    assert.equal((await ps.peekProcesses([f.meta.pid], 1)).processes[0].status, 'completed');
-    assert.equal((await ps.killProcess(f.meta.pid)).status, 'completed');
+    assertDurableStatus((await ps.waitForProcesses([f.meta.pid], 1))[0], 'completed', {name:'adopt',roots:[temp]});
+    assertDurableStatus((await ps.peekProcesses([f.meta.pid], 1)).processes[0], 'completed', {name:'adopt',roots:[temp]});
+    if(process.platform==='win32')assert.equal((await ps.killProcess(f.meta.pid)).containment,'unknown');else assertDurableStatus((await ps.killProcess(f.meta.pid)), 'completed', {name:'adopt',roots:[temp]});
     for (const [name, value] of Object.entries(before)) if (name !== 'meta.json') assert.equal(contents(join(f.directory, name)), value);
     assert(!existsSync(f.lock));
     const restarted = await store(dir); assert.equal(restarted.list()[0].adopted, true);

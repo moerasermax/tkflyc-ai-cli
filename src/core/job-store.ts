@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, parse, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
@@ -18,6 +18,9 @@ import { buildProcessResult } from './process-result.js';
 import { PeekEventExtractor } from './peek-extractor.js';
 import { appendPeekEvents, buildNotFoundPeekProcess, observedDurationSec, validatePeekPids, validatePeekTimeSec, type PeekProcessResult } from './peek.js';
 import { identityOnly, resolvePrincipal } from './principal.js';
+import { WinJobClient } from './win-job-client.js';
+import { findContainmentRef, drainedProof, readContainment, saveContainmentRef, markContainmentIntent, hasContainmentIntent, LEGACY_CONTAINMENT_NOTICE } from './containment-store.js';
+import type { ContainmentRef } from './win-job-protocol.js';
 
 export const RETENTION_MS = 30 * 60 * 1000;
 export const MAX_FINISHED_JOBS = 100;
@@ -32,6 +35,10 @@ export interface JobMeta {
   effort?: string; task: string; workFolder: string; sessionId?: string; startTime: string;
   source: 'mcp' | 'cli'; principal: ProcessIdentity | null; server: ProcessIdentity | null; projectDir?: string;
   runner: ProcessIdentity; worker: ProcessIdentity | null; recoverable: true;
+  /** runner 有追蹤 worker 的子孫（job 目錄的 tree.json，見 process-tree.ts）。舊 runner 啟動的 job 沒有這一格。 */
+  tree?: 1;
+  containment?: ContainmentRef;
+  containmentProtocol?: 1;
   adoptedFrom?: Array<{ principal: ProcessIdentity | null; server: ProcessIdentity | null; adoptedAt: string }>;
 }
 export interface JobExit { exitCode: number | null; signal: string | null; endTime: string; timedOut: boolean; killed: boolean; error?: string }
@@ -43,8 +50,32 @@ export interface RunnerSpec {
 }
 export function atomicJson(path: string, value: unknown): void {
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  try { writeFileSync(temp, JSON.stringify(value) + '\n', { mode: 0o600 }); renameSync(temp, path); }
+  try {
+    writeFileSync(temp, JSON.stringify(value) + '\n', { mode: 0o600 });
+    // Same complete temp file; never remove the destination to make rename work.
+    // At most 8 attempts / 250 ms of retry budget (OS calls themselves may stall).
+    const deadline = performance.now() + 250;
+    const sleeper = new Int32Array(new SharedArrayBuffer(4));
+    for (let attempt = 0; ; attempt++) {
+      try { renameSync(temp, path); break; }
+      catch (error) {
+        const remaining = deadline - performance.now();
+        if (!['EPERM', 'EBUSY', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '') || attempt >= 7 || remaining <= 0) throw error;
+        Atomics.wait(sleeper, 0, 0, Math.min(10 * 2 ** attempt, 50, remaining));
+      }
+    }
+  }
   finally { rmSync(temp, { force: true }); }
+}
+/** Whole-job termination can kill this runner before its next instruction. */
+export function recordJobFailure(directory: string, message: string): void {
+  message = message.slice(0, 4096);
+  try { appendFileSync(join(directory, 'stderr.log'), `Process error: ${message}\n`, { mode: 0o600 }); } catch { /* Retain the independent result if log I/O fails. */ }
+  if (readJobExit(directory)) return;
+  const result: JobExit = { exitCode: 1, signal: null, endTime: new Date().toISOString(), timedOut: false, killed: false, error: message };
+  // Publish a complete bounded diagnostic; never expose a partially written JSON.
+  try { atomicJson(join(directory, 'runner-error.json'), result); } catch (error) { console.error('ai-cli runner failure record:', error); }
+  try { atomicJson(join(directory, 'exit.json'), result); } catch (error) { console.error('ai-cli runner failure exit:', error); }
 }
 export function sameIdentity(a: ProcessIdentity | null | undefined, b: ProcessIdentity | null | undefined): boolean {
   return !!a && !!b && !!a.started && a.pid === b.pid && a.started === b.started;
@@ -168,7 +199,30 @@ export async function listAdoptCandidates(dir = jobStateDir(), lookup: IdentityL
   }
   return candidates;
 }
-export function readJobExit(dir: string): JobExit | undefined { return json<JobExit>(join(dir, 'exit.json')); }
+export function readJobExit(dir: string): JobExit | undefined {
+  let failure: JobExit | undefined;
+  try {
+    const fd = openSync(join(dir, 'runner-error.json'), 'r');
+    try { const data = Buffer.alloc(32769); const size = readSync(fd, data, 0, data.length, 0); if (size <= 32768) failure = JSON.parse(data.subarray(0, size).toString('utf8')) as JobExit; }
+    finally { closeSync(fd); }
+  } catch { /* Optional diagnostic never gates the independent terminal result. */ }
+  // Diagnostic execution failure, never a containment/drained proof. Also works
+  // with an old broker which would otherwise publish a misleading killed/143.
+  if (failure?.exitCode === 1 && failure.killed === false && failure.timedOut === false && failure.signal === null && typeof failure.error === 'string' && failure.error && failure.error.length <= 4096 && Number.isFinite(Date.parse(failure.endTime))) return failure;
+  return json<JobExit>(join(dir, 'exit.json'));
+}
+/**
+ * job 目錄裡有這個檔，JobStore 就不回收它（到期、超過容量、cleanup_processes 都一樣）。誰放的誰拿掉。
+ * 需要保住子孫紀錄（tree.json）的呼叫端用它：確認子孫都消失之前，那份紀錄不能被回收掉。
+ */
+export const JOB_HOLD_FILE = 'hold.json';
+export function jobHeld(directory: string): boolean {
+  const file = join(directory, JOB_HOLD_FILE);
+  if (!existsSync(file)) return false;
+  const ref = json<{ containment?: ContainmentRef }>(file)?.containment;
+  if (ref && drainedProof(ref)) { try { rmSync(file); return false; } catch { /* 保留到下次 GC。 */ } }
+  return true;
+}
 function lostTime(dir: string): string | undefined {
   const value = json<{ endTime: string }>(join(dir, 'lost.json'))?.endTime;
   return value && Number.isFinite(Date.parse(value)) ? value : undefined;
@@ -203,6 +257,7 @@ export async function collectStoreFiles(dir: string, now = Date.now(), lookup: I
   let count = finished.length, size = finished.reduce((sum, j) => sum + j.size, 0); const removed: string[] = [];
   for (const job of finished) {
     if (now - job.end < RETENTION_MS && count <= MAX_FINISHED_JOBS && size <= MAX_FINISHED_BYTES) continue;
+    if (jobHeld(job.directory)) continue;
     if (removeJobDirectory(job.directory)) { count--; size -= job.size; removed.push(job.meta.jobId); }
   }
   let names: string[] = []; try { names = readdirSync(join(dir, 'jobs')); } catch {}
@@ -217,6 +272,7 @@ export async function collectStoreFiles(dir: string, now = Date.now(), lookup: I
       const launch = json<RunnerSpec>(join(directory, 'launch.tmp'));
       if (bootstrap?.runner?.pid && mayBeAlive(bootstrap.runner.pid)) continue;
       if (launch && !bootstrap && mayBeAlive(launch.serverPid)) continue;
+      if (jobHeld(directory)) continue;
       removeJobDirectory(directory);
     } catch { /* 目錄被鎖，下輪重試。 */ }
   }
@@ -285,9 +341,25 @@ function event(job: StoredJob, text: string, ref: Reference): void {
   }
 }
 export function refreshJob(job: StoredJob): void {
-  if (job.closed) return;
+  if (job.closed) {
+    // An unavailable/slow broker may publish a durable result after lost was
+    // projected. Refresh that result without re-emitting close or redispatching.
+    if(job.status==='lost' && (job.meta.containment || job.meta.containmentProtocol)) {
+      const late=readJobExit(job.directory);
+      if(late) { job.exitCode=late.exitCode??undefined;job.endTime=late.endTime;job.status=late.exitCode===0&&!late.killed&&!late.timedOut&&!job.outputFailed?'completed':'failed';if(late.error)job.parsed.error=late.error; }
+    }
+    return;
+  }
   if (!job.meta.runner.started) { const meta = json<JobMeta>(join(job.directory, 'meta.json')); if (meta) job.meta = meta; }
-  const exit = readJobExit(job.directory);
+  let exit = readJobExit(job.directory);
+  if (job.meta.containment && !exit && drainedProof(job.meta.containment)) {
+    const proof = readContainment(job.meta.containment);
+    if (proof?.termination) {
+      // Read-only projection during broker publication; only the broker writes
+      // the stopped runner's result. Avoid racing its atomic rename or GC.
+      exit = { exitCode: 143, signal: null, endTime: proof.terminalProof!.at, killed: proof.termination === 'kill', timedOut: proof.termination === 'timeout' };
+    }
+  }
   const lost = !exit && lostTime(job.directory);
   if (lost) { job.status = 'lost'; job.endTime = lost; }
   for (const stream of ['stdout', 'stderr'] as const) {
@@ -351,6 +423,7 @@ export function jobResult(job: StoredJob, verbose = false): Record<string, unkno
     result[`${stream}Truncated`] = { totalChars: job.cursors[stream].chars, shownChars: job[stream].length };
   }
   result.jobId = job.meta.jobId;
+  if(job.meta.containment&&!drainedProof(job.meta.containment)&&json<{state?:string}>(join(job.directory,'containment-status.json'))?.state==='unknown'){result.containment='containment_lost';result.terminationConfirmed=false;}
   if (verbose && job.messageRef && job.messageRef.length > VERBOSE_MAX_BYTES) result.agentOutputTruncated = { totalBytes: job.messageRef.length, limitBytes: VERBOSE_MAX_BYTES };
   for (const stream of ['stdout', 'stderr'] as const) if (verbose && job.cursors[stream].offset > VERBOSE_MAX_BYTES) {
     result[`${stream}Truncated`] = { totalBytes: job.cursors[stream].offset, shownBytes: VERBOSE_MAX_BYTES };
@@ -618,6 +691,12 @@ export class JobStore {
     if (pty && typeof cmd.stdinPrompt === 'string') throw new Error('PTY jobs do not support stdinPrompt');
     const jobId = randomUUID(), directory = join(this.dir, 'jobs', jobId);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if(process.platform==='win32')markContainmentIntent(this.dir,jobId);
+    // 啟動意圖與 hold 早於 launcher；broker 留在目標 job 外。
+    let containment: ContainmentRef | undefined;
+    try {
+    containment = process.platform === 'win32' ? await new WinJobClient().prepare(jobId, directory) : undefined;
+    if (containment) { saveContainmentRef(this.dir, containment); atomicJson(join(directory, JOB_HOLD_FILE), { containment }); }
     if (cmd.temporaryPromptFile) {
       const target = join(directory, 'prompt.txt');
       try { renameSync(cmd.temporaryPromptFile, target); }
@@ -629,7 +708,7 @@ export class JobStore {
       cmd.releaseTemporaryPrompt?.();
     }
     if (typeof cmd.stdinPrompt === 'string') writeFileSync(join(directory, 'stdin.tmp'), cmd.stdinPrompt, { mode: 0o600 });
-    const metaBase: RunnerSpec['meta'] = { ...(cmd.strict ? { strict: true } : {}), version: 1, jobId, agent: cmd.agent, model, resolvedModel: cmd.resolvedModel, effort: cmd.reasoningEffort,
+    const metaBase: RunnerSpec['meta'] = { ...(containment ? { containment, containmentProtocol: 1 as const } : {}), ...(cmd.strict ? { strict: true } : {}), version: 1, jobId, agent: cmd.agent, model, resolvedModel: cmd.resolvedModel, effort: cmd.reasoningEffort,
       task: taskSummary(cmd.prompt), workFolder: cmd.cwd, sessionId: cmd.sessionId, startTime: new Date().toISOString(), source: this.source,
       // cwd 取不到時不寫，該 job 依舊 meta 規則以 workFolder 判定範圍。
       ...(this.source === 'mcp' && this.projectDir !== null ? { projectDir: this.projectDir } : {}),
@@ -638,11 +717,11 @@ export class JobStore {
       needsShell: process.platform === 'win32' && !getAgent(cmd.agent).win32DirectExec, ...(pty ? { pty: true } : {}), timeoutMs, meta: metaBase, serverPid: process.pid, principalPid: this.principal?.pid ?? process.ppid };
     atomicJson(join(directory, 'launch.tmp'), spec);
     const viaLauncher = process.platform === 'win32';
-    const launchFailure = (error: unknown): Error => {
+    const launchFailure = async (error: unknown): Promise<Error> => {
       const launchError = json<{ error?: string }>(join(directory, 'launcher.json'))?.error;
       const message = `Failed to start ${cmd.agent} runner: ${launchError ?? (error as Error).message}`;
-      writeFileSync(join(directory, 'stderr.log'), `Process error: ${message}\n`, { flag: 'a', mode: 0o600 });
-      atomicJson(join(directory, 'exit.json'), { exitCode: 1, signal: null, endTime: new Date().toISOString(), timedOut: false, killed: false, error: message });
+      recordJobFailure(directory, message);
+      if (containment) await new WinJobClient().terminate(containment).catch(() => undefined);
       rmSync(join(directory, 'stdin.tmp'), { force: true }); rmSync(join(directory, 'launch.tmp'), { force: true });
       return new Error(message);
     };
@@ -650,7 +729,7 @@ export class JobStore {
     try {
       child = spawn(process.execPath, [fileURLToPath(new URL(viaLauncher ? './job-launcher.js' : './job-runner.js', import.meta.url)), directory], {
         cwd: fileURLToPath(new URL('../../', import.meta.url)), env: buildWorkerEnv(), detached: true, stdio: 'ignore', windowsHide: true });
-    } catch (error) { throw launchFailure(error); }
+    } catch (error) { throw await launchFailure(error); }
     let pid = child.pid;
     if (viaLauncher) {
       try {
@@ -665,7 +744,7 @@ export class JobStore {
         }
         pid = result.pid;
       } catch (error) {
-        throw launchFailure(error);
+        throw await launchFailure(error);
       }
     } else {
       child.on('error', error => { const job = this.jobs.get(jobId); if (job) { job.status = 'failed'; job.closed = true; job.endTime = new Date().toISOString(); job.stderr = error.message; job.process.emit('close', 1); } });
@@ -681,10 +760,15 @@ export class JobStore {
     if (viaLauncher) {
       try { atomicJson(join(directory, 'launcher.ready'), { pid }); }
       catch (error) {
-        const failure = launchFailure(error); refreshJob(job); throw failure;
+        const failure = await launchFailure(error); refreshJob(job); throw failure;
       }
     }
     return job;
+    } catch(error) {
+      recordJobFailure(directory, `Job startup failed: ${(error as Error).message}`);
+      if(containment)await new WinJobClient().terminate(containment).catch(()=>undefined);
+      throw error;
+    }
   }
   refresh(): void { for (const job of this.jobs.values()) { try { refreshJob(job); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') this.jobs.delete(job.meta.jobId); else throw e; } } }
   /** force 只給 GC 計時器；wait／peek 每 50ms 的 check 一律受 2 秒節流。 */
@@ -722,6 +806,12 @@ export class JobStore {
         refreshJob(job); if (job.status !== 'running') continue;
         if (!job.meta.runner.started) {
           if (Date.now() - Date.parse(job.startTime) >= STARTUP_GRACE_MS) {
+            const ref=job.meta.containment??findContainmentRef(this.dir,job.meta.jobId);
+            if(process.platform==='win32'&&ref){
+              const status=await new WinJobClient().inspect(ref);refreshJob(job);
+              if(job.status!=='running'||job.meta.runner.started||status.state==='active'||status.state==='preparing')continue;
+            }
+            // Unknown remains lost (not gone); never redispatch or synthesize drain.
             job.status = 'lost'; job.closed = true; job.endTime = new Date().toISOString(); job.parsed.error = 'Runner metadata unavailable after startup grace period; worker was not redispatched';
             job.process.emit('close');
           }
@@ -729,6 +819,13 @@ export class JobStore {
         }
         const knownGone = (id: ProcessIdentity | null) => !id || (ids.has(id.pid) ? !sameIdentity(id, ids.get(id.pid)) : !mayBeAlive(id.pid));
         if (knownGone(job.meta.runner) && knownGone(job.meta.worker)) {
+          // TerminateJobObject can stop the runner before the broker publishes
+          // exit.json. Synchronize with its retained handles before freezing lost.
+          if (process.platform === 'win32' && job.meta.containment) {
+            await new WinJobClient().inspect(job.meta.containment);
+            refreshJob(job);
+            if (job.status !== 'running') continue;
+          }
           job.status = 'lost'; refreshJob(job); job.closed = true; job.endTime = lostTime(job.directory) ?? new Date().toISOString();
           job.process.emit('close');
         }
@@ -789,12 +886,35 @@ export class JobStore {
       // 第二次確認：完成資料才能刪；遺失 job 的身分必須先由 check 判定。
       if (job.status === 'running') continue;
       if (job.status === 'lost' && !job.meta.runner.started && mayBeAlive(job.pid)) continue;
+      if (jobHeld(job.directory)) continue;
       if (removeJobDirectory(job.directory)) { total -= bytes(job); count--; this.jobs.delete(job.meta.jobId); this.owned.delete(job.meta.jobId); removed.push(job.pid); }
     }
     return removed;
   }
-  async kill(pid: number) {
-    await this.ready; const job = this.get(pid); await this.check();
+  async kill(pid: number, jobId?: string) {
+    await this.ready; const job = this.get(pid, jobId); await this.check();
+    if (process.platform === 'win32') {
+      if (!job.meta.containment) {
+        if(hasContainmentIntent(this.dir,job.meta.jobId))throw new Error('Modern Windows job containment record missing; refusing legacy downgrade');
+        const ids=await this.lookup([job.meta.runner.pid]).catch(()=>new Map<number,ProcessIdentity>());
+        if(sameIdentity(job.meta.runner,ids.get(job.meta.runner.pid))) {
+          atomicJson(join(job.directory,'kill.json'),{runner:job.meta.runner,requestedAt:new Date().toISOString()});
+          const deadline=Date.now()+10000;while(Date.now()<deadline&&!readJobExit(job.directory))await new Promise(r=>setTimeout(r,50));refreshJob(job);
+        }
+        return {pid,jobId:job.meta.jobId,status:job.status,containment:'unknown',message:LEGACY_CONTAINMENT_NOTICE};
+      }
+      const status = await new WinJobClient().terminate(job.meta.containment);
+      if (status.state === 'unknown') {
+        const ids = await this.lookup([job.meta.runner.pid]).catch(()=>new Map<number,ProcessIdentity>());
+        if (sameIdentity(job.meta.runner, ids.get(job.meta.runner.pid))) {
+          atomicJson(join(job.directory,'kill.json'),{runner:job.meta.runner,requestedAt:new Date().toISOString()});
+        }
+      }
+      refreshJob(job);
+      if (status.state !== 'drained') return { pid, jobId: job.meta.jobId, status: job.status, containment: status.state, terminationConfirmed:false, message: '未確認終止：'+(status.reason ?? 'Termination unconfirmed') };
+      jobHeld(job.directory); // durable drained proof 已落盤，才允許解除 hold。
+      return { pid, jobId: job.meta.jobId, status: 'terminated', message: 'Job containment drained' };
+    }
     const startupDeadline = Date.now() + 15000;
     while (!job.meta.runner.started && job.status === 'running' && Date.now() < startupDeadline) { await new Promise(resolve => setTimeout(resolve, 25)); refreshJob(job); }
     if (job.status !== 'running') return { pid, jobId: job.meta.jobId, status: job.status, message: 'Process already terminated' };

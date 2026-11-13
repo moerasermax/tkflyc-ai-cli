@@ -4,7 +4,7 @@
  */
 import { readFileSync } from 'node:fs';
 import {
-  aiCliKernelApprove, aiCliKernelCancel, aiCliKernelCleanup, aiCliKernelEnabled, aiCliKernelProbe, aiCliKernelResult, aiCliKernelSetEnabled,
+  aiCliKernelContainmentException, aiCliKernelApprove, aiCliKernelCancel, aiCliKernelCleanup, aiCliKernelEnabled, aiCliKernelProbe, aiCliKernelResult, aiCliKernelSetEnabled,
   aiCliKernelMandateSave, aiCliKernelMandateApprove, aiCliKernelMandateList, aiCliKernelMandateShow, aiCliKernelMandateRevoke,
   aiCliKernelTrigger, aiCliKernelTriggersSetEnabled, aiCliKernelSchedule,
   aiCliKernelMemory,
@@ -17,6 +17,9 @@ import type { KernelMandateView } from './mandates.js';
 import type { KernelScheduleDeps } from './schedule.js';
 
 export const KERNEL_HELP_TEXT = `Usage: ai-cli kernel <動作> [選項]
+
+人工失聯例外（Windows 真 TTY）：cancel|cleanup <run> --confirm-containment-lost
+旗標只進入互動；需輸入 runId＋隨機碼；無 --yes／管線替代。cleanup 必須重新確認。
 
 ai-cli_kernel：給目標和委任書，它自己規劃、派 worker、驗收，做到有證據的結果。
 readonly-audit（預設）只讀不改。develop 會在獨立的 worktree 和分支裡改程式、跑測試，不合併、不推交付分支；可推專用回復點。
@@ -334,11 +337,21 @@ export async function runKernelCli(argv: string[], io: Io, deps: { schedule?: Ke
         return 0;
       }
       case 'cancel': {
+        for(const key of flags.keys())if(!['json','confirm-containment-lost'].includes(key))throw Error('cancel rejects --'+key);
+        if(flags.has('confirm-containment-lost')){
+          if(flags.get('confirm-containment-lost')!==true||flags.has('json')||positionals.length!==1)throw Error('confirmation requires one runId and no values/json');
+          const result=await aiCliKernelContainmentException(needRun(),'cancel');emit(result,result.detail+'\n');return 0;
+        }
         const status = await aiCliKernelCancel({ runId: needRun() });
         emit(status, formatStatus(status));
         return 0;
       }
       case 'cleanup': {
+        for(const key of flags.keys())if(!['json','confirm-containment-lost'].includes(key))throw Error('cleanup rejects --'+key);
+        if(flags.has('confirm-containment-lost')){
+          if(flags.get('confirm-containment-lost')!==true||flags.has('json')||positionals.length!==1)throw Error('confirmation requires one runId and no values/json');
+          const result=await aiCliKernelContainmentException(needRun(),'cleanup');emit(result,result.detail+'\n');return result.worktreeRemoved?0:1;
+        }
         const result = await aiCliKernelCleanup({ runId: needRun() });
         emit(result, `${result.detail}\n`);
         return result.worktreeRemoved ? 0 : 1;

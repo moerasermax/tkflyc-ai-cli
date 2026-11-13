@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
+import {mockJobContainment} from './helpers/mock-job-containment.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const results = [];
@@ -265,11 +266,13 @@ const metadataStore = new JobStore(fixtureRoot, 'cli', true, async () => new Map
 await metadataStore.ready;
 const originalSpawn = childProcess.spawn;
 const launchMetas = [];
+const containmentFixture=mockJobContainment();
 let intercepted = 0;
 try {
   childProcess.spawn = (_command, args) => {
     if (!/job-(?:launcher|runner)\.js$/.test(args[0])) throw new Error('unexpected fixture launch');
-    launchMetas.push(JSON.parse(readFileSync(join(args[1], 'launch.tmp'), 'utf8')).meta);
+    const meta=JSON.parse(readFileSync(join(args[1], 'launch.tmp'), 'utf8')).meta;
+    containmentFixture.assertMeta(meta);launchMetas.push(meta);
     throw new Error('issue24 fixture stopped before spawn');
   };
   syncBuiltinESMExports();
@@ -278,7 +281,7 @@ try {
     try { await metadataStore.start(cmd); }
     catch (error) { if (error.message.includes('issue24 fixture stopped before spawn')) intercepted++; }
   }
-} finally { childProcess.spawn = originalSpawn; syncBuiltinESMExports(); }
+} finally { childProcess.spawn = originalSpawn; syncBuiltinESMExports(); containmentFixture.restore(); }
 check(intercepted === 2 && launchMetas[0]?.strict === true && launchMetas[1] && !Object.hasOwn(launchMetas[1], 'strict'),
   'issue24 啟動 metadata 保存 strict 身分');
 for (const strict of [true, false, undefined]) {

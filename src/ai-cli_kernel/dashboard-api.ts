@@ -36,6 +36,10 @@ export function createDashboardEffects(kernel: typeof api = api, readGit: typeof
     async triggers() { return kernel.aiCliKernelTriggersEnabled(); },
     async execute(action) {
       const runId = action.runId ?? '';
+      if(action.id==='cancel'||action.id==='cleanup'){
+        for(const key of Object.keys(action))if(key!=='confirmedCommit'&&/containment|confirm|scope|requestId/i.test(key))throw Error('dashboard rejects containment exception fields');
+        if((action.args??[]).some(arg=>arg.startsWith('--')))throw Error('dashboard cancel/cleanup rejects exception flags');
+      }
       switch (action.id) {
         case 'approve': return kernel.aiCliKernelApprove({ runId, acknowledgeUnisolated: action.args.includes('--acknowledge-unisolated') });
         case 'cancel': return kernel.aiCliKernelCancel({ runId });

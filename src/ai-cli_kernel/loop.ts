@@ -1,3 +1,5 @@
+import { JournalUnavailableError } from './journal-lock.js';
+import {readJournalReconcile,clearJournalReconcile} from './journal-reconcile.js';
 /**
  * Kernel 迴圈：確定性程式，模型只出現在 decide 這一格。
  *
@@ -19,7 +21,8 @@ import { classifyJobResult, evaluateChecks, snapshotsEqual } from './verdict.js'
 import type { RunStore } from './journal.js';
 import { outOfScope } from './workspace.js';
 import { kernelTestInventory } from './evidence.js';
-import { workDirOf, type ActionOutcome, type ActionSpec, type BoundaryStatus, type FailureClass, type GitSnapshot, type JobRef, type KernelContract, type KernelEventBody, type KernelExecutor, type PlanStep, type QuotaSnapshot, type RawJobResult, type RunState, type WorkspaceOps, type WorkspaceState } from './types.js';
+import { isTerminalState, KernelUntrackedStartError, workDirOf, type ActionOutcome, type ActionSpec, type BoundaryStatus, type FailureClass, type GitSnapshot, type JobRef, type KernelContract, type KernelEventBody, type KernelExecutor, type PlanStep, type QuotaSnapshot, type RawJobResult, type RunState, type TerminalState, type WorkspaceOps, type WorkspaceState } from './types.js';
+import { confirmFullPermissionGone, isFullPermission, unsettledFullPermission } from './full-permission.js';
 import { autoSelection, plannedDispatch, readQuotaSnapshot, selectDispatch, type DispatchRequest } from './model-select.js';
 
 export interface KernelLoopDeps {
@@ -158,8 +161,28 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
     if (tokenWritten && read().runnerToken !== token) throw new SupersededError();
     store.append(body);
   };
+  /** 只給非終態用。終態一律走 enterTerminal：那裡會先確認全權限 worker 的程序都消失了。 */
   const setState = (state: RunState, reason?: string, detail?: string): void => {
+    if (isTerminalState(state)) throw new Error(`終態 ${state} 只能由 enterTerminal 寫入`);
     commit({ type: 'state', state, ...(reason ? { reason } : {}), ...(detail ? { detail } : {}) });
+  };
+  /**
+   * 終態關卡。未結清的全權限動作（還沒有結果，或有結果但判定沒落盤）只要有一個確認不了程序已經消失，
+   * 就寫 stop_pending 並回 false；原本要進的終態與原因留在 detail。終態一寫下去 cleanup 就能拆 worktree，
+   * 所以「先確認、再寫」不能反過來。之後再 cancel 會重查一次。
+   */
+  const settleFullPermission = async (intended: TerminalState, reason?: string, detail?: string): Promise<boolean> => {
+    const block = await confirmFullPermissionGone(unsettledFullPermission(read()),
+      { executor, now: () => deps.now(), sleep: ms => deps.sleep(ms), pollMs: deps.pollMs, confirmMs: deps.killConfirmMs, onLegacy: detail=>commit({type:'compatibility_warning',detail}) }, { kill: true });
+    if (!block) return true;
+    setState('stop_pending', intended === 'completed' ? 'completion_pending' : block.reason, `${block.detail}。原本要寫入的狀態：${intended}${reason ? `／${reason}` : ''}${detail ? `（${detail.slice(0, 2000)}）` : ''}`);
+    return false;
+  };
+  /** loop 內唯一寫終態的地方。回傳實際落盤的狀態：過不了關卡就是 stop_pending。 */
+  const enterTerminal = async (state: TerminalState, reason?: string, detail?: string): Promise<RunState> => {
+    if (!await settleFullPermission(state, reason, detail)) return 'stop_pending';
+    commit({ type: 'state', state, ...(reason ? { reason } : {}), ...(detail ? { detail } : {}) });
+    return state;
   };
 
   const observeWorkspace = (): void => {
@@ -172,11 +195,12 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
   const initial = read();
   if (initial.state !== 'running') return initial.state;
   if (!initial.approvedDigest || store.contractDigest() !== initial.approvedDigest) {
-    setState('failed', 'contract_mismatch', '委任書內容和核准時的 digest 不一致，拒絕執行');
-    return 'failed';
+    return enterTerminal('failed', 'contract_mismatch', '委任書內容和核准時的 digest 不一致，拒絕執行');
   }
   const startVersion = deps.versionId();
+  const reconcile=readJournalReconcile(store.dir);
   store.append({ type: 'runner_started', pid: deps.pid, versionId: startVersion, token });
+  clearJournalReconcile(store.dir,reconcile);
   tokenWritten = true;
   if (!initial.baselineRecorded) {
     if (develop) store.writeOutput('refs-baseline', ws!.refs(develop).join('\n'));
@@ -205,7 +229,7 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
     await executor.kill(job).catch(() => false);
     const deadline = deps.now() + deps.killConfirmMs;
     for (;;) {
-      if (await executor.isGone(job).catch(() => false)) return true;
+      if (await executor.isGone(job).catch(() => false)) { if(job.legacyNotice)commit({type:'compatibility_warning',detail:job.jobId+'：'+job.legacyNotice});return true; }
       if (deps.now() >= deadline) return false;
       await deps.sleep(deps.pollMs);
     }
@@ -219,8 +243,8 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
       const view = read();
       if (superseded(view)) return false;
       if (store.cancelRequested()) {
-        if (await stopJob(job)) { recordOutcome(action, failureOutcome('cancelled', '使用者取消')); setState('cancelled', 'user_cancelled'); }
-        else setState('stop_pending', 'worker_still_alive', `job ${job.jobId} 還沒確認停止`);
+        if (await stopJob(job)) { recordOutcome(action, failureOutcome('cancelled', '使用者取消')); await enterTerminal('cancelled', 'user_cancelled'); }
+        else setState('stop_pending', 'worker_still_alive', `job ${job.jobId}（pid ${job.pid}）還沒確認停止`);
         return false;
       }
       const overAction = deps.now() > actionDeadline;
@@ -228,7 +252,7 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
       if (overAction || overWall) {
         const detail = overWall ? `執行時間超過 ${contract.budget.maxWallMinutes} 分鐘` : `單一 job 超過 ${contract.budget.maxActionMinutes} 分鐘`;
         if (await stopJob(job)) { recordOutcome(action, failureOutcome('timeout', detail)); return true; }
-        setState('stop_pending', 'worker_still_alive', `job ${job.jobId} ${detail}，還沒確認停止`);
+        setState('stop_pending', 'worker_still_alive', `job ${job.jobId}（pid ${job.pid}）${detail}，還沒確認停止`);
         return false;
       }
       const poll = await executor.poll(job);
@@ -329,7 +353,7 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
   const confirmWorkerGone = async (job: JobRef): Promise<boolean> => {
     const deadline = deps.now() + deps.killConfirmMs;
     for (;;) {
-      if (await executor.isGone(job).catch(() => false)) return true;
+      if (await executor.isGone(job).catch(() => false)) { if(job.legacyNotice)commit({type:'compatibility_warning',detail:job.jobId+'：'+job.legacyNotice});return true; }
       if (deps.now() >= deadline) return stopJob(job);
       await deps.sleep(deps.pollMs);
     }
@@ -340,8 +364,9 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
     const stepId = record.spec.stepId!;
     const actionId = record.spec.actionId;
     const outcome = record.outcome!;
-    if (develop && record.spec.mode === 'write' && record.job && !await confirmWorkerGone(record.job)) {
-      setState('stop_pending', 'worker_still_alive', `job ${record.job.jobId} 回報結束了但程序還在，不能接著動工作目錄`);
+    if (develop && isFullPermission(record.spec) && record.job && !await confirmWorkerGone(record.job)) {
+      const blockers = await executor.blockers?.(record.job).catch(() => [] as string[]) ?? [];
+      setState('stop_pending', outcome.ok ? 'completion_pending' : 'worker_still_alive', `job ${record.job.jobId}（pid ${record.job.pid}）回報結束了但程序還在，不能接著動工作目錄${blockers.length ? `：${blockers.slice(0, 8).join('、')}` : ''}`);
       return false;
     }
     if (!outcome.ok) {
@@ -372,10 +397,11 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
   const runCheck = async (kind: 'setup' | 'test' | 'context', command: string, seq: number): Promise<{ exitCode: number | null; timedOut: boolean; tail: string; output?: string } | null> => {
     const lease = kind === 'context' ? null : await waitForTestLock(store, () => store.cancelRequested() || superseded(read()), heldBy => commit(heldBy ? { type: 'test_lock_wait', heldBy } : { type: 'test_lock_acquired' }));
     if (kind !== 'context' && !lease) {
-      if (store.cancelRequested() && !superseded(read())) setState('cancelled', 'user_cancelled');
+      if (store.cancelRequested() && !superseded(read())) await enterTerminal('cancelled', 'user_cancelled');
       return null;
     }
-    let safeToRelease = true;
+    let safeToRelease = true, recorded = false;
+    let checkFailed = false;
     let handle: ReturnType<WorkspaceOps['startCheck']> | undefined;
     try {
     try { handle = ws!.startCheck(command, kind === 'context' ? contract.workFolder : workDir, join(store.dir, 'checks', `${kind}-${seq}.log`), kind === 'context' ? 8000 : undefined, kind !== 'context'); }
@@ -395,10 +421,11 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
       // spawn 完馬上記 pid，查身分要好幾秒，不能等。這樣當機時最多只漏掉幾毫秒的窗口。
       commit({ type: 'check_started', kind, pid: handle.pid, started: '', name: '' });
       handle.begin?.();
+      recorded = true; // First check_started is durable and begin returned; recovery can find this command.
       const identity = await handle.identify();
       await lease?.command({ pid: handle.pid, ...identity });
       commit({ type: 'check_started', kind, pid: handle.pid, started: identity.started, name: identity.name });
-    } catch (error) { safeToRelease = await handle.kill(); throw error; }
+    } catch (error) { if (!(error instanceof JournalUnavailableError && recorded)) safeToRelease = await handle.kill().catch(() => false); throw error; }
     // 總時間也要算進來：測試跑得比剩下的預算久時，不能等它自己跑完。
     const startedAt = deps.now();
     const wallLeftMs = (contract.budget.maxWallMinutes - activeMinutes(read(), startedAt)) * 60000;
@@ -406,7 +433,7 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
     for (;;) {
       if (superseded(read())) { safeToRelease = await handle.kill(); return null; }
       if (store.cancelRequested()) {
-        if (await stopConfirmed()) setState('cancelled', 'user_cancelled');
+        if (await stopConfirmed()) await enterTerminal('cancelled', 'user_cancelled');
         return null;
       }
       if (deps.now() > deadline) {
@@ -422,9 +449,17 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
       }
     }
     } catch (error) {
-      if (handle && !safeToRelease) safeToRelease = await handle.kill().catch(() => false);
+      checkFailed = true;
+      if (!(error instanceof JournalUnavailableError && recorded) && handle && !safeToRelease) safeToRelease = await handle.kill().catch(() => false);
       throw error;
-    } finally { if (safeToRelease) await lease?.release(); }
+    } finally {
+      if (safeToRelease) try { await lease?.release(); }
+      catch (releaseError) {
+        if (!checkFailed) throw releaseError;
+        // Keep the original failure/classification; cleanup failure is secondary.
+        console.error('test lease release failed while preserving original check error:', releaseError);
+      }
+    }
   };
 
   /** 上一個 runner 留下的檢查指令。舊程序還在跑就不能接著動工作目錄。 */
@@ -575,8 +610,10 @@ export async function runKernelLoop(deps: KernelLoopDeps): Promise<RunState> {
   };
 
   /** 所有檢查都過了才走到這裡。 */
-  const finalize = (view: RunView): void => {
+  const finalize = async (view: RunView): Promise<void> => {
     const stepId = view.acceptance!.stepId;
+    // 寫報告之前先過終態關卡：全權限 worker 還沒確認消失，就不能宣告交付。
+    if (!await settleFullPermission('completed', 'delivered')) return;
     // 驗收和交付之間可能隔著一次暫停，這段時間分支可能又動過。當初的驗收不能替現在的 HEAD 背書。
     if (develop) {
       const findings = developFindings(view);
@@ -643,7 +680,7 @@ ${stat}
       context: view.context,
       finishedAt: new Date(deps.now()).toISOString(),
     });
-    setState('completed', 'delivered', warnings.join(' '));
+    await enterTerminal('completed', 'delivered', warnings.join(' '));
   };
 
   /** 自動選模型的委任書才有；明示的（含所有舊委任書）是 null，下面的改派整段不會動到它們。 */
@@ -724,13 +761,16 @@ ${stat}
     // 探針和額度查詢可能花掉不少時間，派工前再確認一次：這段時間可能已經被取消或超時。
     const fresh = read();
     if (superseded(fresh)) return false;
-    if (store.cancelRequested()) { setState('cancelled', 'user_cancelled'); return false; }
-    if (activeMinutes(fresh, deps.now()) >= contract.budget.maxWallMinutes) { setState('budget_exhausted', 'wall_clock', `已用滿 ${contract.budget.maxWallMinutes} 分鐘`); return false; }
+    if (store.cancelRequested()) { await enterTerminal('cancelled', 'user_cancelled'); return false; }
+    if (activeMinutes(fresh, deps.now()) >= contract.budget.maxWallMinutes) { await enterTerminal('budget_exhausted', 'wall_clock', `已用滿 ${contract.budget.maxWallMinutes} 分鐘`); return false; }
     // 先記意圖。這行丟例外就不會執行，這正是要的行為。
     commit({ type: 'action_intent', action: spec });
     let job: JobRef;
     try { job = await executor.start(spec, contract); }
     catch (error) {
+      // 程序已啟動卻追蹤不到、也沒確認停掉：把它的身分記成這個動作的 job，之後的關卡才查得到它。
+      // 確定沒有程序的啟動失敗不會帶這個，動作就沒有 job。
+      if (error instanceof KernelUntrackedStartError) commit({ type: 'action_started', actionId: spec.actionId, job: error.job });
       recordOutcome(spec, failureOutcome('start_failed', (error as Error).message));
       return true;
     }
@@ -767,7 +807,8 @@ ${stat}
     if (view.openCheck && !await clearOrphanCheck(view)) return read().state;
     // 日誌先存候選，再補本機記憶。當在兩次寫入之間也不遺失；已 promote/revoke 的 id 不覆蓋。
     deps.memory?.candidates(view.candidateMemories);
-    if (store.cancelRequested() && openActions(view).length === 0) { setState('cancelled', 'user_cancelled'); return 'cancelled'; }
+    // 沒有進行中的動作不代表沒有程序：job 可能已經回了結果、判定還沒落盤、程序卻還活著。由 enterTerminal 確認。
+    if (store.cancelRequested() && openActions(view).length === 0) return await enterTerminal('cancelled', 'user_cancelled');
     if (develop && !view.workspaceReady && !prepareCheckpoint(view)) return read().state;
     if (contract.contextCommand && !view.context) {
       if (view.contextStarted) {
@@ -798,10 +839,14 @@ ${stat}
     }
 
     const stop = derivedStop(view);
-    if (stop) { setState(stop.state, stop.reason, stop.detail); return stop.state; }
+    if (stop) {
+      if (isTerminalState(stop.state)) return await enterTerminal(stop.state, stop.reason, stop.detail);
+      setState(stop.state, stop.reason, stop.detail);
+      return stop.state;
+    }
 
     if (view.acceptance?.passed) {
-      finalize(view);
+      await finalize(view);
       const after = read();
       if (after.state === 'running') continue; // 交付前發現分支又動過，回去重來。
       return after.state;
@@ -814,14 +859,14 @@ ${stat}
     }
 
     const { budget } = contract;
-    if (activeMinutes(view, deps.now()) >= budget.maxWallMinutes) { setState('budget_exhausted', 'wall_clock', `已用滿 ${budget.maxWallMinutes} 分鐘`); return 'budget_exhausted'; }
+    if (activeMinutes(view, deps.now()) >= budget.maxWallMinutes) return await enterTerminal('budget_exhausted', 'wall_clock', `已用滿 ${budget.maxWallMinutes} 分鐘`);
     const uncachedTokens = view.counters.inputTokens - view.counters.cachedTokens;
-    if (uncachedTokens >= budget.maxInputTokens) { setState('budget_exhausted', 'input_tokens', `已用 ${uncachedTokens} 未快取的 input tokens（另有 ${view.counters.cachedTokens} 快取）`); return 'budget_exhausted'; }
+    if (uncachedTokens >= budget.maxInputTokens) return await enterTerminal('budget_exhausted', 'input_tokens', `已用 ${uncachedTokens} 未快取的 input tokens（另有 ${view.counters.cachedTokens} 快取）`);
     // 更新會原地換掉 dist：停下來，不讓舊的探針結果替新程式背書。
     if (deps.versionId() !== startVersion) { setState('version_drift', 'dist_changed', '執行中偵測到 ai-cli 程式被更新'); return 'version_drift'; }
 
     if (develop) {
-      if (view.testFailures >= budget.maxTestFailures) { setState('budget_exhausted', 'test_failures', `測試已經失敗 ${view.testFailures} 次`); return 'budget_exhausted'; }
+      if (view.testFailures >= budget.maxTestFailures) return await enterTerminal('budget_exhausted', 'test_failures', `測試已經失敗 ${view.testFailures} 次`);
       const report = view.plan?.reportStep;
       const reportPassed = !!report && !!view.stepResults.get(report)?.passed;
       const upcoming = nextStep(view);
@@ -840,11 +885,11 @@ ${stat}
 
     const step = nextStep(view);
     if (step) {
-      if (view.counters.workerSteps >= budget.maxWorkerSteps) { setState('budget_exhausted', 'worker_steps', `已派滿 ${budget.maxWorkerSteps} 個 worker`); return 'budget_exhausted'; }
+      if (view.counters.workerSteps >= budget.maxWorkerSteps) return await enterTerminal('budget_exhausted', 'worker_steps', `已派滿 ${budget.maxWorkerSteps} 個 worker`);
       if (!await dispatch(makeSpec(view, 'worker', step), requestFor(step))) return read().state;
       continue;
     }
-    if (view.counters.decides >= budget.maxDecides) { setState('budget_exhausted', 'decides', `已決策滿 ${budget.maxDecides} 次`); return 'budget_exhausted'; }
+    if (view.counters.decides >= budget.maxDecides) return await enterTerminal('budget_exhausted', 'decides', `已決策滿 ${budget.maxDecides} 次`);
     // 自動選模型：決策前先讀一次額度，給 decide 看目前各家剩餘，同一份也拿來判斷要不要改派。
     const quotas = selection ? await quotaSnapshot() : undefined;
     if (!await dispatch(makeSpec(view, 'decide', undefined, quotas), requestFor(), quotas)) return read().state;

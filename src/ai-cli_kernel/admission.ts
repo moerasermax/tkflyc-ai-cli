@@ -339,7 +339,7 @@ export function startLegacyMarkerWatch(store: RunStore, everyMs = 20000, check: 
  * reclamation before it creates runner.json; keep the per-run lock unchanged. */
 export async function claimRunnerSlot(store: RunStore, claim: () => Promise<boolean>, deps: Partial<MutexRetryDeps> = {}): Promise<boolean> {
   return retryProcessMutex('admission', async () => {
-    if (!readActiveRuns().some(slot => slot.runId === store.runId)) return false;
+    if (store.cancelRequested() || !readActiveRuns().some(slot => slot.runId === store.runId)) return false;
     return claim();
   }, deps);
 }

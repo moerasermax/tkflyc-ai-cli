@@ -1,3 +1,4 @@
+import { preserveDurableFailure } from '../../tests/helpers/durable-failure-evidence.mjs';
 /** 驗證與突變測試共用：設定、狀態、快取全部隔離；禁止自動更新及 git 網路協定。 */
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -6,7 +7,24 @@ import { fileURLToPath } from 'node:url';
 
 // 不預先實體化 node:fs 的 ESM facade，保留 verify-alias-config 的讀取注入能力。
 const fs = createRequire(import.meta.url)('node:fs');
+if (process.argv[1]?.endsWith('mutation-test.mjs')) process.env.AI_CLI_MUTATION_TEST='1';
 const temp = fs.mkdtempSync(join(tmpdir(), 'ai-cli-catalog-tests-'));
+// Registered before broker/state teardown; retain unexpected nonzero exits too.
+process.once('exit', code => { if (code) preserveDurableFailure({ name: 'catalog-exit-'+process.pid, result: { exitCode: code }, roots: [temp] }); });
+// A mutation's native broker must be compiled from that candidate, never reuse
+// the baseline's still-live daemon. Descendant fixtures retain this namespace.
+const mutationVerify=process.env.AI_CLI_MUTATION_TEST==='1' && /[\\/]verify-[^\\/]+\.mjs$/.test(process.argv[1]??'');
+if (process.platform === 'win32' && (!process.env.AI_CLI_CONTAINMENT_TEST || mutationVerify)) {
+  const { randomUUID } = createRequire(import.meta.url)('node:crypto');
+  const config = {name:'TkflycAiCliContainmentBroker-test-'+randomUUID(),directory:join(temp,'containment'),idleMs:60000};
+  process.env.AI_CLI_CONTAINMENT_TEST=JSON.stringify(config);
+  process.once('exit',()=>{
+    if (!fs.existsSync(join(config.directory,'broker.json'))) return;
+    const {spawnSync}=createRequire(import.meta.url)('node:child_process');
+    const result=spawnSync(process.execPath,[fileURLToPath(new URL('../../tests/helpers/containment-cleanup.mjs',import.meta.url))],{windowsHide:true,stdio:'pipe',encoding:'utf8',env:process.env});
+    if(result.status!==0){console.error('FAIL containment fixture cleanup: '+result.stdout+result.stderr);process.exitCode=1;}
+  });
+}
 process.env.AI_CLI_AUTO_UPDATE = 'off';
 // 測試預設模擬主導者；worker 防護測試自行指定每個環境組合，不繼承執行測試的 worker。
 delete process.env.AI_CLI_WORKER;

@@ -684,7 +684,7 @@ check('成功的報告提到限流不算失敗', classifyJobResult({ status: 'co
     const executor = new FileJobExecutor();
     const job = { pid: 999999, jobId: '00000000-0000-4000-8000-000000000001' };
     check('jobs 目錄不存在才算確定沒有', await executor.find('K-none') === null);
-    check('jobs 目錄不存在時算已經消失', await executor.isGone(job) === true);
+    check('jobs 目錄不存在：legacy 沿 HEAD 相容且 Windows 留下子孫未驗證警示', await executor.isGone(job) === true && (process.platform !== 'win32' || job.legacyNotice?.includes('子孫未驗證')));
     mkdirSync(join(state, 'jobs', job.jobId), { recursive: true });
     writeFileSync(join(state, 'jobs', job.jobId, 'meta.json'), '{壞掉的 json');
     check('有目錄讀不出 meta 時，查不到不等於沒有', await executor.find('K-none') === 'unknown');
@@ -986,7 +986,7 @@ const rejecting = async promise => { try { await promise; return null; } catch (
   executor.gone = false;
   const { repo, spec } = { repo: contract.develop.repoRoot, spec: contract.develop };
   const state = await runKernelLoop(devDeps(store, contract, executor));
-  check('worker 回報結束但程序還在，不會 commit', state === 'stop_pending' && view(store).reason === 'worker_still_alive' && git(repo, 'rev-parse', spec.branch) === spec.baseCommit, `${state} ${view(store).reason}`);
+  check('worker 回報結束但程序還在，不會 commit', state === 'stop_pending' && view(store).reason === 'completion_pending' && git(repo, 'rev-parse', spec.branch) === spec.baseCommit, `${state} ${view(store).reason}`);
   check('程序還在時會先試著停掉它', executor.killed.length === 1, executor.killed.join());
   const stillAlive = new FakeExecutor(writes('good\n'));
   stillAlive.gone = false;

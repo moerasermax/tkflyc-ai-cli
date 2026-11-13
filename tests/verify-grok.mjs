@@ -1,3 +1,4 @@
+import { assertDurableStatus, preserveDurableFailure } from './helpers/durable-failure-evidence.mjs';
 /** Grok stub-only：參數、rules、usage、vendor 探查、runner 接回與唯讀 fail-closed。 */
 import '../tools/stubs/catalog-test-env.mjs';
 import assert from 'node:assert/strict';
@@ -28,7 +29,7 @@ const section = process.argv[2];
 let passed = 0, failed = 0;
 const promptFiles = new Set();
 const stores = new Set();
-async function check(name, fn) { try { await fn(); passed++; console.log('PASS ' + name); } catch (e) { failed++; console.log('FAIL ' + name + '\n' + e.stack); } }
+async function check(name, fn) { try { await fn(); passed++; console.log('PASS ' + name); } catch (e) { failed++; preserveDurableFailure({name, result: { assertionError: String(e) }, roots: [TEMP]}); console.log('FAIL ' + name + '\n' + e.stack); } }
 const value = (args, flag) => args[args.indexOf(flag) + 1];
 const input = { cliPath: 'C:\\Users\\stub\\.grok\\bin\\grok.exe', cwd: ROOT,
   prompt: '長中文 "quotes"\n'.repeat(3000), resolvedModel: 'grok-4.7', rawModel: 'grok-4.7', reasoningEffort: 'medium' };
@@ -180,7 +181,7 @@ if (!section || section === 'jobs') {
       await second.ready;
       assert.equal(second.get(job.pid).recovered, true); assert.equal(second.get(job.pid).status, 'running');
     } finally { writeFileSync(release, 'ready'); }
-    const [result] = await second.wait([job.pid], 15); assert.equal(result.status, 'completed'); assert.equal(result.recovered, true);
+    const [result] = await second.wait([job.pid], 15); assertDurableStatus(result, 'completed', { name: 'grok', roots: [TEMP] }); assert.equal(result.recovered, true);
     assert.equal(result.agentOutput.message, '完整輸出：PONG'); assert.equal(result.agentOutput.session_id, 'grok-stub-session'); assert.equal(result.agentOutput.usage.input_tokens, 18970);
     const meta = JSON.parse(readFileSync(join(job.directory, 'meta.json'))); assert.equal(meta.sessionId, 'original'); assert.equal(meta.agent, 'grok');
     const sent = JSON.parse(readFileSync(capture)); assert.equal(sent.worker, '1'); assert.equal(sent.rules, WORKER_CONTEXT + '\n\nsystem test');
@@ -203,12 +204,12 @@ if (!section || section === 'jobs') {
   });
   await check('Grok MCP and CLI process services select durable runner', async () => {
     const svc = new ProcessService({ cliPaths: { claude: '', codex: '', antigravity: '', grok: process.execPath } }); await svc.ready;
-    try { const { pid } = await svc.startProcess({ model: 'grok-4.7', workFolder: ROOT, prompt: '{}' }); const result = (await svc.waitForProcesses([pid], 15))[0]; assert.equal(result.status, 'completed'); assert.equal(result.agent, 'grok'); }
+    try { const { pid } = await svc.startProcess({ model: 'grok-4.7', workFolder: ROOT, prompt: '{}' }); const result = (await svc.waitForProcesses([pid], 15))[0]; assertDurableStatus(result, 'completed', { name: 'grok', roots: [TEMP] }); assert.equal(result.agent, 'grok'); }
     finally { svc.dispose(); }
     const file = new FileProcessService({ stateDir: join(TEMP, 'file-service'), cliPaths: { grok: process.execPath } });
     try {
       const { pid } = await file.startProcess({ model: 'grok-4.7', cwd: ROOT, prompt: '{}' });
-      const [r] = await file.waitForProcesses([pid], 15); assert.equal(r.status, 'completed'); assert.equal(r.agent, 'grok');
+      const [r] = await file.waitForProcesses([pid], 15); assertDurableStatus(r, 'completed', { name: 'grok', roots: [TEMP] }); assert.equal(r.agent, 'grok');
     } finally { file.dispose(); }
   });
 }

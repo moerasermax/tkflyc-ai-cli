@@ -5,10 +5,11 @@
  * 那一行視同沒發生；中間的行壞掉則是真的損毀，不猜，直接報錯。
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, truncateSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, fstatSync, ftruncateSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, truncateSync, writeFileSync, writeSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { LegacyMarkerReplaceFailed, readActiveRuns, readReservedRun, releaseRunSlot } from './admission.js';
-import { ProcessMutexBusy, type MutexRetryDeps } from './process-mutex.js';
+import { ProcessMutexBusy, ProcessMutexReadError, type MutexRetryDeps } from './process-mutex.js';
+import { takeJournalLock, retryJournalIO, journalUnavailable } from './journal-lock.js';
 import { jobStateDir } from '../core/live-jobs.js';
 import type { KernelContract, KernelEvent, KernelEventBody, KernelReleaseEvent } from './types.js';
 
@@ -34,14 +35,26 @@ export function atomicWrite(path: string, content: string): void {
   try {
     const fd = openSync(temp, 'w', 0o600);
     try { writeSync(fd, content); fsyncSync(fd); } finally { closeSync(fd); }
-    renameSync(temp, path);
-  } finally { rmSync(temp, { force: true }); }
+    retryJournalIO(()=>renameSync(temp, path));
+  } catch(error) {
+    try { rmSync(temp, { force: true }); } catch { /* Preserve the failed write's cause. */ }
+    throw journalUnavailable(error);
+  }
+  try { rmSync(temp, { force: true }); } catch(error) { throw journalUnavailable(error); }
 }
 
 export function digestText(text: string): string { return createHash('sha256').update(text).digest('hex'); }
 
 export class RunStore {
   readonly runId: string;
+  private journalWriter = false;
+  /** Synchronous writers wait briefly; native-dead unique tickets are reclaimable. */
+  private takeJournalWriter(): () => void { return takeJournalLock(this.dir); }
+  async withJournalWriter<T>(work:()=>Promise<T>):Promise<T> {
+    if(this.journalWriter)throw Error('journal writer reentry');
+    const release=this.takeJournalWriter();this.journalWriter=true;
+    try{return await work();}finally{this.journalWriter=false;release();}
+  }
   constructor(readonly dir: string) { this.runId = basename(dir); }
 
   get contractPath(): string { return join(this.dir, 'contract.json'); }
@@ -102,6 +115,7 @@ export class RunStore {
   contractDigest(): string { return digestText(readFileSync(this.contractPath, 'utf8')); }
 
   read(): KernelEvent[] {
+    if(existsSync(join(this.dir,'journal.durability-unknown')))throw Error('journal durability unknown; manual reconciliation required');
     let text: string;
     try { text = readFileSync(this.journalPath, 'utf8'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
@@ -122,8 +136,14 @@ export class RunStore {
 
   /** 寫入並 fsync，回來才算落盤。寫不進去會丟例外，呼叫端不可以繼續動作。 */
   append(body: KernelEventBody): KernelEvent {
+    const release=this.journalWriter?()=>{}:this.takeJournalWriter();
+    try{return this.appendOwned(body);}finally{release();}
+  }
+  private appendOwned(body: KernelEventBody): KernelEvent {
+    if(existsSync(join(this.dir,'journal.durability-unknown')))throw Error('journal durability unknown; manual reconciliation required');
     const existing = this.read();
     const seq = (existing.at(-1)?.seq ?? 0) + 1;
+    if(body.type==='containment_lost_confirmed'&&(body.observedSeq!==seq-1||body.runId!==this.runId))throw Error('containment confirmation journal changed');
     const event = { ...body, seq, at: new Date().toISOString() } as KernelEvent;
     // 上一次當掉留下的半行從來沒有生效，截掉它。只補換行的話，它會變成中間行，整份日誌都讀不了。
     if (existsSync(this.journalPath)) {
@@ -131,7 +151,13 @@ export class RunStore {
       if (raw.length > 0 && raw[raw.length - 1] !== 0x0a) truncateSync(this.journalPath, raw.lastIndexOf(0x0a) + 1);
     }
     const fd = openSync(this.journalPath, 'a', 0o600);
-    try { writeSync(fd, `${JSON.stringify(event)}\n`); fsyncSync(fd); } finally { closeSync(fd); }
+    const length=fstatSync(fd).size;
+    try { writeSync(fd, `${JSON.stringify(event)}\n`); fsyncSync(fd); }
+    catch(error){
+      // A complete JSON line is not a committed event when fsync failed.
+      try{const rollback=openSync(this.journalPath,'r+');try{ftruncateSync(rollback,length);fsyncSync(rollback);}finally{closeSync(rollback);}}catch{writeFileSync(join(this.dir,'journal.durability-unknown'),'fsync/rollback failed');}
+      throw error;
+    }finally{closeSync(fd);}
     return event;
   }
 
@@ -197,7 +223,8 @@ export function recordSlotReleaseFailed(runId: string, detail: string): void {
  * 釋放名額。admission 協調忙碌時由 releaseRunSlot 有限重試（retryProcessMutex：3 次、間隔 1 秒）；
  * 仍忙碌就記 slot_release_failed 並回傳 false，不丟例外——已結束的 run 不能因此被改寫成 failed。
  * active.lock 原子覆蓋重試耗盡（LegacyMarkerReplaceFailed，I2）比照辦理，記錄說明不同。
- * 其他錯誤照常丟出。`keep` 在 admission 互斥區內判斷，回 true 就保留名額。
+ * 票券持續讀取失敗（ProcessMutexReadError）亦保留原因並延後釋放；其他錯誤照常丟出。
+ * `keep` 在 admission 互斥區內判斷，回 true 就保留名額。
  */
 export async function releaseActiveLock(runId: string, options: { deps?: Partial<MutexRetryDeps>; keep?: () => boolean | Promise<boolean> } = {}): Promise<boolean> {
   try { await releaseRunSlot(runId, options.deps, options.keep); return true; }
@@ -206,7 +233,7 @@ export async function releaseActiveLock(runId: string, options: { deps?: Partial
       recordSlotReleaseFailed(runId, `${SLOT_RELEASE_MARKER_NOTE}（${error.message}）`);
       return false;
     }
-    if (!(error instanceof ProcessMutexBusy)) throw error;
+    if (!(error instanceof ProcessMutexBusy) && !(error instanceof ProcessMutexReadError)) throw error;
     recordSlotReleaseFailed(runId, `${SLOT_RELEASE_DEFERRED_NOTE}（${error.message}）`);
     return false;
   }

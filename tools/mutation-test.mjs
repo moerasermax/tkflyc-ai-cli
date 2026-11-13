@@ -8,7 +8,7 @@
  * 用法（建議）：不給路徑，harness 自己在系統暫存目錄建 worktree（HEAD），結束時自動收掉
  *   node tools/mutation-test.mjs
  *   node tools/mutation-test.mjs --script verify-update.mjs
- *   node tools/mutation-test.mjs --script verify-update.mjs --name 面板   （只跑名稱含「面板」的）
+ *   node tools/mutation-test.mjs --script verify-update.mjs --name 完整突變名稱   （名稱精確比對）
  *   注意測的是 HEAD——還沒 commit 的改動不在裡面。收尾順序與失敗時的手動步驟見 cleanupTempWorktree()。
  *
  * 用法（手動指定 worktree，不會自動刪任何東西）：
@@ -31,6 +31,7 @@
  */
 
 import './stubs/catalog-test-env.mjs';
+import { selectMutations } from './mutation-selection.mjs';
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -58,9 +59,9 @@ function cleanupTempWorktree(parent, wt) {
     }
     if (existsSync(link) || isLink(link)) throw new Error('node_modules junction 解除後仍存在');
     if (!existsSync(MAIN_PROBE)) throw new Error('主 repo 的 node_modules 已受損');
-    execFileSync('git', ['worktree', 'remove', '--force', wt], { cwd: REPO, stdio: 'pipe' });
+    execFileSync('git', ['worktree', 'remove', '--force', wt], { windowsHide:true, cwd: REPO, stdio: 'pipe' });
     rmSync(parent, { recursive: true, force: true }); // 這時只剩 config 備份等暫存檔
-    execFileSync('git', ['worktree', 'prune'], { cwd: REPO, stdio: 'pipe' });
+    execFileSync('git', ['worktree', 'prune'], { windowsHide:true, cwd: REPO, stdio: 'pipe' });
     if (!existsSync(MAIN_PROBE)) throw new Error('收尾後主 repo 的 node_modules 不見了');
     console.log(`暫存 worktree 已收掉（${wt}），主 repo 的 node_modules 完好`);
   } catch (error) {
@@ -76,7 +77,7 @@ function createTempWorktree() {
   if (!existsSync(MAIN_PROBE)) throw new Error('主 repo 沒有 node_modules（先 npm install）');
   const parent = mkdtempSync(join(tmpdir(), 'ai-cli-mut-'));
   const wt = join(parent, 'wt');
-  execFileSync('git', ['worktree', 'add', '--detach', wt, 'HEAD'], { cwd: REPO, stdio: 'pipe' });
+  execFileSync('git', ['worktree', 'add', '--detach', wt, 'HEAD'], { windowsHide:true, cwd: REPO, stdio: 'pipe' });
   // 收尾掛在 exit：基準失敗的 process.exit(1)、未捕捉的例外都會觸發；Ctrl+C 轉成 exit。
   process.on('exit', () => cleanupTempWorktree(parent, wt));
   process.on('SIGINT', () => process.exit(130));
@@ -94,12 +95,15 @@ const CONFIG_BAK = join(ROOT, '..', 'config.json.mutbak');
 
 /** 每個突變：改壞一處，期待某條斷言失敗。 */
 const selectedScript = process.argv.includes('--script') ? process.argv[process.argv.indexOf('--script') + 1] : undefined;
-// --name 只跑名稱含該字串的突變：一支 verify 腳本跑一次要數分鐘，只改了其中一段時不必全部重跑。
+// --name 精確選一筆，避免名稱子字串意外帶入另一個平台的突變。
 const selectedName = process.argv.includes('--name') ? process.argv[process.argv.indexOf('--name') + 1] : undefined;
-const MUTATIONS = JSON.parse(readFileSync(new URL('./mutations.json', import.meta.url), 'utf-8'))
+const selected = JSON.parse(readFileSync(new URL('./mutations.json', import.meta.url), 'utf-8'))
   .filter((mutation) => !selectedScript || (mutation.script ?? 'verify-alias-config.mjs') === selectedScript)
-  .filter((mutation) => !selectedName || mutation.name.includes(selectedName));
-if (!MUTATIONS.length) throw new Error('沒有符合的突變，拒絕空跑');
+  .filter((mutation) => !selectedName || mutation.name === selectedName);
+const {runnable:MUTATIONS,skipped}=selectMutations(selected,process.platform,file=>readFileSync(join(ROOT,file),'utf8'));
+const platformSkipped=skipped.length;
+for(const m of skipped)console.log('SKIP platform '+process.platform+': '+m.name);
+if (!MUTATIONS.length) { if(platformSkipped) { console.log(`ALL SKIPPED: SKIP ${platformSkipped}, KILLED 0; NO TESTS EXECUTED`); process.exit(2); } throw new Error('沒有符合的突變，拒絕空跑'); }
 
 /**
  * 一律用 process.execPath 直接跑 .js/.mjs，**不要碰 npm.cmd**：
@@ -111,7 +115,7 @@ function exec(cmd, args) {
   try {
     return {
       code: 0,
-      out: execFileSync(cmd, args, { cwd: ROOT, encoding: 'utf-8', stdio: 'pipe' }),
+      out: execFileSync(cmd, args, { windowsHide:true, cwd: ROOT, encoding: 'utf-8', stdio: 'pipe' }),
     };
   } catch (error) {
     return { code: error.status ?? 1, out: `${error.stdout ?? ''}${error.stderr ?? ''}` };
@@ -241,7 +245,7 @@ const survived = results.filter((r) => r.verdict === 'SURVIVED');
 const errored = results.filter((r) => r.verdict === 'ERROR' || r.verdict === 'BUILD_FAILED');
 const killedByOther = results.filter((r) => r.verdict === 'KILLED(其他斷言)');
 console.log(`總計 ${results.length}：KILLED ${results.length - survived.length - errored.length}` +
-  `（其中 ${killedByOther.length} 是被其他斷言抓到）、SURVIVED ${survived.length}、ERROR ${errored.length}`);
+  `（其中 ${killedByOther.length} 是被其他斷言抓到）、SURVIVED ${survived.length}、ERROR ${errored.length}、SKIP ${platformSkipped}`);
 for (const r of survived) console.log(`  SURVIVED（假綠燈！）: ${r.name} — 期待 "${r.expect}" 失敗但測試全過`);
 for (const r of errored) console.log(`  ERROR: ${r.name} — ${r.detail}`);
 for (const r of killedByOther) console.log(`  KILLED(其他斷言): ${r.name} — 期待 "${r.expect}"，實際 ${r.detail}`);
