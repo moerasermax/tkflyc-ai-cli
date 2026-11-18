@@ -73,6 +73,11 @@ export interface DirectApiCommandConfig {
   /** providers.json 的 max_tool_loops；迴圈與 API 呼叫共用，不計 HTTP 重試。 */
   maxToolLoops?: number;
   /**
+   * 協定（providers.json 的 api_format）。省略＝chat_completions（OpenAI-compatible
+   * `/chat/completions`）；另有 anthropic_messages、openai_responses，見 direct-api-protocols.ts。
+   */
+  apiFormat?: 'chat_completions' | 'anthropic_messages' | 'openai_responses';
+  /**
    * 併進 /chat/completions request body 的額外欄位（providers.json 的
    * extra_body ∪ model_extra_body）。框架自組的欄位不會出現在這裡——
    * 那些在載入設定時就被擋掉了。

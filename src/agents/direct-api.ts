@@ -19,6 +19,16 @@ import type {
   DirectRunIO,
 } from './types.js';
 import { debugLog } from '../core/debug.js';
+import {
+  adapterForFormat,
+  FORMAT_RESERVED_EXTRA_BODY_KEYS,
+  isApiFormat,
+  API_FORMATS,
+  type ApiFormat,
+  type ProtocolAdapter,
+  type ProtocolNative,
+  type ProtocolUsage,
+} from './direct-api-protocols.js';
 
 /**
  * direct-api 對外的 model 清單。
@@ -167,9 +177,42 @@ const PROVIDER_PREFIX_ALIASES: Record<string, string> = {
   ds: 'dashscope',
 };
 
+/**
+ * 這幾個 provider key 可以省略 base_url。
+ *
+ * openrouter／dashscope 是最早的兩個（OpenAI-compatible）；anthropic／openai 是原生協定，
+ * 省略 base_url 時連 api_format 一起預設（見 DEFAULT_PROVIDER_API_FORMATS）。
+ */
 const DEFAULT_PROVIDER_BASE_URLS: Record<string, string> = {
   openrouter: 'https://openrouter.ai/api/v1',
   dashscope: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  anthropic: 'https://api.anthropic.com',
+  openai: 'https://api.openai.com/v1',
+};
+
+/**
+ * OpenCode auth.json 自動遷移只認最早那兩個預設端點。
+ *
+ * 新增 anthropic／openai 的預設端點後，若遷移也套用它們，auth.json 裡原本被略過的
+ * anthropic／openai 金鑰會**多被搬進** providers.json——那是新增的、寫入家目錄且含金鑰的
+ * 副作用，不是這次要的改變。
+ */
+const MIGRATION_PROVIDER_BASE_URLS: Record<string, string> = {
+  openrouter: DEFAULT_PROVIDER_BASE_URLS.openrouter,
+  dashscope: DEFAULT_PROVIDER_BASE_URLS.dashscope,
+};
+
+/**
+ * provider key 沒寫 api_format 時的預設協定——**只在同時省略 base_url 時生效**。
+ *
+ * 為什麼加這個條件：在這次改動之前，名叫 `openai`／`anthropic` 的 provider 一定得自己寫
+ * base_url（沒有內建端點，否則整份 providers.json 載入失敗），而且只能走 /chat/completions。
+ * 所以「有寫 base_url、沒寫 api_format」就是既有設定，必須維持 chat_completions，
+ * 否則升級後它會悄悄換成另一個協定、打另一條路徑。
+ */
+const DEFAULT_PROVIDER_API_FORMATS: Record<string, ApiFormat> = {
+  anthropic: 'anthropic_messages',
+  openai: 'openai_responses',
 };
 
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
@@ -219,6 +262,11 @@ const MAX_INITIAL_DELAY_MS = 30_000;
 interface ProviderConfig {
   base_url: string;
   api_key: string;
+  /**
+   * 走哪個協定。**只在不是 chat_completions 時才存**——既有設定解析出來的物件
+   * （以及 OpenCode 遷移寫出去的檔案）因此一個欄位都不多。
+   */
+  api_format?: ApiFormat;
   /** 工具迴圈與 API 呼叫的共同上限；不計 HTTP 重試。 */
   max_tool_loops?: number;
   /** 429/5xx 的重試設定；省略時用 DEFAULT_RETRY。 */
@@ -277,6 +325,11 @@ interface ChatMessage {
    * 詳見 `resolveReplayReasoning`。
    */
   reasoning_content?: string;
+  /**
+   * 原生協定（anthropic_messages／openai_responses）這一輪的原始輸出，下一輪同協定時原樣重播。
+   * chat_completions 不會有這個欄位。詳見 direct-api-protocols.ts 的檔頭。
+   */
+  native?: ProtocolNative;
 }
 
 interface SessionFile {
@@ -298,7 +351,7 @@ interface CompletionUsage {
   input_tokens?: number;
   output_tokens?: number;
   reasoning_tokens?: number;
-  prompt_tokens_details?: { cached_tokens?: number };
+  prompt_tokens_details?: { cached_tokens?: number; cache_creation_tokens?: number };
   completion_tokens_details?: { reasoning_tokens?: number };
 }
 
@@ -330,6 +383,8 @@ interface CompletionTurn {
   toolCallAccumulators: StreamToolCallAccumulator[];
   toolCalls: ChatToolCall[];
   finishReason?: string;
+  /** 原生協定的原始輸出（見 ChatMessage.native）。 */
+  native?: ProtocolNative;
 }
 
 interface ToolExecutionResult {
@@ -365,7 +420,8 @@ function normalizeExtraBody(
   providerName: string,
   label: string,
   value: unknown,
-  targetPath: string
+  targetPath: string,
+  formatReserved: readonly string[] = []
 ): Record<string, unknown> | undefined {
   if (value === undefined) return undefined;
   const record = asRecord(value);
@@ -375,7 +431,7 @@ function normalizeExtraBody(
     );
   }
   for (const key of Object.keys(record)) {
-    if (RESERVED_EXTRA_BODY_KEYS.has(key)) {
+    if (RESERVED_EXTRA_BODY_KEYS.has(key) || formatReserved.includes(key)) {
       throw new Error(
         `Invalid providers.json at ${targetPath}: provider "${providerName}" ${label} may not set "${key}" — ` +
           'that field is built by ai-cli itself and overriding it breaks the streaming/tool loop.'
@@ -478,19 +534,54 @@ export function resolveReplayReasoning(
   return Array.isArray(setting) && setting.includes(modelName);
 }
 
+/**
+ * 解析 `api_format`。**未知值一律丟錯，不退回 chat_completions。**
+ *
+ * 退回的後果：把 `anthropic_mesages`（拼錯）的 provider 送去打 `/chat/completions`，
+ * 拿到一個看起來像「端點不存在／金鑰無效」的 404／401——錯誤離真正的原因（設定檔拼字）很遠。
+ */
+function resolveApiFormat(
+  providerName: string,
+  record: Record<string, unknown>,
+  usesBuiltinBaseUrl: boolean,
+  targetPath: string
+): ApiFormat {
+  const raw = record.api_format;
+  if (raw !== undefined) {
+    if (!isApiFormat(raw)) {
+      throw new Error(
+        `Invalid providers.json at ${targetPath}: provider "${providerName}" api_format must be one of ` +
+          `${API_FORMATS.map((f) => `"${f}"`).join(', ')} (got ${JSON.stringify(raw)}).`
+      );
+    }
+    return raw;
+  }
+  if (usesBuiltinBaseUrl && Object.prototype.hasOwnProperty.call(DEFAULT_PROVIDER_API_FORMATS, providerName)) {
+    return DEFAULT_PROVIDER_API_FORMATS[providerName];
+  }
+  return 'chat_completions';
+}
+
 function normalizeProviderConfig(
   providerName: string,
   value: unknown,
-  targetPath: string
+  targetPath: string,
+  builtinBaseUrls: Record<string, string> = DEFAULT_PROVIDER_BASE_URLS
 ): ProviderConfig | null {
   const record = asRecord(value);
   if (!record) return null;
   const apiKey = record.api_key || record.key || record.token;
-  const baseUrl = record.base_url || record.baseURL || DEFAULT_PROVIDER_BASE_URLS[providerName];
+  const explicitBaseUrl = record.base_url || record.baseURL;
+  const builtinBaseUrl = Object.prototype.hasOwnProperty.call(builtinBaseUrls, providerName)
+    ? builtinBaseUrls[providerName]
+    : undefined;
+  const baseUrl = explicitBaseUrl || builtinBaseUrl;
+  const apiFormat = resolveApiFormat(providerName, record, !explicitBaseUrl, targetPath);
   if (typeof apiKey !== 'string' || !apiKey.trim()) return null;
   if (typeof baseUrl !== 'string' || !baseUrl.trim()) return null;
 
-  const extraBody = normalizeExtraBody(providerName, 'extra_body', record.extra_body, targetPath);
+  const formatReserved = FORMAT_RESERVED_EXTRA_BODY_KEYS[apiFormat];
+  const extraBody = normalizeExtraBody(providerName, 'extra_body', record.extra_body, targetPath, formatReserved);
   const retry = normalizeRetryConfig(providerName, record.retry, targetPath);
   const maxToolLoops = normalizeMaxToolLoops(providerName, record.max_tool_loops, targetPath);
   const replayReasoning = normalizeReplayReasoning(providerName, record.replay_reasoning, targetPath);
@@ -509,7 +600,8 @@ function normalizeProviderConfig(
         providerName,
         `model_extra_body["${modelName}"]`,
         raw,
-        targetPath
+        targetPath,
+        formatReserved
       );
       if (parsed) modelExtraBody[modelName] = parsed;
     }
@@ -520,6 +612,7 @@ function normalizeProviderConfig(
     api_key: apiKey.trim(),
     max_tool_loops: maxToolLoops,
   };
+  if (apiFormat !== 'chat_completions') config.api_format = apiFormat;
   if (retry) config.retry = retry;
   if (replayReasoning !== undefined) config.replay_reasoning = replayReasoning;
   if (extraBody) config.extra_body = extraBody;
@@ -552,7 +645,7 @@ function migrateOpenCodeAuth(rawAuth: unknown, sourcePath: string): ProvidersFil
   const providers: Record<string, ProviderConfig> = {};
   if (!auth) return { providers };
   for (const [providerName, rawProvider] of Object.entries(auth)) {
-    const normalized = normalizeProviderConfig(providerName, rawProvider, sourcePath);
+    const normalized = normalizeProviderConfig(providerName, rawProvider, sourcePath, MIGRATION_PROVIDER_BASE_URLS);
     if (normalized) {
       providers[providerName] = normalized;
     }
@@ -766,7 +859,7 @@ function buildCommand(input: BuildCommandInput): BuiltCommand {
   }
   // 呼叫端直接給了 base_url/api_key 時就不碰 providers.json，因此也沒有
   // extra_body 可解析——那條路徑等於「完全不使用設定檔」。
-  const provider =
+  const provider: Partial<ProviderConfig> & Pick<ProviderConfig, 'base_url' | 'api_key'> =
     input.providerBaseUrl && input.providerApiKey
       ? { base_url: input.providerBaseUrl, api_key: input.providerApiKey }
       : getProviderConfig(input.providerName);
@@ -785,6 +878,7 @@ function buildCommand(input: BuildCommandInput): BuiltCommand {
       baseUrl: provider.base_url,
       apiKey: provider.api_key,
       maxToolLoops: provider.max_tool_loops ?? DEFAULT_MAX_TOOL_LOOPS,
+      ...(provider.api_format ? { apiFormat: provider.api_format } : {}),
       ...(extraBody ? { extraBody } : {}),
       ...(provider.retry ? { retry: provider.retry } : {}),
       ...(resolveReplayReasoning(provider, input.providerModel) ? { replayReasoning: true } : {}),
@@ -1187,6 +1281,8 @@ function normalizeTokens(usage: CompletionUsage | undefined): Record<string, num
   if (typeof output === 'number') tokens.output = output;
   if (typeof reasoning === 'number') tokens.reasoning = reasoning;
   if (typeof cached === 'number') tokens.cached = cached;
+  const cacheCreation = usage.prompt_tokens_details?.cache_creation_tokens;
+  if (typeof cacheCreation === 'number') tokens.cache_creation = cacheCreation;
   if (typeof usage.total_tokens === 'number') tokens.total = usage.total_tokens;
   return Object.keys(tokens).length > 0 ? tokens : undefined;
 }
@@ -1238,6 +1334,15 @@ function mergeCompletionUsage(
     merged.prompt_tokens_details = {
       ...(merged.prompt_tokens_details || {}),
       cached_tokens: existing + cached,
+    };
+  }
+  // Anthropic 的快取寫入（cache_creation_input_tokens），由 direct-api-protocols 正規化而來。
+  const cacheCreation = next.prompt_tokens_details?.cache_creation_tokens;
+  if (typeof cacheCreation === 'number') {
+    const existing = merged.prompt_tokens_details?.cache_creation_tokens || 0;
+    merged.prompt_tokens_details = {
+      ...(merged.prompt_tokens_details || {}),
+      cache_creation_tokens: existing + cacheCreation,
     };
   }
   const reasoning = next.completion_tokens_details?.reasoning_tokens;
@@ -1499,6 +1604,9 @@ function buildAssistantMessage(turn: CompletionTurn, replayReasoning: boolean): 
   if (replayReasoning && turn.reasoningText) {
     message.reasoning_content = turn.reasoningText;
   }
+  if (turn.native) {
+    message.native = turn.native;
+  }
   return message;
 }
 
@@ -1572,7 +1680,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  * 跟「這個 job 卡住了」長得一模一樣，而呼叫端是 AI，它只看得到工具回傳。
  */
 async function fetchWithRetry(
-  params: { url: string; apiKey: string; io: DirectRunIO; retry?: RetryConfig },
+  params: { url: string; apiKey: string; io: DirectRunIO; retry?: RetryConfig; headers?: Record<string, string> },
   requestBody: Record<string, unknown>
 ): Promise<Response> {
   const { maxRetries, initialDelayMs } = params.retry ?? DEFAULT_RETRY;
@@ -1584,7 +1692,8 @@ async function fetchWithRetry(
     try {
       response = await fetch(params.url, {
         method: 'POST',
-        headers: {
+        // 原生協定各有自己的驗證 header（Anthropic 是 x-api-key）；沒給就是 chat completions 的 Bearer。
+        headers: params.headers ?? {
           authorization: `Bearer ${params.apiKey}`,
           'content-type': 'application/json',
         },
@@ -1673,6 +1782,94 @@ async function requestCompletion(params: {
   return consumeResponse(response, params.state, params.io);
 }
 
+/**
+ * 把一個請求的最終用量併進整次 run。
+ *
+ * 原生協定的轉接層已經把串流裡的「累計值」收斂成**每個請求一筆**最終用量，
+ * 所以這裡跨請求（工具迴圈的每一輪）相加才是整個 job 的用量，不會重複計算。
+ */
+function addRequestUsage(state: StreamState, usage: ProtocolUsage | undefined): void {
+  if (!usage) {
+    state.incompleteUsage = true;
+    return;
+  }
+  state.usage = mergeCompletionUsage(state.usage, usage as CompletionUsage);
+  const next = normalizeJobUsage(usage as CompletionUsage);
+  if (!next) {
+    state.incompleteUsage = true;
+    return;
+  }
+  const prev = state.jobUsage;
+  if (!prev) {
+    state.jobUsage = next;
+    return;
+  }
+  const sumOptional = (a: number | undefined, b: number | undefined): number | undefined =>
+    a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0);
+  const cached = sumOptional(prev.cached_input_tokens, next.cached_input_tokens);
+  const reasoning = sumOptional(prev.reasoning_output_tokens, next.reasoning_output_tokens);
+  state.jobUsage = {
+    input_tokens: prev.input_tokens + next.input_tokens,
+    output_tokens: prev.output_tokens + next.output_tokens,
+    ...(cached !== undefined ? { cached_input_tokens: cached } : {}),
+    ...(reasoning !== undefined ? { reasoning_output_tokens: reasoning } : {}),
+    ...(prev.incomplete || next.incomplete ? { incomplete: true as const } : {}),
+    source: next.source,
+  };
+}
+
+/** 原生協定（anthropic_messages／openai_responses）送一輪請求；loop 其餘部分與 chat completions 共用。 */
+async function requestViaAdapter(params: {
+  adapter: ProtocolAdapter;
+  baseUrl: string;
+  apiKey: string;
+  modelName: string;
+  messages: ChatMessage[];
+  toolsEnabled: boolean;
+  state: StreamState;
+  io: DirectRunIO;
+  extraBody?: Record<string, unknown>;
+  retry?: RetryConfig;
+}): Promise<CompletionTurn> {
+  const { adapter, state, io, apiKey } = params;
+  const requestBody = adapter.buildBody({
+    modelName: params.modelName,
+    messages: params.messages,
+    tools: params.toolsEnabled ? TOOL_DEFINITIONS : undefined,
+    extraBody: params.extraBody,
+  });
+  const response = await fetchWithRetry(
+    { url: adapter.endpoint(params.baseUrl), apiKey, io, retry: params.retry, headers: adapter.headers(apiKey) },
+    requestBody
+  );
+  const turn = createEmptyTurn();
+  const parsed = await adapter.consume(response, {
+    onText: (delta) => {
+      state.assistantText += delta;
+      turn.assistantText += delta;
+      emitJsonLine(io.stdout, {
+        type: 'assistant',
+        session_id: state.sessionId,
+        message: { role: 'assistant', content: [{ type: 'text', text: delta }] },
+      });
+    },
+    onReasoning: (delta) => {
+      state.reasoningText += delta;
+      turn.reasoningText += delta;
+      emitJsonLine(io.stdout, { type: 'reasoning', session_id: state.sessionId, delta });
+    },
+    redact: (text) => redactApiKey(text, apiKey),
+  });
+  turn.toolCalls = parsed.toolCalls;
+  if (parsed.finishReason) {
+    turn.finishReason = parsed.finishReason;
+    state.finishReason = parsed.finishReason;
+  }
+  if (parsed.native) turn.native = { format: adapter.format, items: parsed.native };
+  addRequestUsage(state, parsed.usage);
+  return turn;
+}
+
 async function runDirect(cmd: BuiltCommand, io: DirectRunIO): Promise<void> {
   const config = cmd.directApi;
   if (!config) {
@@ -1704,27 +1901,44 @@ async function runDirect(cmd: BuiltCommand, io: DirectRunIO): Promise<void> {
   });
 
   const url = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  // 未設 api_format（或 chat_completions）→ null → 下面走原本的 requestCompletion，一行不變。
+  const adapter = adapterForFormat(config.apiFormat);
   let reachedLimit = true;
   let apiCalls = 0;
   const maxToolLoops = config.maxToolLoops ?? DEFAULT_MAX_TOOL_LOOPS;
   for (let iteration = 0; iteration < maxToolLoops && apiCalls < maxToolLoops; iteration++) {
     apiCalls += 1;
-    const turn = await requestCompletion({
-      url,
-      apiKey: config.apiKey,
-      modelName: config.modelName,
-      messages,
-      toolsEnabled,
-      state,
-      io,
-      extraBody: config.extraBody,
-      retry: config.retry,
-    });
+    const turn = adapter
+      ? await requestViaAdapter({
+          adapter,
+          baseUrl: config.baseUrl,
+          apiKey: config.apiKey,
+          modelName: config.modelName,
+          messages,
+          toolsEnabled,
+          state,
+          io,
+          extraBody: config.extraBody,
+          retry: config.retry,
+        })
+      : await requestCompletion({
+          url,
+          apiKey: config.apiKey,
+          modelName: config.modelName,
+          messages,
+          toolsEnabled,
+          state,
+          io,
+          extraBody: config.extraBody,
+          retry: config.retry,
+        });
     if (toolsEnabled && turn.finishReason !== 'tool_calls' && turn.toolCalls.length === 0 && turn.assistantText) {
       const xmlToolCalls = parseXmlToolCalls(turn.assistantText);
       if (xmlToolCalls.length > 0) {
         debugLog(`[Debug][xml-fallback] Parsed ${xmlToolCalls.length} XML tool call(s).`);
         turn.toolCalls = xmlToolCalls;
+        // 原生重播內容裡沒有這些 XML 解析出來的工具呼叫；照原樣重播會讓 tool 結果對不上 id。
+        delete turn.native;
         const strippedAssistantText = stripXmlToolCallText(turn.assistantText);
         state.assistantText = `${state.assistantText.slice(0, -turn.assistantText.length)}${strippedAssistantText}`;
         turn.assistantText = strippedAssistantText;

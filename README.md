@@ -133,12 +133,51 @@ It is not a thin completion wrapper: it runs the full agent loop, so the model g
 Address a model as `<provider>-<model>`, where the prefix is the key above:
 `or-qwen/qwen3.7-plus`, `nv-openai/gpt-oss-20b`, `local-llama3.1`. Everything after
 the prefix is sent verbatim, so slashes in model names are fine. `openrouter` and
-`dashscope` have built-in base URLs and short prefixes (`or`, `ds`); every other key
-must supply its own `base_url`.
+`dashscope` have built-in base URLs and short prefixes (`or`, `ds`); `anthropic` and
+`openai` have built-in base URLs too (see `api_format` below); every other key must
+supply its own `base_url`.
 
 > **This file is fail-closed as a whole.** One provider missing `base_url` or
 > `api_key` makes the entire file throw, taking the working providers down with it.
 > Back it up before editing.
+
+#### api_format — native Anthropic and OpenAI Responses protocols
+
+By default a provider speaks OpenAI-compatible `POST {base_url}/chat/completions`.
+`api_format` selects a different wire protocol; the agent loop, tools, sessions,
+retry and key redaction are shared, only the request/stream translation differs.
+
+| `api_format` | Request | Auth | Notes |
+|---|---|---|---|
+| `chat_completions` (default) | `POST {base_url}/chat/completions` | `Authorization: Bearer` | Unchanged behaviour |
+| `anthropic_messages` | `POST {base_url}/v1/messages` (no second `/v1` if `base_url` already ends with it) | `x-api-key` + `anthropic-version: 2023-06-01` | `max_tokens` defaults to 8192 (override via `extra_body`); `system` is reserved |
+| `openai_responses` | `POST {base_url}/responses` | `Authorization: Bearer` | Tools sent with `strict: false`; `input`, `instructions`, `previous_response_id` are reserved |
+
+```json
+{
+  "providers": {
+    "anthropic": { "api_key": "sk-ant-..." },
+    "openai":    { "api_key": "sk-..." },
+    "gateway":   { "base_url": "https://gw.example.com", "api_key": "...", "api_format": "anthropic_messages" }
+  }
+}
+```
+
+- The `anthropic` and `openai` keys have built-in base URLs (`https://api.anthropic.com`,
+  `https://api.openai.com/v1`). **When `base_url` is omitted** and `api_format` is not
+  set, they default to `anthropic_messages` / `openai_responses` respectively.
+  An existing `openai` / `anthropic` entry that sets its own `base_url` keeps
+  `chat_completions` — before this change such entries could only speak that protocol.
+- Use them as `anthropic-<model>` / `openai-<model>`. Some codex-family models are only
+  served over the Responses API.
+- An unknown `api_format` value **fails closed**: the whole file throws, naming the
+  provider and the bad value. It never silently falls back to `chat_completions`.
+- Usage is accumulated per request from the final (cumulative) stream values and then
+  summed across tool-loop rounds. For Anthropic, `input_tokens` in the result includes
+  cache reads and writes (OpenAI semantics); cache reads are also reported as
+  `cached_input_tokens`.
+- Neither protocol has been exercised against the real services yet; the
+  implementation follows the published API docs and is covered by mocked streams.
 
 #### extra_body — controlling what the framework does not send
 

@@ -141,7 +141,7 @@ MCP 的 `run` 不受影響，direct-api 一樣立刻回 pid。
 
 - `api_key` 也接受寫成 `key` 或 `token`；`base_url` 也接受 `baseURL`。
 - `openrouter` 與 `dashscope` 有**內建預設端點與簡寫前綴**（`or`、`ds`），`base_url` 可省略。
-  其他自訂名稱都必須自己給 `base_url`。
+  `anthropic` 與 `openai` 也有內建端點（見下方 `api_format`）。其他自訂名稱都必須自己給 `base_url`。
 - provider key 建議取短名：叫 `nvidia` 會變成 `nvidia-nvidia/llama-...`，能動但很醜。
 
 > ⚠️ **這個檔是整份 fail-closed。** 任何一筆 provider 缺 `base_url` 或 `api_key`，
@@ -158,6 +158,38 @@ model 名稱用 **`<provider>-<model>`**，前綴就是 `providers.json` 裡的�
 | `local-llama3.1` | 上面自訂的 `local`（Ollama） |
 
 前綴之後整串原樣送出，所以 model 名稱裡的斜線沒問題。**框架不維護任何白名單**。
+
+#### api_format：原生 Anthropic 與 OpenAI Responses 協定
+
+預設每個 provider 走 OpenAI-compatible 的 `POST {base_url}/chat/completions`。
+`api_format` 可改用另一種協定；agent loop、工具、session、重試與金鑰遮蔽都共用，
+只有請求組裝與串流解析不同。
+
+| `api_format` | 請求 | 驗證 | 備註 |
+|---|---|---|---|
+| `chat_completions`（預設） | `POST {base_url}/chat/completions` | `Authorization: Bearer` | 行為不變 |
+| `anthropic_messages` | `POST {base_url}/v1/messages`（`base_url` 已以 `/v1` 結尾就不再加） | `x-api-key` ＋ `anthropic-version: 2023-06-01` | `max_tokens` 預設 8192（可用 `extra_body` 改）；`system` 是保留欄位 |
+| `openai_responses` | `POST {base_url}/responses` | `Authorization: Bearer` | 工具以 `strict: false` 送出；`input`、`instructions`、`previous_response_id` 是保留欄位 |
+
+```json
+{
+  "providers": {
+    "anthropic": { "api_key": "sk-ant-..." },
+    "openai":    { "api_key": "sk-..." },
+    "gateway":   { "base_url": "https://gw.example.com", "api_key": "...", "api_format": "anthropic_messages" }
+  }
+}
+```
+
+- `anthropic`、`openai` 兩個 key 有內建端點（`https://api.anthropic.com`、`https://api.openai.com/v1`）。
+  **省略 `base_url`** 且沒寫 `api_format` 時，分別預設 `anthropic_messages`／`openai_responses`。
+  既有的 `openai`／`anthropic` 設定若自己寫了 `base_url`，維持 `chat_completions`——
+  改動前這種設定只能走那個協定，升級不該讓它悄悄換路徑。
+- 呼叫方式是 `anthropic-<model>`／`openai-<model>`。部分 codex 系列模型只能走 Responses API。
+- 未知的 `api_format` 值**整份 fail-closed**：丟錯並點名 provider 與錯的值，**不會**默默退回 `chat_completions`。
+- 用量：每個請求取串流裡的最終累計值（不重複加），再跨工具迴圈各輪相加。Anthropic 的結果
+  `input_tokens` 含快取讀寫（與 OpenAI 同語意），快取讀取另列 `cached_input_tokens`。
+- 兩種協定**尚未對真實服務實測**；實作依官方文件，測試用模擬串流涵蓋。
 
 #### extra_body：控制框架不會替你送的欄位
 

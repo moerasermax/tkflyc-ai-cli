@@ -417,8 +417,8 @@
   {
     "name": "extra_body 的保留欄位改成靜默丟棄（設定寫了但沒送出去）",
     "file": "src/agents/direct-api.ts",
-    "from": "    if (RESERVED_EXTRA_BODY_KEYS.has(key)) {",
-    "to": "    if (false && RESERVED_EXTRA_BODY_KEYS.has(key)) {",
+    "from": "    if (RESERVED_EXTRA_BODY_KEYS.has(key) || formatReserved.includes(key)) {",
+    "to": "    if ((false && RESERVED_EXTRA_BODY_KEYS.has(key)) || formatReserved.includes(key)) {",
     "expect": "在 provider 層被擋下",
     "script": "verify-extra-body.mjs"
   },
@@ -9943,5 +9943,93 @@
     "to": "",
     "expect": "FIX15 old ps columns are rejected rather than misidentified",
     "script": "verify-process-tree.mjs"
+  },
+  {
+    "name": "Anthropic usage 在同一請求內加總（重複計算）",
+    "file": "src/agents/direct-api-protocols.ts",
+    "from": "    if (isCount(record[key])) target[key] = record[key];",
+    "to": "    if (isCount(record[key])) target[key] = (target[key] ?? 0) + record[key];",
+    "expect": "usage：同一請求內取累計值",
+    "script": "verify-native-api-formats.mjs"
+  },
+  {
+    "name": "未知 api_format 默默退回 chat_completions",
+    "file": "src/agents/direct-api.ts",
+    "from": "    if (!isApiFormat(raw)) {",
+    "to": "    if (!isApiFormat(raw)) return 'chat_completions';\n    if (false) {",
+    "expect": "未知 api_format → 丟錯",
+    "script": "verify-native-api-formats.mjs"
+  },
+  {
+    "name": "openai/anthropic 寫了 base_url 也套用原生協定預設（既有設定換路徑）",
+    "file": "src/agents/direct-api.ts",
+    "from": "  if (usesBuiltinBaseUrl && Object.prototype.hasOwnProperty.call(DEFAULT_PROVIDER_API_FORMATS, providerName)) {",
+    "to": "  if (Object.prototype.hasOwnProperty.call(DEFAULT_PROVIDER_API_FORMATS, providerName)) {",
+    "expect": "既有的 openai／anthropic 設定",
+    "script": "verify-native-api-formats.mjs"
+  },
+  {
+    "name": "OpenCode 遷移套用新預設端點（多搬金鑰）",
+    "file": "src/agents/direct-api.ts",
+    "from": "normalizeProviderConfig(providerName, rawProvider, sourcePath, MIGRATION_PROVIDER_BASE_URLS)",
+    "to": "normalizeProviderConfig(providerName, rawProvider, sourcePath)",
+    "expect": "OpenCode 自動遷移不因新預設端點",
+    "script": "verify-native-api-formats.mjs"
+  },
+  {
+    "name": "tool_result 沒對上 tool_use id",
+    "file": "src/agents/direct-api-protocols.ts",
+    "from": "push('user', [{ type: 'tool_result', tool_use_id: message.tool_call_id ?? '',",
+    "to": "push('user', [{ type: 'tool_result', tool_use_id: 'toolu_wrong',",
+    "expect": "tool_result 以 id 對應",
+    "script": "verify-native-api-formats.mjs"
+  },
+  {
+    "name": "Responses 工具沒明寫 strict:false",
+    "file": "src/agents/direct-api-protocols.ts",
+    "from": "        strict: false,\n",
+    "to": "",
+    "expect": "strict:false",
+    "script": "verify-native-api-formats.mjs"
+  },
+  {
+    "name": "Anthropic 串流沒有 message_stop 就 EOF 仍當成完整結果",
+    "file": "src/agents/direct-api-protocols.ts",
+    "from": "    if (!terminated) throw truncatedStreamError(sink, 'anthropic_messages', 'message_stop');\n",
+    "to": "",
+    "expect": "Anthropic 串流沒有 message_stop 就 EOF",
+    "script": "verify-native-api-formats.mjs"
+  },
+  {
+    "name": "Responses 串流 EOF 時用逐段累計的 function_call 執行工具",
+    "file": "src/agents/direct-api-protocols.ts",
+    "from": "    if (!finalResponse) throw truncatedStreamError(sink, 'openai_responses', 'response.completed');",
+    "to": "    if (!finalResponse) return { toolCalls: [...pending.values()].map((item, i) => responsesToolCall(item, i)!).filter(Boolean), finishReason: 'tool_calls' };",
+    "expect": "Responses 串流在 response.completed 前 EOF",
+    "script": "verify-native-api-formats.mjs"
+  },
+  {
+    "name": "Responses incomplete 不回報截斷原因（工具呼叫優先）",
+    "file": "src/agents/direct-api-protocols.ts",
+    "from": "    if (incomplete) {\n      const reason",
+    "to": "    if (incomplete && toolCalls.length > 0) {\n      const reason",
+    "expect": "finish_reason=length",
+    "script": "verify-native-api-formats.mjs"
+  },
+  {
+    "name": "streamError 先截斷再 redact（金鑰片段殘留）",
+    "file": "src/agents/direct-api-protocols.ts",
+    "from": "`direct-api ${label} stream error (${type}): ${message}`).slice(0, 2000));",
+    "to": "`direct-api ${label} stream error (${type}): ${message}`.slice(0, 2000)));",
+    "expect": "金鑰跨 2000 字元截斷點",
+    "script": "verify-native-api-formats.mjs"
+  },
+  {
+    "name": "無效 JSON chunk 原樣進 debug log",
+    "file": "src/agents/direct-api-protocols.ts",
+    "from": "chunk (${data.length} chars, not valid JSON)`);",
+    "to": "chunk (${data.length} chars, not valid JSON): ${data}`);",
+    "expect": "無效 JSON chunk 等於金鑰",
+    "script": "verify-native-api-formats.mjs"
   }
 ]

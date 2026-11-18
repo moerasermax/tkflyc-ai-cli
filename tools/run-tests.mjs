@@ -41,6 +41,7 @@ const TESTS = [
   'verify-rate.mjs',
   'verify-direct-api.mjs',
   'verify-extra-body.mjs',
+  'verify-native-api-formats.mjs',
   { file: 'verify-alias-config.mjs', nodeArgs: ['--import', './tools/stubs/catalog-test-env.mjs'] },
   'verify-catalog-source.mjs',
   'verify-agy-parse.mjs',
