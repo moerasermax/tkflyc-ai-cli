@@ -78,6 +78,7 @@ public static class WindowlessHost {
   }
 }`;
 let ready: Promise<string> | undefined;
+const SOURCE_SHA256 = createHash('sha256').update(SOURCE, 'utf8').digest('hex').toUpperCase();
 /**
  * 輔助程式的位置。目錄名由輔助程式原始碼與模組位置算出，所以不同 checkout／版本互不共用。
  * 抽出來是為了讓 doctor 能回報路徑而不必真的編譯（#25）。
@@ -214,11 +215,15 @@ if($requester.StartTime.ToUniversalTime() -gt [Diagnostics.Process]::GetCurrentP
 # files older than an hour: a concurrent bootstrap's fresh files and other caches are untouched.
 $stale=[DateTime]::UtcNow.AddHours(-1)
 Get-ChildItem -LiteralPath $directory -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\.exe(\\.cs)?$' -and $_.LastWriteTimeUtc -lt $stale -and (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) } | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
-if($compile -and !(Test-Path -LiteralPath $target)) {
+# Keep the target-exists test below as its own literal line: fix5 rewrites that exact text to inject a hanging compiler.
+if($compile) {
+if(!(Test-Path -LiteralPath $target)) {
   $compiled=Join-Path $directory (([Guid]::NewGuid().ToString())+'.exe');$source=$compiled+'.cs'
-  [IO.File]::WriteAllText($source,@'
-${SOURCE}
-'@)
+  # The C# source arrives through the environment, not the command line: inlined, the UTF-16 base64
+  # command came within ~80 characters of the 32767 limit (#25). Its hash is pinned in this script.
+  $text=[Environment]::GetEnvironmentVariable('AI_CLI_WINDOWLESS_SOURCE')
+  if(!$text -or ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($text))).Replace('-','')) -ne '${SOURCE_SHA256}'){throw 'helper source mismatch'}
+  [IO.File]::WriteAllText($source,$text)
   $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=Join-Path ([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) 'csc.exe'
   $start.Arguments='/nologo /target:winexe /out:"'+$compiled+'" "'+$source+'"';$start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
   $compiler=[Diagnostics.Process]::Start($start);$compilerHandle=$compiler.Handle;$compilerPid=$compiler.Id;$compilerBorn=$compiler.StartTime.ToUniversalTime()
@@ -230,6 +235,7 @@ ${SOURCE}
   if(!(Test-Path -LiteralPath $compiled)){throw ('${VANISHED_MARKER}: compiler succeeded but '+$compiled+' is gone before install')}
   try{[IO.File]::Move($compiled,$target)}catch{if(!(Test-Path -LiteralPath $target)){if(Test-Path -LiteralPath $compiled){throw}else{throw ('${VANISHED_MARKER}: '+$target+' missing after move: '+$_)}}}
 }
+}
 Clear-Temp
 exit 0
 }catch{[Console]::Error.WriteLine($_);Clear-Temp;exit 1}
@@ -240,7 +246,7 @@ exit 0
   const bootstrapTimeout=Math.max(1,remainingTime(deadline,45000)-(deadline===undefined?0:1000));
   const bootstrap = `const {spawn}=require('node:child_process');const c=spawn(${JSON.stringify(join(process.env.SystemRoot || 'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe'))},['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',${JSON.stringify(Buffer.from(script,'utf16le').toString('base64'))}],{windowsHide:true,timeout:${bootstrapTimeout},killSignal:'SIGKILL',stdio:['ignore','pipe','pipe']});c.stdout.resume();c.stderr.pipe(process.stderr);c.on('error',e=>{console.error(e);process.exitCode=1;});c.on('close',code=>process.exitCode=code??124);`;
   await new Promise<void>((resolve,reject) => {
-    const child=spawn(process.execPath,['-e',bootstrap],{detached:true,windowsHide:true,timeout:remainingTime(deadline,55000),killSignal:'SIGKILL',stdio:['ignore','ignore','pipe']});
+    const child=spawn(process.execPath,['-e',bootstrap],{detached:true,windowsHide:true,timeout:remainingTime(deadline,55000),killSignal:'SIGKILL',stdio:['ignore','ignore','pipe'],env:{...process.env,AI_CLI_WINDOWLESS_SOURCE:SOURCE}});
     let error='';child.stderr.on('data',data=>{error=(error+String(data)).slice(-4000);});
     // Bound the caller independently of a close event (including a failed kill).
     const timer=setTimeout(()=>{try{child.kill('SIGKILL');}catch{}reject(new Error('Windowless bootstrap deadline; containment unknown'));},remainingTime(deadline,55000));
@@ -318,7 +324,10 @@ async function runViaPowerShellHost(script: string, env: NodeJS.ProcessEnv, back
   const outer = remainingTime(deadline, limit + 5000);
   await new Promise<void>((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
-    try { child = spawn(process.execPath, ['-e', relayScript(encoded)], { detached: true, windowsHide: true, stdio: 'ignore', env: { ...process.env, ...env } }); }
+    // The relay is an internal one-liner: NODE_OPTIONS (user --require/--import hooks, test preloads) must not run in it.
+    const relayEnv: NodeJS.ProcessEnv = { ...process.env, ...env };
+    for (const key of Object.keys(relayEnv)) if (key.toUpperCase() === 'NODE_OPTIONS') delete relayEnv[key];
+    try { child = spawn(process.execPath, ['-e', relayScript(encoded)], { detached: true, windowsHide: true, stdio: 'ignore', env: relayEnv }); }
     catch (error) { reject(error); return; }
     let expired = false;
     const timer = setTimeout(() => { expired = true; try { child.kill('SIGKILL'); } catch {} reject(new Error('Windowless host deadline; containment unknown')); }, outer);
