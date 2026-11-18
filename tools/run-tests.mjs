@@ -85,6 +85,7 @@ const TESTS = [
   'verify-win-job-fix1.mjs',
   'verify-win-helper-antivirus.mjs',
   'verify-win-pshost.mjs',
+  'verify-win-av-quarantine.mjs',
   'verify-win-job-fix2.mjs',
   'verify-win-job-unknown.mjs',
   'verify-win-job-windowless.mjs',

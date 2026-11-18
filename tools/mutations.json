@@ -10183,5 +10183,13 @@
     "to": "child.once('error',(error: NodeJS.ErrnoException)=>{clearTimeout(timer);reject(spawnFailure(error));});",
     "expect": "已啟動的 exe 在逾時 kill 時丟錯",
     "script": "verify-win-helper-antivirus.mjs"
+  },
+  {
+    "name": "#25 PowerShell host 模式仍用 30 秒寬限期（合法重試中的 runner 被判 lost）",
+    "file": "src/core/job-store.ts",
+    "from": "export function startupGraceMs(): number { return windowlessHostMode() === 'powershell' ? POWERSHELL_HOST_STARTUP_GRACE_MS : STARTUP_GRACE_MS; }",
+    "to": "export function startupGraceMs(): number { return STARTUP_GRACE_MS; }",
+    "expect": "PowerShell host 模式的啟動寬限期大於 register 總期限",
+    "script": "verify-win-pshost.mjs"
   }
 ]

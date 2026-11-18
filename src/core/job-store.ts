@@ -19,6 +19,7 @@ import { PeekEventExtractor } from './peek-extractor.js';
 import { appendPeekEvents, buildNotFoundPeekProcess, observedDurationSec, validatePeekPids, validatePeekTimeSec, type PeekProcessResult } from './peek.js';
 import { identityOnly, resolvePrincipal } from './principal.js';
 import { WinJobClient } from './win-job-client.js';
+import { windowlessHostMode } from './win-job-host.js';
 import { findContainmentRef, drainedProof, readContainment, saveContainmentRef, markContainmentIntent, hasContainmentIntent, LEGACY_CONTAINMENT_NOTICE } from './containment-store.js';
 import type { ContainmentRef } from './win-job-protocol.js';
 
@@ -27,6 +28,13 @@ export const MAX_FINISHED_JOBS = 100;
 export const MAX_FINISHED_BYTES = 500 * 1024 * 1024;
 export const VERBOSE_MAX_BYTES = 8 * 1024 * 1024;
 export const STARTUP_GRACE_MS = 30_000;
+/**
+ * #25：exe 被防毒砍掉、改走 PowerShell host 時，每次包容呼叫多 2～3 秒，register 的總期限是 50 秒
+ * （win-job-client.ts）。寬限期若仍是 30 秒，慢路徑上還在合法重試的 runner 會先被判 lost。
+ * 所以 PowerShell host 模式下放寬到 90 秒（大於 register 總期限）；代價只是真的死掉的 runner 晚一點標 lost。
+ */
+export const POWERSHELL_HOST_STARTUP_GRACE_MS = 90_000;
+export function startupGraceMs(): number { return windowlessHostMode() === 'powershell' ? POWERSHELL_HOST_STARTUP_GRACE_MS : STARTUP_GRACE_MS; }
 export const GC_INTERVAL_MS = 60_000;
 export interface JobMeta {
   /** 舊 metadata 沒有此欄位，不推測其權限。 */
@@ -245,7 +253,7 @@ export async function collectStoreFiles(dir: string, now = Date.now(), lookup: I
   const finished = metas.flatMap(meta => {
     const directory = join(dir, 'jobs', meta.jobId), exit = readJobExit(directory);
     if (!exit && (!gone(meta.runner) || !gone(meta.worker))) return [];
-    if (!meta.runner.started && now - Date.parse(meta.startTime) < STARTUP_GRACE_MS) return [];
+    if (!meta.runner.started && now - Date.parse(meta.startTime) < startupGraceMs()) return [];
     try {
       // 沉默很久的 job 可能剛剛才死；不能用舊 log mtime 把 lost 輸出立刻回收。
       if (!exit && !lostTime(directory)) atomicJson(join(directory, 'lost.json'), { endTime: new Date(now).toISOString() });
@@ -266,7 +274,7 @@ export async function collectStoreFiles(dir: string, now = Date.now(), lookup: I
     if (/^[0-9a-f-]{36}\.deleting$/.test(name)) { removeJobDirectory(directory); continue; }
     if (!/^[0-9a-f-]{36}$/.test(name) || metas.some(meta => meta.jobId === name)) continue;
     try {
-      if (now - statSync(directory).mtimeMs < STARTUP_GRACE_MS) continue;
+      if (now - statSync(directory).mtimeMs < startupGraceMs()) continue;
       // 無 meta/已損壞：僅在 bootstrap/launch 的 runner 也不在時清理。
       const bootstrap = json<JobMeta>(join(directory, 'bootstrap.json'));
       const launch = json<RunnerSpec>(join(directory, 'launch.tmp'));
@@ -827,7 +835,7 @@ export class JobStore {
       for (const job of running) {
         refreshJob(job); if (job.status !== 'running') continue;
         if (!job.meta.runner.started) {
-          if (Date.now() - Date.parse(job.startTime) >= STARTUP_GRACE_MS) {
+          if (Date.now() - Date.parse(job.startTime) >= startupGraceMs()) {
             const ref=job.meta.containment??findContainmentRef(this.dir,job.meta.jobId);
             if(process.platform==='win32'&&ref){
               const status=await new WinJobClient().inspect(ref);refreshJob(job);

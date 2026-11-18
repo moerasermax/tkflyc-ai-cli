@@ -30,6 +30,11 @@ process.env.AI_CLI_WINDOWLESS_HOST = 'powershell';
 const host = await import('../dist/core/win-job-host.js');
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 check('強制模式下 windowlessHostMode 回 powershell', host.windowlessHostMode() === 'powershell');
+{
+  // register 在 PowerShell host 下最長 50 秒；伺服器判 lost 的寬限期必須比它長，否則合法重試中的 runner 會被判 lost。
+  const store = await import('../dist/core/job-store.js');
+  check('PowerShell host 模式的啟動寬限期大於 register 總期限', store.startupGraceMs() === store.POWERSHELL_HOST_STARTUP_GRACE_MS && store.startupGraceMs() > 50000, String(store.startupGraceMs()));
+}
 
 mkdirSync(join(ROOT, '.tmp'), { recursive: true });
 const work = mkdtempSync(join(ROOT, '.tmp', 'pshost-'));
