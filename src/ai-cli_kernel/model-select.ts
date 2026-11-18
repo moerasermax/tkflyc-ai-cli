@@ -32,18 +32,18 @@ interface Candidate { model: string; effort: string; family: 'claude' | 'codex' 
  */
 export const AUTO_CANDIDATES: Record<KernelDifficulty, readonly Candidate[]> = {
   routine: [
-    { model: 'gpt-6.1-sol', effort: 'medium', family: 'codex' },
+    { model: 'gpt-6.2-sol', effort: 'medium', family: 'codex' },
     { model: 'sonnet', effort: 'medium', family: 'claude' },
     { model: 'grok-4.7', effort: 'medium', family: 'grok', fallback: true, reason: '備援：其他候選都不合格；沒有額度資料，派工時受額度未知的次數上限控制' },
   ],
   elevated: [
     { model: 'opus', effort: 'medium', family: 'claude' },
-    { model: 'gpt-6.1-sol', effort: 'high', family: 'codex', reason: '高風險／跨模組／架構／develop 寫入' },
+    { model: 'gpt-6.2-sol', effort: 'high', family: 'codex', reason: '高風險／跨模組／架構／develop 寫入' },
   ],
   critical: [
     { model: 'fable', effort: 'high', family: 'claude', needsFable: true },
     { model: 'opus', effort: 'high', family: 'claude' },
-    { model: 'gpt-6-astra', effort: 'high', family: 'codex', reason: '同樣工作約為 6.1-sol 的 2～5 倍週額度' },
+    { model: 'gpt-6.2-astra', effort: 'high', family: 'codex', reason: '前代 6-astra 實測同樣工作約為 6.1-sol 的 2～5 倍週額度；6.2 代倍率未實測' },
   ],
 };
 

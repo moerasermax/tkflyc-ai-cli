@@ -14,6 +14,8 @@
 
 ### 變更
 
+- codex 換到 6.2 代模型。codex-cli 0.170.0 的 vendor 目錄新增 `gpt-6.2-sol`（priority 1，日常主力）、`gpt-6.2-astra`（priority 2，vendor 稱最強）與 `gpt-6.1-terra`（priority 3，視覺／computer use），原本的 `gpt-6.1-sol`、`gpt-6-astra` 改標「上一代」。三顆都加進候選清單並依 priority 排序；`codex-ultra`（max）與 `codex-ultracode`（ultra）改指 `gpt-6.2-astra`，effort 不變；`models` 的日常派工建議改成 `gpt-6.2-sol`＋medium，卡關升級改成 `gpt-6.2-astra`＋high；kernel 自動選模型表的 Codex 候選與探針模型同步換代。**為什麼**：舊名稱還能跑、不會壞，但旗艦 alias 的意義就是「現行最強」，留在上一代等於悄悄降級。三顆新模型的 CLI 端預設 effort 都是 low，所以 effort 一定要明確傳。實測（2026-11-18，codex-cli 0.170.0）：`gpt-6.2-astra`＋low／max／ultra、`gpt-6.2-sol`＋medium、`gpt-6.1-terra`＋low 都 exit 0 並回 PONG。6.2-astra 相對 6.2-sol 的週額度倍率還沒實測，表上註明沿用前代的觀察。要留在舊旗艦，可用 `aliasModel` 把 alias 指回 `gpt-6-astra`。（Claude Opus 5.5）
+
 - 同步 7.0.0 已於 2026-11-13 發佈到 npm 的現況、安裝與安全支援說明，釐清 CI 替身測試與真實 CLI 的平台驗證範圍，並修正版本比較連結，避免讀者依過期的未發佈資訊操作。（Codex）
 
 ## [7.0.0] - 2026-11-13

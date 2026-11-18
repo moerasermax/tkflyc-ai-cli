@@ -561,8 +561,8 @@
   {
     "name": "日常派工建議改成一開始就用最貴的 astra（違反模型政策）",
     "file": "src/models/catalog.ts",
-    "from": "    model: 'gpt-6.1-sol',",
-    "to": "    model: 'gpt-6-astra',",
+    "from": "    model: 'gpt-6.2-sol',",
+    "to": "    model: 'gpt-6.2-astra',",
     "expect": "日常派工建議與模型政策一致",
     "script": "verify-alias-config.mjs"
   },
@@ -716,6 +716,46 @@
     "script": "verify-alias-config.mjs"
   },
   {
+    "name": "codex 清單漏掉 gpt-6.2-astra（models 不再把現行旗艦當候選）",
+    "file": "src/agents/codex.ts",
+    "from": "  'gpt-6.2-astra',",
+    "to": "  'gpt-6.2-astra-mutated',",
+    "expect": "gpt-6.2-astra 列在已知模型清單",
+    "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "codex 清單漏掉 gpt-6.2-sol（models 不再把 vendor priority 1 當候選）",
+    "file": "src/agents/codex.ts",
+    "from": "  'gpt-6.2-sol',\n  'gpt-6.2-astra',",
+    "to": "  'gpt-6.2-astra',",
+    "expect": "gpt-6.2-sol 列在已知模型清單",
+    "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "codex 清單漏掉 gpt-6.1-terra",
+    "file": "src/agents/codex.ts",
+    "from": "  'gpt-6.1-terra',",
+    "to": "  'gpt-6.1-terra-mutated',",
+    "expect": "gpt-6.1-terra 列在已知模型清單",
+    "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "清單沒依 vendor priority 排（6.2-astra 排到 6.2-sol 之前）",
+    "file": "src/agents/codex.ts",
+    "from": "  'gpt-6.2-sol',\n  'gpt-6.2-astra',\n",
+    "to": "  'gpt-6.2-astra',\n  'gpt-6.2-sol',\n",
+    "expect": "codex 清單依 vendor priority 把 6.2 代排在上一代之前",
+    "script": "verify-alias-config.mjs"
+  },
+  {
+    "name": "codex-ultra 留在上一代旗艦（換代時漏改 alias）",
+    "file": "src/models/catalog.ts",
+    "from": "  'codex-ultra': 'gpt-6.2-astra',",
+    "to": "  'codex-ultra': 'gpt-6-astra',",
+    "expect": "codex-ultra 指向現行旗艦",
+    "script": "verify-alias-config.mjs"
+  },
+  {
     "name": "清單沒依 vendor priority 排（gpt-6-astra 排到 gpt-6.1-sol 之前）",
     "file": "src/agents/codex.ts",
     "from": "  'gpt-6.1-sol',\n  'gpt-6-astra',",
@@ -734,8 +774,8 @@
   {
     "name": "vendor 標 visibility:hide 的 gpt-reserve 被加進對外候選清單",
     "file": "src/agents/codex.ts",
-    "from": "const CODEX_MODELS = [\n  'gpt-6.1-sol',",
-    "to": "const CODEX_MODELS = [\n  'gpt-reserve',\n  'gpt-6.1-sol',",
+    "from": "const CODEX_MODELS = [\n  'gpt-6.2-sol',",
+    "to": "const CODEX_MODELS = [\n  'gpt-reserve',\n  'gpt-6.2-sol',",
     "expect": "gpt-reserve 不列在已知模型清單",
     "script": "verify-alias-config.mjs"
   },
@@ -758,9 +798,9 @@
   {
     "name": "codex-ultracode 從 alias 表拿掉（最強組合又回到要手動帶 effort）",
     "file": "src/models/catalog.ts",
-    "from": "  'codex-ultracode': 'gpt-6-astra',",
-    "to": "  'codex-ultracode-mutated': 'gpt-6-astra',",
-    "expect": "codex-ultracode 解析到旗艦 gpt-6-astra",
+    "from": "  'codex-ultracode': 'gpt-6.2-astra',",
+    "to": "  'codex-ultracode-mutated': 'gpt-6.2-astra',",
+    "expect": "codex-ultracode 解析到現行旗艦",
     "script": "verify-alias-config.mjs"
   },
   {
@@ -774,16 +814,16 @@
   {
     "name": "codex-ultracode 的 payload effort 與執行期不一致（只改顯示那一份）",
     "file": "src/models/catalog.ts",
-    "from": "  { name: 'codex-ultracode', resolvesTo: 'gpt-6-astra', agent: 'codex', defaultReasoningEffort: 'ultra' },",
-    "to": "  { name: 'codex-ultracode', resolvesTo: 'gpt-6-astra', agent: 'codex', defaultReasoningEffort: 'max' },",
+    "from": "  { name: 'codex-ultracode', resolvesTo: 'gpt-6.2-astra', agent: 'codex', defaultReasoningEffort: 'ultra' },",
+    "to": "  { name: 'codex-ultracode', resolvesTo: 'gpt-6.2-astra', agent: 'codex', defaultReasoningEffort: 'max' },",
     "expect": "MODEL_ALIAS_DETAILS 與 BUILTIN_ALIAS_REASONING 的預設 effort 完全一致",
     "script": "verify-alias-config.mjs"
   },
   {
     "name": "日常派工 effort 改回 high（偏離維護者的派工政策）",
     "file": "src/models/catalog.ts",
-    "from": "    model: 'gpt-6.1-sol',\n    reasoningEffort: 'medium',",
-    "to": "    model: 'gpt-6.1-sol',\n    reasoningEffort: 'high',",
+    "from": "    model: 'gpt-6.2-sol',\n    reasoningEffort: 'medium',",
+    "to": "    model: 'gpt-6.2-sol',\n    reasoningEffort: 'high',",
     "expect": "日常派工建議與模型政策一致",
     "script": "verify-alias-config.mjs"
   },
@@ -6364,8 +6404,8 @@
   {
     "name": "kernel AUTO：routine 候選的 effort 調高",
     "file": "src/ai-cli_kernel/model-select.ts",
-    "from": "    { model: 'gpt-6.1-sol', effort: 'medium', family: 'codex' },",
-    "to": "    { model: 'gpt-6.1-sol', effort: 'high', family: 'codex' },",
+    "from": "    { model: 'gpt-6.2-sol', effort: 'medium', family: 'codex' },",
+    "to": "    { model: 'gpt-6.2-sol', effort: 'high', family: 'codex' },",
     "script": "verify-ai-cli_kernel-evidence.mjs",
     "expect": "AUTO routine 的池只有 routine 候選"
   },

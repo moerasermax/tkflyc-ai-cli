@@ -1,6 +1,7 @@
 /**
  * D1: invert only the authorized policy edits, then verify every other byte (LF space).
  * 2026-11-10（依額度與難度選模型）：再放行標題、第 2 條、第 11 條；先還原成 2026-11-08 的版本，再走原本的還原。
+ * 2026-11-18（v2.6）：再放行標題與第 2 條的 Codex 換代（6.2 代），最先還原。
  */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -11,6 +12,13 @@ const text = readFileSync(new URL('../tools/hooks/aicli-model-policy.py', import
 const rule14 = "14. 開發完成後的驗證工作（自動化測試、驗證測試、煙霧測試、對真實服務的實測）要派工時，用 API 金鑰的 direct-api 模型：anthropic-<模型 ID> 或 openai-<模型 ID>（金鑰在 providers.json；這類模型有 bash 工具，可以跑測試指令），把 Claude／Codex 訂閱額度留給開發。API 按 token 計費：驗證包要小、模型選夠用的（例如 anthropic-claude-haiku-5-5、openai-gpt-6-luna），需要較強模型時說明理由。實作、修 bug 與唯讀稽核仍照第 2 條（使用者 2026-11-18 決定）。";
 const rule13 = '13. ai-cli_kernel 同時最多 3 個 run，同一個 repo 一次 1 個（以 git common dir 判斷，worktree 和同一個 origin 的 clone 都算同一個）；Claude 週額度剩不到 10% 或量不到時退回全機 1 個；Codex 剩不到 20% 或量不到時，不同時跑兩個用到 Codex 的 run。這些由 kernel 在開工時自己擋，上限只能由人調整，MCP 改不了（使用者 2026-11-08 決定）。';
 const edits = [
+  // 2026-11-18 v2.6：第 2 條的 Codex 候選換成 6.2 代（gpt-6.2-sol／gpt-6.2-astra）。先還原成 v2.5。
+  ['【ai-cli 精簡派工政策 v2.6（2026-11-18）】', '【ai-cli 精簡派工政策 v2.5（2026-11-18）】'],
+  ['routine（日常）＝gpt-6.2-sol + medium', 'routine（日常）＝gpt-6.1-sol + medium'],
+  ['＝opus + medium → gpt-6.2-sol + high', '＝opus + medium → gpt-6.1-sol + high'],
+  ['→ gpt-6.2-astra + high（前代 gpt-6-astra 同樣的工作吃的週額度約是 6.1-sol 的 2～5 倍；2026-10-14 實測：五個 Astra high 包 6.3 小時用掉 Codex 週額度 84%；6.2 代倍率未實測）', '→ gpt-6-astra + high（同樣的工作 Astra 吃的週額度約是 6.1-sol 的 2～5 倍；2026-10-14 實測：五個 Astra high 包 6.3 小時用掉 Codex 週額度 84%）'],
+  ['注意 gpt-6.2-sol（與 6.2-astra、6.1-sol）的 CLI 端預設 effort 是 low', '注意 gpt-6.1-sol 的 CLI 端預設 effort 是 low'],
+  ['候選池在開工時凍結（使用者 2026-11-10 決定；2026-11-18 Codex 候選換成 6.2 代）。', '候選池在開工時凍結（使用者 2026-11-10 決定）。'],
   ["【ai-cli 精簡派工政策 v2.5（2026-11-18）】", "【ai-cli 精簡派工政策 v2.4（2026-11-10）】"],
   [`
 ${rule14}`, ''],

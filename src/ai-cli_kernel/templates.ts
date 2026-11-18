@@ -199,7 +199,7 @@ export function buildContract(input: KernelStartInput, now = new Date(), context
   let worker: ModelChoice, decide: ModelChoice, allowedWorkerModels: string[];
   let modelSelection: ModelSelection | undefined;
   if (!plan.needsQuotas) {
-    // effort 一律明確帶上：gpt-6.1-sol 的 CLI 預設是 low，省略不等於 medium。
+    // effort 一律明確帶上：gpt-6.2-sol／gpt-6.1-sol 的 CLI 預設是 low，省略不等於 medium。
     worker = { model: explicitWorker!, effort: input.effort ?? DEFAULT_EFFORT };
     decide = { model: explicitDecide ?? explicitWorker!, effort: input.decideEffort ?? input.effort ?? DEFAULT_EFFORT };
     allowedWorkerModels = [...new Set([explicitWorker!, ...(workerModels ?? [])])];

@@ -20,7 +20,7 @@ import type { ActionSpec, BoundaryStatus, KernelContract, KernelExecutor, ProbeS
 
 /** 探針用便宜的模型就夠了：要測的是工具限制，不是模型能力。 */
 export const PROBE_MODELS: Readonly<Record<string, { model: string; effort?: string }>> = {
-  codex: { model: 'gpt-6.1-sol', effort: 'low' },
+  codex: { model: 'gpt-6.2-sol', effort: 'low' },
   claude: { model: 'haiku' },
   grok: { model: 'grok-4.7', effort: 'low' },
 };

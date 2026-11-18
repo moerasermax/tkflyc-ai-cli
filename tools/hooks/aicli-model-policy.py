@@ -62,9 +62,9 @@ except Exception:
 #
 # ───────────────────────────────────────────────────────────────────────────
 
-ctx = """【ai-cli 精簡派工政策 v2.5（2026-11-18）】
+ctx = """【ai-cli 精簡派工政策 v2.6（2026-11-18）】
 1. ai-cli 是唯一模型路由入口；判斷模型能不能派時查 models 的 catalogV2：source=vendor-cli 的 routable 是向 vendor 實查的結果，source=builtin-fallback 的條目（以及頂層 claude／codex 陣列）是原始碼靜態清單，不能單獨當作可用證明，要對照 knownBadModels。
-2. 選模型依週額度與任務難度；使用者指名就照指名，不看額度、不自動改。合格＝那一家的週額度剩 25% 以上：Claude 家（sonnet、opus）看 Claude 週額度；fable 另外還要 Fable 自己的週額度也剩 25% 以上（兩個都要）；Codex 家看 Codex 週額度；量不到（unknown）或沒有額度資料一律不合格。依難度照順序取第一個合格的：routine（日常）＝gpt-6.1-sol + medium → sonnet + medium → grok-4.7 + medium（備援：只有前兩者都不合格才用）；elevated（高風險／跨模組／架構／develop 寫入）＝opus + medium → gpt-6.1-sol + high；critical＝fable + high → opus + high → gpt-6-astra + high（同樣的工作 Astra 吃的週額度約是 6.1-sol 的 2～5 倍；2026-10-14 實測：五個 Astra high 包 6.3 小時用掉 Codex 週額度 84%）。自動選不發出 xhigh／max／ultra。注意 gpt-6.1-sol 的 CLI 端預設 effort 是 low，省略 reasoning_effort 不等於 medium，一定要明確傳。ai-cli_kernel 沒指定模型時照這張表自動選，候選池在開工時凍結（使用者 2026-11-10 決定）。
+2. 選模型依週額度與任務難度；使用者指名就照指名，不看額度、不自動改。合格＝那一家的週額度剩 25% 以上：Claude 家（sonnet、opus）看 Claude 週額度；fable 另外還要 Fable 自己的週額度也剩 25% 以上（兩個都要）；Codex 家看 Codex 週額度；量不到（unknown）或沒有額度資料一律不合格。依難度照順序取第一個合格的：routine（日常）＝gpt-6.2-sol + medium → sonnet + medium → grok-4.7 + medium（備援：只有前兩者都不合格才用）；elevated（高風險／跨模組／架構／develop 寫入）＝opus + medium → gpt-6.2-sol + high；critical＝fable + high → opus + high → gpt-6.2-astra + high（前代 gpt-6-astra 同樣的工作吃的週額度約是 6.1-sol 的 2～5 倍；2026-10-14 實測：五個 Astra high 包 6.3 小時用掉 Codex 週額度 84%；6.2 代倍率未實測）。自動選不發出 xhigh／max／ultra。注意 gpt-6.2-sol（與 6.2-astra、6.1-sol）的 CLI 端預設 effort 是 low，省略 reasoning_effort 不等於 medium，一定要明確傳。ai-cli_kernel 沒指定模型時照這張表自動選，候選池在開工時凍結（使用者 2026-11-10 決定；2026-11-18 Codex 候選換成 6.2 代）。
 3. high 僅限跨模組、架構、高風險修改、逆向歧義，或一次 medium 明顯不足；xhigh/max 需使用者明確要求。
 4. 同一工具／假設連續失敗 2 次即停止回報，不得等到第 5 次、不得換模型後原樣重跑。升級時說明失敗證據與理由。
 5. 子 Agent（含 Workflow 開出的）預設 0；使用者同意後，會改檔的同時最多 2 個、唯讀稽核／分析最多 8 個（開之前先告知規模），禁止遞迴 Agent。

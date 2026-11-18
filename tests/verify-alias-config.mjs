@@ -19,6 +19,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CONFIG = join(process.env.AI_CLI_CONFIG_DIR, 'config.json');
+// 內建 alias 指向的「現行旗艦」與「現行 workhorse」。換代時只改這兩行（2026-11-18 換成 6.2 代）；
+// 斷言名稱刻意不寫型號，突變的 expect 才不會在換代時靜默對不上（CLAUDE.md 紅線 7）。
+const FLAGSHIP = 'gpt-6.2-astra';
+const WORKHORSE = 'gpt-6.2-sol';
 
 /**
  * fs 刻意走 createRequire 而**不是** `import ... from 'node:fs'`。
@@ -117,14 +121,14 @@ async function main(baseConfig) {
   // ---- 2. 純邏輯：resolveModelAlias ----
   console.log('\n[2] resolveModelAlias 邊界');
   writeConfig(baseConfig);
-  check('無覆寫時走內建表', catalog.resolveModelAlias('codex-ultra') === 'gpt-6-astra');
+  check('無覆寫時走內建表', catalog.resolveModelAlias('codex-ultra') === FLAGSHIP);
   check('非 alias 原樣回傳', catalog.resolveModelAlias('opus') === 'opus');
   // 2026-10-03 新增的 codex-ultracode：和 codex-ultra 同一顆旗艦，差別只在 effort 到 ultra。
   // `ultra` 是 codex 的 effort 級別名、不是 model，所以不改 codex-ultra 的語意（破壞性），
   // 而是純加法補上「gpt-6-astra + ultra」這個在此之前沒有任何 alias 的最強組合。
   check(
-    'codex-ultracode 解析到旗艦 gpt-6-astra',
-    catalog.resolveModelAlias('codex-ultracode') === 'gpt-6-astra',
+    'codex-ultracode 解析到現行旗艦（與 codex-ultra 同一顆）',
+    catalog.resolveModelAlias('codex-ultracode') === FLAGSHIP,
     catalog.resolveModelAlias('codex-ultracode')
   );
   check('codex-ultracode 路由到 codex', catalog.resolveAgentIdForModel(catalog.resolveModelAlias('codex-ultracode')) === 'codex');
@@ -179,12 +183,12 @@ async function main(baseConfig) {
     );
     check(
       // 名稱刻意不寫死型號：這一列的模型會隨 vendor 換代而改（2026-10-03 已從
-      // gpt-5.6-sol 換成 gpt-6.1-sol），而對應突變的 expect 必須是這個名稱的子字串。
+      // gpt-5.6-sol 換成 gpt-6.1-sol，2026-11-18 再換成 gpt-6.2-sol），而對應突變的 expect 必須是這個名稱的子字串。
       '★ 日常派工建議與模型政策一致（現行 workhorse + 日常 effort，不是一開始就 astra）',
       // 必須綁 situation：只比對 model + effort 的話，把這組設定搬到別的情境、
       // 而「日常派工」那列改錯，斷言照樣會過（2026-10-03 稽核指出的既有覆蓋缺口）。
       p.dispatchGuidance.some(
-        (g) => g.situation === '日常派工' && g.model === 'gpt-6.1-sol' && g.reasoningEffort === 'medium'
+        (g) => g.situation === '日常派工' && g.model === WORKHORSE && g.reasoningEffort === 'medium'
       ),
       JSON.stringify(p.dispatchGuidance[0])
     );
@@ -292,7 +296,7 @@ async function main(baseConfig) {
     catalog.resolveModelAlias('codex-ultra'); // 讓 terra 成為 last-good
     check(
       `結構性讀檔失敗（${code}）退回內建值`,
-      withReadError(code, () => catalog.resolveModelAlias('codex-ultra')) === 'gpt-6-astra',
+      withReadError(code, () => catalog.resolveModelAlias('codex-ultra')) === FLAGSHIP,
       `got ${withReadError(code, () => catalog.resolveModelAlias('codex-ultra'))}`
     );
   }
@@ -301,7 +305,7 @@ async function main(baseConfig) {
   try {
     check(
       '結構性讀檔失敗（EISDIR）退回內建值',
-      catalog.resolveModelAlias('codex-ultra') === 'gpt-6-astra',
+      catalog.resolveModelAlias('codex-ultra') === FLAGSHIP,
       `got ${catalog.resolveModelAlias('codex-ultra')}`
     );
   } finally {
@@ -311,7 +315,7 @@ async function main(baseConfig) {
   // 相對地，「檔案真的不存在」是使用者的意思，必須退回內建值而不是沿用 last-good。
   check(
     '檔案不存在時退回內建值',
-    catalog.resolveModelAlias('codex-ultra') === 'gpt-6-astra',
+    catalog.resolveModelAlias('codex-ultra') === FLAGSHIP,
     `got ${catalog.resolveModelAlias('codex-ultra')}`
   );
 
@@ -330,10 +334,10 @@ async function main(baseConfig) {
   // 解析失敗之後，cache 必須被清掉：否則接下來一次讀檔失敗會把這份「使用者已經改壞、
   // 語意上作廢」的舊設定當成 last-good 復活。
   writeFileSync(CONFIG, '{ this is not json');
-  check('壞掉的 JSON 退回內建值', catalog.resolveModelAlias('codex-ultra') === 'gpt-6-astra');
+  check('壞掉的 JSON 退回內建值', catalog.resolveModelAlias('codex-ultra') === FLAGSHIP);
   check(
     '壞掉的 JSON 之後遇到暫時性讀檔失敗，不會復活舊設定',
-    withReadError('EBUSY', () => catalog.resolveModelAlias('codex-ultra')) === 'gpt-6-astra',
+    withReadError('EBUSY', () => catalog.resolveModelAlias('codex-ultra')) === FLAGSHIP,
     `got ${withReadError('EBUSY', () => catalog.resolveModelAlias('codex-ultra'))}`
   );
 
@@ -380,14 +384,14 @@ async function main(baseConfig) {
   writeConfig({ ...baseConfig, aliasModel: ['gpt-5.4', 'opus'] });
   check(
     'aliasModel 是陣列時整個忽略',
-    catalog.resolveModelAlias('codex-ultra') === 'gpt-6-astra' &&
+    catalog.resolveModelAlias('codex-ultra') === FLAGSHIP &&
       catalog.resolveModelAlias('0') === '0',
     `got ${catalog.resolveModelAlias('0')}`
   );
 
   // 根節點是陣列、以及 aliasReasoningEffort 是陣列，也都要整個忽略。
   writeFileSync(CONFIG, JSON.stringify([{ aliasModel: { 'codex-ultra': 'gpt-5.4' } }], null, 2));
-  check('根節點是陣列時整份忽略', catalog.resolveModelAlias('codex-ultra') === 'gpt-6-astra');
+  check('根節點是陣列時整份忽略', catalog.resolveModelAlias('codex-ultra') === FLAGSHIP);
   // 光看 alias 值分不出來（陣列本來就取不到欄位，兩種實作都回內建值）——
   // 要看 status：有擋才會是 error/parse，沒擋的話會被當成「成功解析出一份空設定」。
   check(
@@ -488,7 +492,7 @@ async function main(baseConfig) {
 
   writeConfig(baseConfig);
   cmd = build();
-  check('移除覆寫後退回內建', cmd.agent === 'codex' && cmd.args.includes('gpt-6-astra'));
+  check('移除覆寫後退回內建', cmd.agent === 'codex' && cmd.args.includes(FLAGSHIP));
 
   // ---- 3c. gpt-6-astra 與 ultra / max effort（2026-09-05 加入）----
   //
@@ -520,8 +524,8 @@ async function main(baseConfig) {
   writeConfig({});
   cmd = build();
   check(
-    'codex-ultra 內建預設為 max（送出 --model gpt-6-astra 與 model_reasoning_effort=max）',
-    cmd.args.includes('model_reasoning_effort=max') && cmd.args.includes('gpt-6-astra'),
+    'codex-ultra 內建預設為 max（送出現行旗艦與 model_reasoning_effort=max）',
+    cmd.args.includes('model_reasoning_effort=max') && cmd.args.includes(FLAGSHIP),
     JSON.stringify(cmd.args)
   );
   // ★ codex-ultracode 的重點是「不必手動帶 effort 也會送出 ultra」——
@@ -529,9 +533,9 @@ async function main(baseConfig) {
   {
     const uc = buildWith('codex-ultracode', undefined);
     check(
-      '★ codex-ultracode 不帶 effort 時送出 --model gpt-6-astra 與 model_reasoning_effort=ultra',
+      '★ codex-ultracode 不帶 effort 時送出現行旗艦與 model_reasoning_effort=ultra',
       uc.agent === 'codex' &&
-        uc.args.includes('gpt-6-astra') &&
+        uc.args.includes(FLAGSHIP) &&
         uc.args.includes('model_reasoning_effort=ultra'),
       JSON.stringify(uc.args)
     );
@@ -588,12 +592,33 @@ async function main(baseConfig) {
       JSON.stringify(codexNames)
     );
   }
-  // ★ 排序 ≠ 強度。gpt-6.1-sol 是 vendor 的 priority 1，但它是 workhorse
-  //   （"near-Astra performance at a lower cost"），旗艦仍是 gpt-6-astra。
+  // 2026-11-18 codex-cli 0.170.0 目錄：6.2 代進來。三顆都要列為候選、路由到 codex，
+  // 而且依 vendor priority 排在上一代之前（6.2-sol 1、6.2-astra 2、6.1-terra 3、6.1-sol 5）。
+  for (const name of ['gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6.1-terra']) {
+    check(`${name} 列在已知模型清單`, catalog.listKnownModels().includes(name));
+    check(`${name} 路由到 codex`, catalog.resolveAgentIdForModel(name) === 'codex');
+  }
+  {
+    const codexNames = catalog.listKnownModels().filter((m) => m.startsWith('gpt-'));
+    const at = (m) => codexNames.indexOf(m);
+    check(
+      'codex 清單依 vendor priority 把 6.2 代排在上一代之前',
+      at('gpt-6.2-sol') === 0 && at('gpt-6.2-astra') === 1 && at('gpt-6.1-terra') === 2 && at('gpt-6.1-terra') < at('gpt-6.1-sol'),
+      JSON.stringify(codexNames)
+    );
+  }
+  built = tryBuild(FLAGSHIP, 'ultra');
+  check(
+    '現行旗艦明確指定 ultra 會送出對應的 --model 與 model_reasoning_effort=ultra',
+    !!built.cmd && built.cmd.args.includes(FLAGSHIP) && built.cmd.args.includes('model_reasoning_effort=ultra'),
+    built.error ?? JSON.stringify(built.cmd.args)
+  );
+  // ★ 排序 ≠ 強度。workhorse（2026-10-03 是 gpt-6.1-sol、2026-11-18 是 gpt-6.2-sol）是 vendor 的 priority 1，但它是 workhorse
+  //   （"near-Astra performance at a lower cost"），旗艦是 astra 系列（現行 gpt-6.2-astra）。
   //   所以 codex-ultra 不可以因為「有更新的名字」就改指過去。
   check(
-    'codex-ultra 仍指向旗艦 gpt-6-astra，不因 gpt-6.1-sol 較新而改指',
-    catalog.resolveModelAlias('codex-ultra') === 'gpt-6-astra',
+    'codex-ultra 指向現行旗艦，不因 workhorse 排在 priority 1 而改指',
+    catalog.resolveModelAlias('codex-ultra') === FLAGSHIP,
     catalog.resolveModelAlias('codex-ultra')
   );
   // vendor 標 visibility: "hide" 的內部條目不該出現在對外候選清單。
@@ -704,7 +729,7 @@ async function mcpChecks() {
     let res = await call('set_config', { alias_model: { 'codex-ultra': 'gpt-5.6-terra' } });
     const row = aliasOf(res, 'codex-ultra');
     check('set_config 寫入生效', row.resolvesTo === 'gpt-5.6-terra' && row.source === 'config');
-    check('回報內建原值', row.builtinResolvesTo === 'gpt-6-astra');
+    check('回報內建原值', row.builtinResolvesTo === FLAGSHIP);
 
     const onDisk = JSON.parse(readFileSync(CONFIG, 'utf-8'));
     check('保留設定檔中的未知欄位', onDisk.myCustomThing?.keep === 'me');
@@ -800,7 +825,7 @@ async function mcpChecks() {
 
     res = await call('set_config', { unset: ['codex-ultra'] });
     const back = aliasOf(res, 'codex-ultra');
-    check('unset 退回內建', back.resolvesTo === 'gpt-6-astra' && back.source === 'builtin');
+    check('unset 退回內建', back.resolvesTo === FLAGSHIP && back.source === 'builtin');
     check(
       'unset 同時清掉 reasoning 覆寫',
       back.defaultReasoningEffort === 'max',

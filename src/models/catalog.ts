@@ -40,7 +40,7 @@ export interface EffectiveModelAliasDetail extends ModelAliasDetail {
 /** alias → 實際 model。1:1 還原 dist。 */
 export const MODEL_ALIASES: Record<string, string> = {
   'claude-ultra': 'opus',
-  'codex-ultra': 'gpt-6-astra',
+  'codex-ultra': 'gpt-6.2-astra',
   /*
     codex-ultracode：和 codex-ultra 同一顆旗艦，差別只在 effort 到 `ultra`。
 
@@ -49,11 +49,13 @@ export const MODEL_ALIASES: Record<string, string> = {
     alias 名稱用，已經讓 codex-ultra 這個名字名實不符——它叫 ultra、送的卻是 max。
     改它的語意是破壞性變更，所以這裡用純加法補上真正的最強組合：
     gpt-6-astra + ultra 在此之前**沒有任何 alias**，要用得每次手動帶 reasoning_effort。
+    2026-11-18 旗艦換代：vendor 目錄把 gpt-6-astra 改標 "Previous generation"，
+    兩個 alias 一起改指 gpt-6.2-astra（effort 不動：codex-ultra 仍是 max、這裡仍是 ultra）。
 
     claude 側刻意不加對應的名稱：claude 的 effort 只到 max（沒有 ultra），
     claude-ultracode 會和 claude-ultra 完全同義——兩個名字做同一件事是新的混淆源。
   */
-  'codex-ultracode': 'gpt-6-astra',
+  'codex-ultracode': 'gpt-6.2-astra',
   'agy-ultra': 'Gemini 3.1 Pro (High)',
   'antigravity-ultra': 'Gemini 3.1 Pro (High)',
 };
@@ -157,7 +159,7 @@ export const DISPATCH_GUIDANCE: ReadonlyArray<{
   },
   {
     situation: '日常派工',
-    model: 'gpt-6.1-sol',
+    model: 'gpt-6.2-sol',
     reasoningEffort: 'medium',
     note:
       '這張表是維護者的派工政策，不是從 vendor 目錄推出來的。日常用 medium；'
@@ -168,11 +170,13 @@ export const DISPATCH_GUIDANCE: ReadonlyArray<{
       + '"Latest workhorse model for coding and everyday work"），而且 vendor 自己的文案說它 '
       + '"near-Astra performance at a lower cost"。'
       + '⚠️ gpt-6.1-sol 的 CLI 端預設 effort 是 low（不是 medium），所以 effort 一定要明確傳，'
-      + '省略不等於拿到這裡建議的強度。',
+      + '省略不等於拿到這裡建議的強度。'
+      + '2026-11-18 再換代成 gpt-6.2-sol：vendor 目錄的 priority 1 換成它（"Fast, go-to model for coding and everyday work."），'
+      + 'gpt-6.1-sol 改標 "Previous generation"。gpt-6.2-sol 的 CLI 端預設 effort 同樣是 low，一樣要明確傳。',
   },
   {
     situation: '同一個問題卡超過 5 次',
-    model: 'gpt-6-astra',
+    model: 'gpt-6.2-astra',
     reasoningEffort: 'high',
     note: '升級時要寫明「第幾次、前幾次卡在哪」，不要靜默換模型。',
   },
@@ -321,11 +325,11 @@ export const MODEL_LIST_CAVEAT = {
 
 export const MODEL_ALIAS_DETAILS: ModelAliasDetail[] = [
   { name: 'claude-ultra', resolvesTo: 'opus', agent: 'claude', defaultReasoningEffort: 'max' },
-  { name: 'codex-ultra', resolvesTo: 'gpt-6-astra', agent: 'codex', defaultReasoningEffort: 'max' },
+  { name: 'codex-ultra', resolvesTo: 'gpt-6.2-astra', agent: 'codex', defaultReasoningEffort: 'max' },
   // ⚠️ 這裡的 defaultReasoningEffort 只進 models payload 顯示；真正決定送出值的是
   //    user-config.ts 的 BUILTIN_ALIAS_REASONING。兩份必須一致，
   //    verify-alias-config.mjs 有一條斷言在守這件事（兩份寫死的表最容易悄悄漂移）。
-  { name: 'codex-ultracode', resolvesTo: 'gpt-6-astra', agent: 'codex', defaultReasoningEffort: 'ultra' },
+  { name: 'codex-ultracode', resolvesTo: 'gpt-6.2-astra', agent: 'codex', defaultReasoningEffort: 'ultra' },
   { name: 'agy-ultra', resolvesTo: 'Gemini 3.1 Pro (High)', agent: 'antigravity' },
   { name: 'antigravity-ultra', resolvesTo: 'Gemini 3.1 Pro (High)', agent: 'antigravity' },
 ];
@@ -455,7 +459,7 @@ export function getModelParameterDescription(): string {
     .map((m) => `"${m}"`)
     .join(
       ', '
-    )}. "gpt-6-astra" (and therefore "codex-ultra") needs codex-cli 0.153 or newer; 0.151 is rejected by the API with "requires a newer version of Codex". "gpt-6-sol" and "gpt-6-luna" were verified on codex-cli 0.155.1; older CLIs are untested. "gpt-6.1-sol" is the vendor catalog's current priority-1 entry ("Latest workhorse model for coding and everyday work") and was verified on codex-cli 0.160.0; it is NOT the flagship — the vendor's own copy calls it "near-Astra performance at a lower cost", so "gpt-6-astra" ("Frontier intelligence for the most demanding work") remains the strongest. "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark" and "gpt-5.2" were dropped from the candidate list on 2026-10-03 because they are no longer in the vendor catalog; a probe of all five on that date returned HTTP 400 "The '<name>' model is not supported when using Codex with a ChatGPT account", the same wording as in 2026-09-05. "gpt-5.5" was dropped the same way on 2026-10-15, after the vendor retired it on 2026-10-14 (replacement: "gpt-6.1-sol"); a probe that day returned the same HTTP 400. Dropping a name only stops advertising it and does NOT block it, since the "gpt-" prefix still routes an explicitly named model to codex — where it then hits that 400. direct-api accepts provider-prefixed models using "or-<model>" for OpenRouter, "ds-<model>" for DashScope, or "<provider>-<model>" for any provider key configured in ~/.local/share/ai-cli/providers.json — this is how you connect a third-party OpenAI-compatible API yourself. A name like "forge-<model>" is therefore read as provider "forge" plus a model, not as the removed Forge CLI. Antigravity (agy) accepts model selection: the name is normalized to an agy model id and passed as --model, while "agy" and "agy-default" pass nothing and fall back to the agy CLI's own default. agy carries the reasoning level in the model id itself (-high / -medium / -low), which is why reasoning_effort is not accepted for it. The Kiro and Forge agents were removed in 5.0.0 — their model names are now rejected with an explicit error rather than silently falling back to Claude.`;
+    )}. "gpt-6-astra" needs codex-cli 0.153 or newer (the "codex-ultra" alias pointed at it until 2026-11-18); 0.151 is rejected by the API with "requires a newer version of Codex". "gpt-6-sol" and "gpt-6-luna" were verified on codex-cli 0.155.1; older CLIs are untested. "gpt-6.1-sol" was verified on codex-cli 0.160.0. On 2026-11-18 (codex-cli 0.170.0) the vendor catalog added a new generation: "gpt-6.2-sol" (priority 1, "Fast, go-to model for coding and everyday work"), "gpt-6.2-astra" (priority 2, "Our most capable model for complex coding and professional work" — the flagship, so "codex-ultra" and "codex-ultracode" now resolve to it) and "gpt-6.1-terra" (priority 3, "Efficient model that excels at visual understanding and computer use"); "gpt-6.1-sol" and "gpt-6-astra" are now labelled "Previous generation" and still run. All three new models were verified that day and default to "low" effort on the CLI side. Catalog priority is not a capability ranking: the "sol" models are the everyday workhorses, the "astra" models the flagships. "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark" and "gpt-5.2" were dropped from the candidate list on 2026-10-03 because they are no longer in the vendor catalog; a probe of all five on that date returned HTTP 400 "The '<name>' model is not supported when using Codex with a ChatGPT account", the same wording as in 2026-09-05. "gpt-5.5" was dropped the same way on 2026-10-15, after the vendor retired it on 2026-10-14 (replacement: "gpt-6.1-sol"); a probe that day returned the same HTTP 400. Dropping a name only stops advertising it and does NOT block it, since the "gpt-" prefix still routes an explicitly named model to codex — where it then hits that 400. direct-api accepts provider-prefixed models using "or-<model>" for OpenRouter, "ds-<model>" for DashScope, or "<provider>-<model>" for any provider key configured in ~/.local/share/ai-cli/providers.json — this is how you connect a third-party OpenAI-compatible API yourself. A name like "forge-<model>" is therefore read as provider "forge" plus a model, not as the removed Forge CLI. Antigravity (agy) accepts model selection: the name is normalized to an agy model id and passed as --model, while "agy" and "agy-default" pass nothing and fall back to the agy CLI's own default. agy carries the reasoning level in the model id itself (-high / -medium / -low), which is why reasoning_effort is not accepted for it. The Kiro and Forge agents were removed in 5.0.0 — their model names are now rejected with an explicit error rather than silently falling back to Claude.`;
 }
 
 /** 所有 agent 宣告的 model 名稱（不含 direct-api 的動態 provider-prefixed 名稱）。 */

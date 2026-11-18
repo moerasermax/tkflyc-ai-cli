@@ -54,8 +54,23 @@ import { debugLog } from '../core/debug.js';
  *   CLI 先印 metadata not found，接著 API 回 HTTP 400 `The 'gpt-5.5' model is not
  *   supported when using Codex with a ChatGPT account.`。一樣只是不再列為候選，
  *   `gpt-` 前綴照樣路由到 codex；原文記在 catalog.ts 的 KNOWN_BAD_MODELS。
+ *
+ * ★ 2026-11-18 補 6.2 代。依據是 codex-cli 0.170.0 自己重抓的目錄（先派 trivial job
+ *   讓 `client_version` 對上 `codex --version`；之前讀到的是 0.169.0 寫的視角）：12 筆，
+ *   `list` 的前三名是新的——
+ *   - `gpt-6.2-sol`（priority 1，"Fast, go-to model for coding and everyday work."）
+ *   - `gpt-6.2-astra`（priority 2，"Our most capable model for complex coding and
+ *     professional work."）——旗艦換代，所以 codex-ultra／codex-ultracode 改指它。
+ *   - `gpt-6.1-terra`（priority 3，"Efficient model that excels at visual understanding
+ *     and computer use."）
+ *   原本的 `gpt-6.1-sol`、`gpt-6-astra` 改標 "Previous generation"，仍在目錄、仍列候選。
+ *   三顆新模型都是 low…ultra 六級、CLI 端預設 **low**（Set 收聯集，不用動）。
+ *   同日實測 exit 0、回 PONG：6.2-astra＋low／max／ultra、6.2-sol＋medium、6.1-terra＋low。
  */
 const CODEX_MODELS = [
+  'gpt-6.2-sol',
+  'gpt-6.2-astra',
+  'gpt-6.1-terra',
   'gpt-6.1-sol',
   'gpt-6-astra',
   'gpt-6-sol',

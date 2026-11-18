@@ -617,12 +617,17 @@ reasoning 預設值的優先序（高 → 低）：
 | alias | 內建指向 |
 |-------|----------|
 | `claude-ultra` | `opus` |
-| `codex-ultra` | `gpt-6-astra` |
+| `codex-ultra` | `gpt-6.2-astra`（effort max） |
+| `codex-ultracode` | `gpt-6.2-astra`（effort ultra） |
 | `agy-ultra` / `antigravity-ultra` | `Gemini 3.1 Pro (High)` |
 
 > **`gpt-6-astra` 需要 codex-cli 0.153 以上。** 0.151.0 的模型快取雖然列得出它，實跑會被 API 以
 > `requires a newer version of Codex` 拒絕（2026-09-05 實測；0.153.4 可用）。`codex-ultra` 既然改指它，
 > 舊版 CLI 上呼叫 `codex-ultra` 也會失敗——升級 CLI，或用下面的 `aliasModel` 暫時把它指回 `gpt-5.6-sol`。
+>
+> **2026-11-18 起 `codex-ultra`／`codex-ultracode` 改指 `gpt-6.2-astra`**：codex-cli 0.170.0 的 vendor 目錄把它列為
+> 最強（"Our most capable model for complex coding and professional work."），`gpt-6-astra` 改標上一代。
+> 當日在 0.170.0 實測 low／max／ultra 都 exit 0；更舊的 CLI 沒測。要留在舊旗艦，用 `aliasModel` 指回 `gpt-6-astra`。
 
 `config.json` 的 `aliasModel` 可以覆寫它。解析優先序（高 → 低）：
 
