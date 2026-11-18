@@ -62,7 +62,7 @@ except Exception:
 #
 # ───────────────────────────────────────────────────────────────────────────
 
-ctx = """【ai-cli 精簡派工政策 v2.4（2026-11-10）】
+ctx = """【ai-cli 精簡派工政策 v2.5（2026-11-18）】
 1. ai-cli 是唯一模型路由入口；判斷模型能不能派時查 models 的 catalogV2：source=vendor-cli 的 routable 是向 vendor 實查的結果，source=builtin-fallback 的條目（以及頂層 claude／codex 陣列）是原始碼靜態清單，不能單獨當作可用證明，要對照 knownBadModels。
 2. 選模型依週額度與任務難度；使用者指名就照指名，不看額度、不自動改。合格＝那一家的週額度剩 25% 以上：Claude 家（sonnet、opus）看 Claude 週額度；fable 另外還要 Fable 自己的週額度也剩 25% 以上（兩個都要）；Codex 家看 Codex 週額度；量不到（unknown）或沒有額度資料一律不合格。依難度照順序取第一個合格的：routine（日常）＝gpt-6.1-sol + medium → sonnet + medium → grok-4.7 + medium（備援：只有前兩者都不合格才用）；elevated（高風險／跨模組／架構／develop 寫入）＝opus + medium → gpt-6.1-sol + high；critical＝fable + high → opus + high → gpt-6-astra + high（同樣的工作 Astra 吃的週額度約是 6.1-sol 的 2～5 倍；2026-10-14 實測：五個 Astra high 包 6.3 小時用掉 Codex 週額度 84%）。自動選不發出 xhigh／max／ultra。注意 gpt-6.1-sol 的 CLI 端預設 effort 是 low，省略 reasoning_effort 不等於 medium，一定要明確傳。ai-cli_kernel 沒指定模型時照這張表自動選，候選池在開工時凍結（使用者 2026-11-10 決定）。
 3. high 僅限跨模組、架構、高風險修改、逆向歧義，或一次 medium 明顯不足；xhigh/max 需使用者明確要求。
@@ -75,7 +75,8 @@ ctx = """【ai-cli 精簡派工政策 v2.4（2026-11-10）】
 10. 每個任務開頭先問使用者由誰執行：① ai-cli ② 本 session 主導者 ③ 自動；同一任務沿用，換任務再問。專案依內容或模型限制派工的規則只當建議（使用者 2026-09-25 決定）。
 11. 派工前先查週額度剩餘（看 raw 原文，見第 6 條）：剩不到 25% 或量不到的那一家不派，改派另一家合格的候選（見第 2 條）；沒有合格候選就停下回報。Codex 剩不到 20% 不同時跑兩個 Codex 工作。長工作拆小，避免一個 session 上千次請求反覆重送 100K 以上的 context（使用者 2026-10-14 決定；並行門檻 2026-11-08 由 50% 改為 20%；改派規則 2026-11-10 決定）。
 12. OpenRouter 的 Qwen（or-qwen/qwen3.7-plus：偵察、逆向、敏感任務，便宜）與 DeepSeek（or-deepseek/deepseek-v4.1-flash-1017：看圖判定、便宜諮詢與設計審閱）列為 ai-cli 標準候選。兩者都會把資料送到外部付費 API：專案自己的 CLAUDE.md 明文放行的可以直接派；其他專案使用前一律先問使用者，得到同意才派（使用者 2026-10-22 決定）。
-13. ai-cli_kernel 同時最多 3 個 run，同一個 repo 一次 1 個（以 git common dir 判斷，worktree 和同一個 origin 的 clone 都算同一個）；Claude 週額度剩不到 10% 或量不到時退回全機 1 個；Codex 剩不到 20% 或量不到時，不同時跑兩個用到 Codex 的 run。這些由 kernel 在開工時自己擋，上限只能由人調整，MCP 改不了（使用者 2026-11-08 決定）。"""
+13. ai-cli_kernel 同時最多 3 個 run，同一個 repo 一次 1 個（以 git common dir 判斷，worktree 和同一個 origin 的 clone 都算同一個）；Claude 週額度剩不到 10% 或量不到時退回全機 1 個；Codex 剩不到 20% 或量不到時，不同時跑兩個用到 Codex 的 run。這些由 kernel 在開工時自己擋，上限只能由人調整，MCP 改不了（使用者 2026-11-08 決定）。
+14. 開發完成後的驗證工作（自動化測試、驗證測試、煙霧測試、對真實服務的實測）要派工時，用 API 金鑰的 direct-api 模型：anthropic-<模型 ID> 或 openai-<模型 ID>（金鑰在 providers.json；這類模型有 bash 工具，可以跑測試指令），把 Claude／Codex 訂閱額度留給開發。API 按 token 計費：驗證包要小、模型選夠用的（例如 anthropic-claude-haiku-5-5、openai-gpt-6-luna），需要較強模型時說明理由。實作、修 bug 與唯讀稽核仍照第 2 條（使用者 2026-11-18 決定）。"""
 
 # ai-cli 派出的 worker 收到的內容（AI_CLI_WORKER=1）。四要素照另一個專案前例（知識庫紀錄）
 # 實證有效的「機制感知身分鎖」：身分證明、硬禁加後果、凌駕聲明、首個動作。
