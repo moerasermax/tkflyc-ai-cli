@@ -10131,9 +10131,57 @@
   {
     "name": "#25 檔案還在卻說被隔離（blocked／missing 顛倒）",
     "file": "src/core/win-job-host.ts",
-    "from": "  return hostExists\n    ? new Error(`Windowless helper blocked",
-    "to": "  return !hostExists\n    ? new Error(`Windowless helper blocked",
+    "from": "  return hostExists\n    ? new WindowlessHelperUnavailableError(`Windowless helper blocked",
+    "to": "  return !hostExists\n    ? new WindowlessHelperUnavailableError(`Windowless helper blocked",
     "expect": "spawn EPERM 且檔案還在＝blocked",
+    "script": "verify-win-helper-antivirus.mjs"
+  },
+  {
+    "name": "#25 PowerShell host：呼叫者消失不終止 Job",
+    "file": "src/core/win-job-host.ts",
+    "from": "while(!$p.WaitForExit(50)){if($owner.HasExited -or [DateTime]::UtcNow -ge $until)",
+    "to": "while(!$p.WaitForExit(50)){if([DateTime]::UtcNow -ge $until)",
+    "expect": "呼叫者被殺後腳本子孫在 10 秒內被終止",
+    "script": "verify-win-pshost.mjs"
+  },
+  {
+    "name": "#25 PowerShell host：直接 detached 啟動 powershell（沒有主控台、腳本不會跑）",
+    "file": "src/core/win-job-host.ts",
+    "from": "    try { child = spawn(process.execPath, ['-e', relayScript(encoded)], { detached: true,",
+    "to": "    try { child = spawn(POWERSHELL_EXE, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], { detached: true,",
+    "expect": "前景腳本有執行",
+    "script": "verify-win-pshost.mjs"
+  },
+  {
+    "name": "#25 PowerShell 模式仍去編 exe",
+    "file": "src/core/win-job-host.ts",
+    "from": "compileHost(deadline, false)",
+    "to": "compileHost(deadline, true)",
+    "expect": "PowerShell 模式不編 exe",
+    "script": "verify-win-pshost.mjs"
+  },
+  {
+    "name": "#25 exe 用不了時不改走 PowerShell host",
+    "file": "src/core/win-job-host.ts",
+    "from": "    try { return await runCompiled(script, env, background, timeoutMs, deadline); }\n    catch (error) { if (!(error instanceof WindowlessHelperUnavailableError)) throw error; fallbackMode = 'powershell'; }\n  }\n  return runViaPowerShellHost(",
+    "to": "    return await runCompiled(script, env, background, timeoutMs, deadline);\n  }\n  return runViaPowerShellHost(",
+    "expect": "啟動時輔助程式被刪（ENOENT）→ 改走 PowerShell host",
+    "script": "verify-win-helper-antivirus.mjs"
+  },
+  {
+    "name": "#25 exe 執行時被殺且移除後，之後的呼叫仍用 exe",
+    "file": "src/core/win-job-host.ts",
+    "from": "      if(!existsSync(host)){if(ready===generation)ready=undefined;fallbackMode='powershell';",
+    "to": "      if(false){if(ready===generation)ready=undefined;fallbackMode='powershell';",
+    "expect": "exe 啟動後被殺且檔案不見",
+    "script": "verify-win-helper-antivirus.mjs"
+  },
+  {
+    "name": "#25 逾時 kill 丟出的錯誤被當成啟動前失敗（已啟動的腳本被重跑）",
+    "file": "src/core/win-job-host.ts",
+    "from": "child.once('error',(error: NodeJS.ErrnoException)=>{clearTimeout(timer);if(expired)return;reject(spawned?error:spawnFailure(error));});",
+    "to": "child.once('error',(error: NodeJS.ErrnoException)=>{clearTimeout(timer);reject(spawnFailure(error));});",
+    "expect": "已啟動的 exe 在逾時 kill 時丟錯",
     "script": "verify-win-helper-antivirus.mjs"
   }
 ]

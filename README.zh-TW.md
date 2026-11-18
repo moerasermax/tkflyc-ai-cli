@@ -495,6 +495,7 @@ MCP 工具 `ai-cli_kernel_*` 預設不列出且拒絕呼叫；`ai-cli kernel ena
 | `AI_CLI_BREAKER_DUP_LIMIT` | 視窗內「同一 agent + 同一 prompt」最大次數，超過視為迴圈（預設 `6`） |
 | `AI_CLI_BREAKER_COOLDOWN_SEC` | 觸發後的開路冷卻秒數（預設 `120`） |
 | `AI_CLI_DEFAULT_REASONING_EFFORT` | 覆寫 `config.json` 的 reasoning 預設值（見下方「使用者設定檔（config.json）」） |
+| `AI_CLI_WINDOWLESS_HOST=powershell` | Windows：一律用系統內建的 PowerShell 當無視窗 host，不使用現場編譯的 `ai-cli-windowless-host.exe`。平常不需要設：exe 被防毒移除或封鎖時會自動改用（#25），這個變數是強制開關與測試用。代價是每次包容呼叫多約 2～3 秒 |
 
 ## 模型目錄的出處與查詢時間
 

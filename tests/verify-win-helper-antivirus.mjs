@@ -98,36 +98,30 @@ if (process.platform !== 'win32') {
     for (const f of [freshCs, keepTxt, keepExe, saved]) rmSync(f, { force: true });
   }
 
-  // ---- 3. 啟動時 ----
-  const withSpawn = async (fake) => {
-    const original = cp.spawn;
-    cp.spawn = (file, args, options) => (file === helper ? fake(original) : original(file, args, options));
-    syncBuiltinESMExports();
-    try { await runWindowless('C:\\nonexistent.ps1'); return ''; }
-    catch (error) { return String(error?.message ?? error); }
-    finally { cp.spawn = original; syncBuiltinESMExports(); }
+  // ---- 3. 啟動時：exe 用不了就改走 PowerShell host（每個情境一個子行程，模式切換是行程層級）----
+  const scenario = (name) => {
+    const fixture = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), 'fixtures', 'win-host-fallback.mjs');
+    const r = cp.spawnSync(process.execPath, [fixture, name, root], { encoding: 'utf8', timeout: 120000, windowsHide: true });
+    try { return JSON.parse(r.stdout.trim().split(/\r?\n/).pop()); } catch { return { raw: (r.stdout + r.stderr).slice(0, 600) }; }
   };
   {
-    await ensureWindowlessHost();
-    const away = helper + '.av-away-' + randomUUID();
-    const message = await withSpawn(() => {
-      renameSync(helper, away); // 模擬 ensure 之後、spawn 之前被防毒刪掉
-      const child = new EventEmitter();
-      child.kill = () => true;
-      setImmediate(() => child.emit('error', Object.assign(new Error(`spawn ${helper} ENOENT`), { code: 'ENOENT' })));
-      return child;
-    });
-    check('啟動時輔助程式真的不見（ENOENT）會說 missing 並印出路徑', message.startsWith(`Windowless helper missing (ENOENT): ${helper}`) && message.includes(ANTIVIRUS_HINT), message);
-    // 快取被清掉的話，下一次 ensure 會重編出新檔；沒清就會拿到不存在的路徑後才自己發現。
-    const again = await ensureWindowlessHost();
-    check('不見之後下一次 ensure 會重編', again === helper && existsSync(helper));
-    rmSync(away, { force: true });
+    const r = scenario('enoent');
+    check('啟動時輔助程式被刪（ENOENT）→ 改走 PowerShell host，腳本照樣執行', r.first === 'resolved' && r.ranAfterFirst === true && r.modeAfterFirst === 'powershell' && r.intercepted === 1, JSON.stringify(r));
   }
   {
-    await ensureWindowlessHost();
-    const message = await withSpawn(() => { throw Object.assign(new Error('spawn EPERM'), { code: 'EPERM' }); });
-    check('spawn 同步丟出 EPERM（檔案還在）會說 blocked 並印出路徑', message.startsWith(`Windowless helper blocked (EPERM): ${helper}`) && message.includes(ANTIVIRUS_BLOCKED_HINT), message);
+    const r = scenario('eperm');
+    check('spawn 同步丟出 EPERM（被封鎖）→ 改走 PowerShell host，腳本照樣執行', r.first === 'resolved' && r.ranAfterFirst === true && r.modeAfterFirst === 'powershell' && r.intercepted === 1, JSON.stringify(r));
   }
+  {
+    const r = scenario('vanish-after-exit');
+    check('exe 啟動後被殺且檔案不見 → 這次失敗不重跑、保留可重送的錯誤前綴', typeof r.first === 'string' && r.first.startsWith('Windowless PowerShell failed (1)') && r.first.includes('disappeared during launch') && r.ranAfterFirst === false, JSON.stringify(r));
+    check('之後的呼叫改走 PowerShell host 並成功', r.modeAfterFirst === 'powershell' && r.ranAfterSecond === true && r.intercepted === 1, JSON.stringify(r));
+  }
+  {
+    const r = scenario('kill-error');
+    check('已啟動的 exe 在逾時 kill 時丟錯 → 回報逾時，不改走 PowerShell host、不重跑', typeof r.first === 'string' && r.first.includes('Windowless host deadline') && r.ranAfterFirst === false && r.modeAfterFirst === 'compiled' && r.intercepted === 1, JSON.stringify(r));
+  }
+  check('各情境之後輔助程式仍在（子行程有還原）', existsSync(helper));
 
   // ---- 4. doctor ----
   const status = getWindowlessHelperStatus(false);

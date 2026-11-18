@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const SOURCE = String.raw`
 using System; using System.IO; using System.Text; using System.Runtime.InteropServices;
@@ -97,12 +97,17 @@ export function windowlessHostPath(): { directory: string; target: string } {
  * 用固定標記而不是比對一般文字：路徑或其他診斷碰巧含同樣字樣時不會誤判（稽核 gpt-6.2-sol）。
  */
 export const VANISHED_MARKER = 'AI_CLI_HELPER_VANISHED';
+/**
+ * 編好的輔助程式用不了（被防毒移除或封鎖）。只有這個錯誤會讓 runWindowless 改走 PowerShell host；
+ * 它只會在腳本開始執行之前丟出（bootstrap 失敗、spawn 失敗），所以改走另一條不會重跑已啟動的腳本。
+ */
+export class WindowlessHelperUnavailableError extends Error {}
 export const ANTIVIRUS_HINT = 'the helper was built but is gone; antivirus software may have quarantined it. Allow this file in your antivirus (or restore it from quarantine) and retry';
 export const ANTIVIRUS_BLOCKED_HINT = 'the helper exists but could not be started; antivirus or another security product may be blocking it. Allow this file and retry';
 export function windowlessBootstrapError(code: number | null, stderr: string, target: string, targetExists: boolean): Error {
   const base = `PowerShell/Add-Type or private helper ACL unavailable (${code}): ${stderr}`;
   const vanished = (code === 0 && !targetExists) || stderr.includes(VANISHED_MARKER);
-  return new Error(vanished ? `Windowless helper missing: ${target} — ${ANTIVIRUS_HINT}. ${base}` : base);
+  return vanished ? new WindowlessHelperUnavailableError(`Windowless helper missing: ${target} — ${ANTIVIRUS_HINT}. ${base}`) : new Error(base);
 }
 /**
  * 啟動輔助程式時的 spawn 錯誤。檔案不在＝missing；檔案還在、但 EACCES／EPERM／UNKNOWN＝
@@ -112,13 +117,47 @@ const SPAWN_SECURITY_CODES = ['ENOENT', 'EACCES', 'EPERM', 'UNKNOWN'];
 export function windowlessSpawnError(error: NodeJS.ErrnoException, host: string, hostExists: boolean): Error {
   if (!SPAWN_SECURITY_CODES.includes(error.code ?? '')) return error;
   return hostExists
-    ? new Error(`Windowless helper blocked (${error.code}): ${host} — ${ANTIVIRUS_BLOCKED_HINT}. ${error.message}`)
-    : new Error(`Windowless helper missing (${error.code}): ${host} — ${ANTIVIRUS_HINT}. ${error.message}`);
+    ? new WindowlessHelperUnavailableError(`Windowless helper blocked (${error.code}): ${host} — ${ANTIVIRUS_BLOCKED_HINT}. ${error.message}`)
+    : new WindowlessHelperUnavailableError(`Windowless helper missing (${error.code}): ${host} — ${ANTIVIRUS_HINT}. ${error.message}`);
 }
 export function remainingTime(deadline: number | undefined, limit: number): number {
   const remaining = deadline === undefined ? limit : Math.min(limit, deadline - performance.now());
   if (remaining <= 0) throw new Error('Windowless host deadline; containment unknown');
   return Math.max(1, Math.floor(remaining));
+}
+/**
+ * #25：第三方防毒（McAfee 個人版）會刪掉現場編出來的 exe，使用者又無法事先加例外。
+ * 所以 exe 用不了時改走「PowerShell host」：由系統內建、微軟簽章的 powershell.exe 以 P/Invoke
+ * 做和 exe 一樣的事（私有 kill-on-close Job、核對呼叫者、逾時或呼叫者消失就終止整個 Job），
+ * 不寫任何執行檔到磁碟。切換後同一個行程一直用它（不會每次都再編一次再被砍）。
+ * AI_CLI_WINDOWLESS_HOST=powershell 可強制使用（測試兩條路徑等價，也是使用者的逃生口）。
+ */
+export type WindowlessHostMode = 'compiled' | 'powershell';
+let fallbackMode: WindowlessHostMode | undefined;
+export function windowlessHostMode(): WindowlessHostMode {
+  return process.env.AI_CLI_WINDOWLESS_HOST === 'powershell' ? 'powershell' : (fallbackMode ?? 'compiled');
+}
+let rootReady: Promise<string> | undefined;
+/**
+ * 私有目錄（bridge／broker 暫存、native DLL 快取都放這裡）。compiled 模式＝輔助程式所在目錄；
+ * exe 用不了時，bootstrap 只建立並驗證目錄的 ACL，不編譯。
+ */
+export async function ensureWindowlessRoot(deadline?: number): Promise<string> {
+  if (windowlessHostMode() === 'compiled') {
+    try { return dirname(await ensureWindowlessHost(deadline)); }
+    catch (error) { if (!(error instanceof WindowlessHelperUnavailableError)) throw error; fallbackMode = 'powershell'; }
+  }
+  remainingTime(deadline, 55000);
+  if (!rootReady) { const created: Promise<string> = compileHost(deadline, false).catch(error => { if (rootReady === created) rootReady = undefined; throw error; }); rootReady = created; }
+  const pending = rootReady;
+  // 共用同一個 bootstrap，但每個等待者各自受自己的期限約束（稽核 gpt-6.2-astra）。
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const directory = deadline === undefined ? await pending : await Promise.race([pending, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Windowless host deadline; containment unknown')), remainingTime(deadline, 55000)); })]);
+    if (existsSync(directory)) return directory;
+    if (rootReady === pending) rootReady = undefined;
+    return await ensureWindowlessRoot(deadline);
+  } finally { clearTimeout(timer); }
 }
 export async function ensureWindowlessHost(deadline?: number): Promise<string> {
   remainingTime(deadline, 55000);
@@ -134,14 +173,16 @@ export async function ensureWindowlessHost(deadline?: number): Promise<string> {
   }
   finally { clearTimeout(timer); }
 }
-async function compileHost(deadline?: number): Promise<string> {
+async function compileHost(deadline?: number, compile = true): Promise<string> {
   const { directory, target } = windowlessHostPath();
+  const expected = compile ? target : directory;
   const quote = (s: string) => `'${s.replaceAll("'", "''")}'`;
   // TEMP may be shared and Node mode bits do not set Windows ACLs. Create with
   // an explicit DACL atomically, reject pre-existing insecure/reparse roots.
   // The bootstrap is inline: no executable script is written into shared TEMP.
   const script = `$ErrorActionPreference='Stop'\n$compiled=$null;$source=$null
 # #25: remove this run's temp files on every exit path; never fail the bootstrap over cleanup.
+$compile=${compile ? '$true' : '$false'}
 function Clear-Temp{try{foreach($f in @($source,$compiled)){if($f -and (Test-Path -LiteralPath $f)){Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue}}}catch{}}
 try {
 $directory=${quote(directory)}; $target=${quote(target)}
@@ -173,7 +214,7 @@ if($requester.StartTime.ToUniversalTime() -gt [Diagnostics.Process]::GetCurrentP
 # files older than an hour: a concurrent bootstrap's fresh files and other caches are untouched.
 $stale=[DateTime]::UtcNow.AddHours(-1)
 Get-ChildItem -LiteralPath $directory -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\.exe(\\.cs)?$' -and $_.LastWriteTimeUtc -lt $stale -and (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) } | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
-if(!(Test-Path -LiteralPath $target)) {
+if($compile -and !(Test-Path -LiteralPath $target)) {
   $compiled=Join-Path $directory (([Guid]::NewGuid().ToString())+'.exe');$source=$compiled+'.cs'
   [IO.File]::WriteAllText($source,@'
 ${SOURCE}
@@ -204,12 +245,94 @@ exit 0
     // Bound the caller independently of a close event (including a failed kill).
     const timer=setTimeout(()=>{try{child.kill('SIGKILL');}catch{}reject(new Error('Windowless bootstrap deadline; containment unknown'));},remainingTime(deadline,55000));
     child.once('error',error=>{clearTimeout(timer);reject(error);});
-    child.once('close',code=>{clearTimeout(timer);const exists=existsSync(target);code===0 && exists?resolve():reject(windowlessBootstrapError(code,error,target,exists));});
+    child.once('close',code=>{clearTimeout(timer);const exists=existsSync(expected);code===0 && exists?resolve():reject(windowlessBootstrapError(code,error,expected,exists));});
   });
-  return target;
+  return expected;
 }
 
 export async function runWindowless(script: string, env: NodeJS.ProcessEnv = {}, background = false, timeoutMs = 45000, deadline?: number): Promise<void> {
+  if (windowlessHostMode() === 'compiled') {
+    try { return await runCompiled(script, env, background, timeoutMs, deadline); }
+    catch (error) { if (!(error instanceof WindowlessHelperUnavailableError)) throw error; fallbackMode = 'powershell'; }
+  }
+  return runViaPowerShellHost(script, env, background, timeoutMs, deadline);
+}
+
+const POWERSHELL_EXE = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+const psQuote = (s: string) => `'${s.replaceAll("'", "''")}'`;
+/**
+ * WindowlessHost.Main 的 PowerShell 版本（見 SOURCE）。差異只有兩處，都不放寬包容：
+ * - 子行程用 Process.Start(CreateNoWindow) 而不是 CREATE_SUSPENDED：host 先把自己放進沒有 breakaway 的
+ *   私有 Job 再建子行程，子行程在建立當下就屬於這個 Job；建立後仍核對 IsProcessInJob，不在就殺掉並失敗。
+ * - 等待用 50ms 輪詢（子行程結束／呼叫者消失／逾時）取代 WaitForMultipleObjects。
+ * Job handle 由 host 持有到結束（kill-on-close）：host 被 Node 的逾時殺掉時，整個 Job 一起結束。
+ */
+export function powerShellHostScript(script: string, background: boolean, requesterPid: number, timeoutMs: number): string {
+  return `$ErrorActionPreference='Stop'
+$scriptPath=${psQuote(script)}
+try {
+$exe=Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\\v1.0\\powershell.exe'
+$start=[Diagnostics.ProcessStartInfo]::new($exe,'-NoLogo -NoProfile -ExecutionPolicy Bypass -NonInteractive -File "'+$scriptPath+'"')
+$start.UseShellExecute=$false;$start.CreateNoWindow=$true
+${background ? `$p=[Diagnostics.Process]::Start($start);$p.Dispose();[Environment]::Exit(0)` : `$assembly=[AppDomain]::CurrentDomain.DefineDynamicAssembly([Reflection.AssemblyName]::new('WindowlessPsHost'),[Reflection.Emit.AssemblyBuilderAccess]::Run)
+$type=$assembly.DefineDynamicModule('Native').DefineType('WindowlessPsHost',[Reflection.TypeAttributes]'Public,Sealed,Abstract')
+function Native($name,$result,[Type[]]$parameters){$m=$type.DefinePInvokeMethod($name,'kernel32.dll',[Reflection.MethodAttributes]'Public,Static,PinvokeImpl',[Reflection.CallingConventions]::Standard,$result,$parameters,[Runtime.InteropServices.CallingConvention]::Winapi,[Runtime.InteropServices.CharSet]::Unicode);$m.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)}
+Native 'CreateJobObjectW' ([IntPtr]) @([IntPtr],[string]);Native 'SetInformationJobObject' ([bool]) @([IntPtr],[int],[IntPtr],[uint32]);Native 'AssignProcessToJobObject' ([bool]) @([IntPtr],[IntPtr]);Native 'GetCurrentProcess' ([IntPtr]) @()
+Native 'IsProcessInJob' ([bool]) @([IntPtr],[IntPtr],[bool].MakeByRefType());Native 'TerminateJobObject' ([bool]) @([IntPtr],[uint32])
+$native=$type.CreateType()
+$owner=[Diagnostics.Process]::GetProcessById(${requesterPid});$ownerHandle=$owner.Handle
+if($owner.HasExited -or $owner.StartTime.ToUniversalTime() -gt [Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime()){throw 'requester identity unavailable'}
+$job=$native::CreateJobObjectW([IntPtr]::Zero,$null);if($job -eq [IntPtr]::Zero){throw 'helper job unavailable'}
+$size=if([IntPtr]::Size -eq 8){144}else{112};$info=[Runtime.InteropServices.Marshal]::AllocHGlobal($size)
+try {for($i=0;$i -lt $size;$i++){[Runtime.InteropServices.Marshal]::WriteByte($info,$i,0)};[Runtime.InteropServices.Marshal]::WriteInt32($info,16,0x2000)
+if(!$native::SetInformationJobObject($job,9,$info,$size)){throw 'helper job limits unavailable'}}finally{[Runtime.InteropServices.Marshal]::FreeHGlobal($info)}
+if(!$native::AssignProcessToJobObject($job,$native::GetCurrentProcess())){throw 'host assignment refused'}
+$p=[Diagnostics.Process]::Start($start);$child=$p.Handle
+$inside=$false;if(!$native::IsProcessInJob($child,$job,[ref]$inside) -or !$inside){try{$p.Kill()}catch{};throw 'helper inheritance refused'}
+$until=[DateTime]::UtcNow.AddMilliseconds(${timeoutMs})
+while(!$p.WaitForExit(50)){if($owner.HasExited -or [DateTime]::UtcNow -ge $until){if(!$native::TerminateJobObject($job,124)){throw 'helper termination refused'};$p.WaitForExit(5000)|Out-Null;[Environment]::Exit(124)}}
+$p.WaitForExit()
+[Environment]::Exit($p.ExitCode)`}
+} catch { try{[IO.File]::WriteAllText($scriptPath+'.host-error',([string][Environment]::GetEnvironmentVariable('AI_CLI_CONTAINMENT_TEST'))+"\`n"+($_ | Out-String))}catch{}; [Environment]::Exit(126) }
+`;
+}
+/**
+ * 為什麼中間要隔一個 detached Node（和 bootstrap 同一個模式）：
+ * - powershell.exe 以 DETACHED_PROCESS（沒有主控台）啟動時會直接 exit 0、什麼都不執行
+ *   （2026-11-19 本機實測；這也是原設計用 GUI exe＋CREATE_NO_WINDOW 的原因）。所以 PowerShell 必須
+ *   非 detached＋windowsHide（libuv 給 CREATE_NO_WINDOW：有隱藏主控台、不閃視窗）。
+ * - 但呼叫端（runner）自己不可以做非 detached 的 spawn：那會在 runner 建立 libuv 的 Job。
+ *   所以由 detached 的中介 Node 去 spawn，libuv Job 留在中介 Node 那邊。
+ * - 中介 Node 被逾時殺掉 → 它的 libuv Job（kill-on-close）收掉 PowerShell host → host 的私有 Job 收掉腳本子孫。
+ *   背景模式（broker）：host 不建私有 Job，子行程經 libuv Job 的 silent breakaway 脫離，所以中介結束後 broker 仍在。
+ */
+function relayScript(encoded: string): string {
+  const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded];
+  // windowsHide＝CREATE_NO_WINDOW：有隱藏主控台、不閃視窗。不可 detached（見上）。
+  return `const {spawn}=require('node:child_process');const c=spawn(${JSON.stringify(POWERSHELL_EXE)},${JSON.stringify(args)},{stdio:'ignore',windowsHide:true});c.on('error',()=>{process.exitCode=126;});c.on('close',code=>{process.exitCode=code===null?124:code;});`;
+}
+async function runViaPowerShellHost(script: string, env: NodeJS.ProcessEnv, background: boolean, timeoutMs: number, deadline?: number): Promise<void> {
+  const limit = remainingTime(deadline, Math.max(1, Math.min(45000, timeoutMs)));
+  const encoded = Buffer.from(powerShellHostScript(script, background, process.pid, limit), 'utf16le').toString('base64');
+  // 外層期限：host 自己的逾時之外再多 5 秒；被殺時中介的 libuv Job 收掉 host，host 的私有 Job 收掉腳本子孫。
+  const outer = remainingTime(deadline, limit + 5000);
+  await new Promise<void>((resolve, reject) => {
+    let child: ReturnType<typeof spawn>;
+    try { child = spawn(process.execPath, ['-e', relayScript(encoded)], { detached: true, windowsHide: true, stdio: 'ignore', env: { ...process.env, ...env } }); }
+    catch (error) { reject(error); return; }
+    let expired = false;
+    const timer = setTimeout(() => { expired = true; try { child.kill('SIGKILL'); } catch {} reject(new Error('Windowless host deadline; containment unknown')); }, outer);
+    child.once('error', (error) => { clearTimeout(timer); reject(error); });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      if (expired) reject(new Error('Windowless host deadline; containment unknown'));
+      else if (code === 0) resolve();
+      else reject(new Error(`Windowless PowerShell failed (${code}); ${script}`));
+    });
+  });
+}
+
+async function runCompiled(script: string, env: NodeJS.ProcessEnv, background: boolean, timeoutMs: number, deadline?: number): Promise<void> {
   const host=await ensureWindowlessHost(deadline);
   const generation=ready;
   timeoutMs=remainingTime(deadline,Math.max(1,Math.min(45000,timeoutMs)));
@@ -225,7 +348,18 @@ export async function runWindowless(script: string, env: NodeJS.ProcessEnv = {},
     // host joins its private Job before creating children; killing it closes that Job.
     let expired=false;
     const timer=setTimeout(()=>{expired=true;try{child.kill('SIGKILL');}catch{}reject(new Error('Windowless host deadline; containment unknown'));},remainingTime(deadline,Math.max(1,Math.min(45000,timeoutMs))+5000));
-    child.once('error',(error: NodeJS.ErrnoException)=>{clearTimeout(timer);reject(spawnFailure(error));});
-    child.once('close',code=>{clearTimeout(timer);expired?reject(new Error('Windowless host deadline; containment unknown')):code===0?resolve():reject(new Error(`Windowless PowerShell failed (${code}); ${script}`));});
+    // 只有「還沒啟動」的錯誤才能改走 PowerShell host 重試。child.kill() 失敗時 Node 會同步發出 error，
+    // 那時腳本可能已在跑：逾時之後或已收到 spawn 事件的錯誤一律原樣回報，不重跑（稽核 gpt-6.2-astra）。
+    let spawned=false;child.once('spawn',()=>{spawned=true;});
+    child.once('error',(error: NodeJS.ErrnoException)=>{clearTimeout(timer);if(expired)return;reject(spawned?error:spawnFailure(error));});
+    child.once('close',code=>{
+      clearTimeout(timer);
+      if(expired){reject(new Error('Windowless host deadline; containment unknown'));return;}
+      if(code===0){resolve();return;}
+      // #25：非 0 結束而且 exe 已經不見＝防毒在執行掃描時殺掉並移除它。這次不重跑（腳本可能已部分執行），
+      // 但之後改走 PowerShell host；前綴維持 "Windowless PowerShell failed"，呼叫端既有的傳輸錯誤重送照常運作。
+      if(!existsSync(host)){if(ready===generation)ready=undefined;fallbackMode='powershell';reject(new Error(`Windowless PowerShell failed (${code}); ${script} — helper ${host} disappeared during launch; ${ANTIVIRUS_HINT}. Later calls use the PowerShell host.`));return;}
+      reject(new Error(`Windowless PowerShell failed (${code}); ${script}`));
+    });
   });
 }

@@ -78,12 +78,31 @@ public static class AiCliContainment {
     public int Parent() { PBI b; int n; Require(NtQueryInformationProcess(handle,0,out b,Marshal.SizeOf(typeof(PBI)),out n)==0,"parent identity unavailable"); return b.parent.ToInt32(); }
     public void Dispose() { if(handle!=IntPtr.Zero) { CloseHandle(handle); handle=IntPtr.Zero; } }
   }
+  // Two host shapes (#25). Compiled: bridge <- ai-cli-windowless-host <- caller.
+  // PowerShell host (used when antivirus removes the compiled host): bridge <- powershell <- relay <- caller,
+  // where the relay is the caller's own executable (spawned with process.execPath). Same ordering and liveness rules.
+  static string ImagePath(int pid) { try { using(var p=Process.GetProcessById(pid)) return p.MainModule.FileName; } catch { return null; } }
   static Identity Caller(Identity bridge) {
     using(var shell=new Identity(bridge.Parent())) {
-      Require(Process.GetProcessById(shell.pid).ProcessName.Equals("ai-cli-windowless-host",StringComparison.OrdinalIgnoreCase),"bridge host mismatch");
-      var caller=new Identity(shell.Parent());
-      if(caller.ticks>shell.ticks || shell.ticks>bridge.ticks || caller.Exited || shell.Exited) { caller.Dispose(); throw new InvalidOperationException("bridge ancestry changed"); }
-      return caller;
+      string shellName=Process.GetProcessById(shell.pid).ProcessName;
+      if(shellName.Equals("ai-cli-windowless-host",StringComparison.OrdinalIgnoreCase)) {
+        var caller=new Identity(shell.Parent());
+        if(caller.ticks>shell.ticks || shell.ticks>bridge.ticks || caller.Exited || shell.Exited) { caller.Dispose(); throw new InvalidOperationException("bridge ancestry changed"); }
+        return caller;
+      }
+      Require(shellName.Equals("powershell",StringComparison.OrdinalIgnoreCase),"bridge host mismatch");
+      // Full image paths, not just names: the host must be the system Windows PowerShell and the relay
+      // must be the caller's own executable. Unreadable paths fail closed.
+      string shellImage=ImagePath(shell.pid);
+      Require(shellImage!=null && shellImage.Equals(Path.Combine(Environment.SystemDirectory,@"WindowsPowerShell\v1.0\powershell.exe"),StringComparison.OrdinalIgnoreCase),"bridge host mismatch");
+      using(var relay=new Identity(shell.Parent())) {
+        var caller=new Identity(relay.Parent());
+        string relayImage=ImagePath(relay.pid),callerImage=ImagePath(caller.pid);
+        bool sameExe=relayImage!=null && callerImage!=null && relayImage.Equals(callerImage,StringComparison.OrdinalIgnoreCase);
+        if(!sameExe) { caller.Dispose(); throw new InvalidOperationException("bridge host mismatch"); }
+        if(caller.ticks>relay.ticks || relay.ticks>shell.ticks || shell.ticks>bridge.ticks || caller.Exited || relay.Exited || shell.Exited) { caller.Dispose(); throw new InvalidOperationException("bridge ancestry changed"); }
+        return caller;
+      }
     }
   }
   static JavaScriptSerializer Serializer() { return new JavaScriptSerializer { MaxJsonLength=65536 }; }

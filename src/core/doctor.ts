@@ -15,7 +15,7 @@ import { getUpdateStatus, type UpdateResult } from './updater.js';
 import { getServerIdentity, type ServerIdentity } from './identity.js';
 import { execFile, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { windowlessHostPath } from './win-job-host.js';
+import { windowlessHostMode, windowlessHostPath, type WindowlessHostMode } from './win-job-host.js';
 
 /**
  * Windows 的 windowless 輔助程式狀態（#25）。
@@ -29,6 +29,8 @@ import { windowlessHostPath } from './win-job-host.js';
  *   （伺服器版 Windows 沒有 SecurityCenter2、逾時、被擋），不是「沒有防毒」。
  */
 export interface WindowlessHelperStatus {
+  /** 這個行程目前用哪一種 host：compiled＝編譯的 exe；powershell＝exe 用不了時改用的系統 PowerShell（#25）。 */
+  mode: WindowlessHostMode;
   path: string;
   exists: boolean;
   antivirus?: string[] | null;
@@ -61,13 +63,17 @@ export function getWindowlessHelperStatus(probeAntivirus = false): WindowlessHel
   if (process.platform !== 'win32') return undefined;
   const { target } = windowlessHostPath();
   const exists = existsSync(target);
+  const mode = windowlessHostMode();
   return {
+    mode,
     path: target,
     exists,
     ...(probeAntivirus ? { antivirus: listAntivirusProducts() } : {}),
-    note: exists
-      ? 'present'
-      : 'not present: it is built on the next run. If it keeps disappearing after runs (run fails with "Windowless helper missing"), antivirus software is likely removing it; allow this exact path.',
+    note: mode === 'powershell'
+      ? 'using the built-in PowerShell host (forced by AI_CLI_WINDOWLESS_HOST=powershell, or the compiled helper was unusable in this process); no compiled helper is needed'
+      : exists
+        ? 'present'
+        : 'not present: it is built on the next run. If antivirus removes it, ai-cli switches to the built-in PowerShell host automatically (slower, no exception needed).',
   };
 }
 

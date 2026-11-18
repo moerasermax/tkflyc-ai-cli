@@ -1,5 +1,5 @@
 /** broker 啟動與 PowerShell 橋接。原始碼先載入記憶體；capability 不出現在命令列或 log。 */
-import { ensureWindowlessHost, runWindowless } from './win-job-host.js';
+import { ensureWindowlessRoot, runWindowless } from './win-job-host.js';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
@@ -42,7 +42,7 @@ foreach($old in [IO.Directory]::GetDirectories(${quote(dirname(directory))})) {
 let library: Promise<string> | undefined;
 async function ensureNativeLibrary(deadline?: number): Promise<string> {
   return library ??= (async () => {
-    const root=dirname(await ensureWindowlessHost(deadline)), hash=createHash('sha256').update('cache-v3:'+WIN_JOB_NATIVE).digest('hex');
+    const root=await ensureWindowlessRoot(deadline), hash=createHash('sha256').update('cache-v3:'+WIN_JOB_NATIVE).digest('hex');
     return join(root,`native-${hash}.dll`);
   })().catch(error=>{library=undefined;throw error;});
 }
@@ -58,16 +58,24 @@ try {
   $bytes=[IO.File]::ReadAllBytes($dll)
   $valid=([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-','')) -eq [IO.File]::ReadAllText($dll+'.sha256')
 }catch{}
+$nativeSource=@'
+${WIN_JOB_NATIVE}
+'@
+$inMemory=$false
 if(!$valid) {
+  $bytes=$null
   $tmp=$dll+'.'+[Guid]::NewGuid().ToString()+'.dll'
   try {
-  Add-Type -ReferencedAssemblies System.Web.Extensions -TypeDefinition @'
-${WIN_JOB_NATIVE}
-'@ -OutputAssembly $tmp -OutputType Library
-  $bytes=[IO.File]::ReadAllBytes($tmp)
+  # #25: antivirus may delete the freshly compiled DLL before it is read; only then compile in memory below.
+  # A compiler or policy refusal is not retried another way: it keeps the original error.
+  Add-Type -ReferencedAssemblies System.Web.Extensions -TypeDefinition $nativeSource -OutputAssembly $tmp -OutputType Library
+  try { $bytes=[IO.File]::ReadAllBytes($tmp) } catch { if([IO.File]::Exists($tmp)){throw}; $bytes=$null; $inMemory=$true }
+  # The cache is an optimisation: failing to publish it must not fail the call.
+  if($bytes){try{
   [IO.File]::WriteAllText($dll+'.sha256',([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-','')))
   if([IO.File]::Exists($dll)){[IO.File]::Replace($tmp,$dll,($tmp+'.bak'))}else{[IO.File]::Move($tmp,$dll)}
-  }finally{foreach($part in @($tmp,($tmp+'.bak'))){if([IO.File]::Exists($part)){[IO.File]::Delete($part)}}}
+  }catch{}}
+  }finally{foreach($part in @($tmp,($tmp+'.bak'))){try{if([IO.File]::Exists($part)){[IO.File]::Delete($part)}}catch{}}}
 }
 # Seven-day diagnostics retention; serialize scavenging with each publisher.
 foreach($part in [IO.Directory]::GetFiles([IO.Path]::GetDirectoryName($dll))) {
@@ -82,16 +90,17 @@ foreach($part in [IO.Directory]::GetFiles([IO.Path]::GetDirectoryName($dll))) {
  }catch{}finally{if($otherLock){$otherLock.Dispose()}}
 }
 [Reflection.Assembly]::LoadWithPartialName('System.Web.Extensions') | Out-Null
-try { [Reflection.Assembly]::Load($bytes) | Out-Null } catch { throw ('Native containment assembly load refused (AMSI/antivirus or invalid assembly); worker not released: '+($_ | Out-String)) }
+if($inMemory) { try { Add-Type -ReferencedAssemblies System.Web.Extensions -TypeDefinition $nativeSource } catch { throw ('Native containment compile refused (antivirus may be removing compiled assemblies); worker not released: '+($_ | Out-String)) } }
+else { try { [Reflection.Assembly]::Load($bytes) | Out-Null } catch { throw ('Native containment assembly load refused (AMSI/antivirus or invalid assembly); worker not released: '+($_ | Out-String)) } }
 }finally{$lock.Dispose()}
 `);
 }
 /** Only transport failures may replay an authenticated, unchanged request. */
 export class ContainmentTransportError extends Error {}
 export async function powershell(script: string, env: NodeJS.ProcessEnv = {}, deadline?: number): Promise<string> {
-  const host=await ensureWindowlessHost(deadline);
+  const root=await ensureWindowlessRoot(deadline);
   script = await loadNative(script, deadline);
-  const directory = mkdtempSync(join(dirname(host), 'bridge-'));
+  const directory = mkdtempSync(join(root, 'bridge-'));
   const file = join(directory, 'bridge.ps1'), output = join(directory, 'output.txt'), error = join(directory, 'error.txt');
   writeFileSync(file, `\ufeff$ErrorActionPreference='Stop'\ntry {\n${ownTemporaryDirectory(directory)}\n$result = & {\n${script}\n} | Out-String\n[IO.File]::WriteAllText(${quote(output)},$result,[Text.UTF8Encoding]::new($false))\nexit 0\n} catch { [IO.File]::WriteAllText(${quote(error)},($_ | Out-String)); exit 1 }\n`, { mode: 0o600 });
   try {
@@ -111,7 +120,7 @@ export async function powershell(script: string, env: NodeJS.ProcessEnv = {}, de
   } finally { try { rmSync(directory,{recursive:true,force:true}); } catch { /* Preserve the bridge error; owner-based scavenger retries. */ } }
 }
 export async function launchBroker(config: BrokerConfig): Promise<void> {
-  const directory = mkdtempSync(join(dirname(await ensureWindowlessHost()), 'broker-'));
+  const directory = mkdtempSync(join(await ensureWindowlessRoot(), 'broker-'));
   const script = join(directory, 'broker.ps1');
   writeFileSync(script, '\ufeff$ErrorActionPreference="Stop"\n' + `try {\n` + ownTemporaryDirectory(directory) + await loadNative(nativeScript(`[AiCliContainment]::Run(${quote(config.name)},${quote(config.directory)},${config.idleMs})`)) + `} catch { [IO.File]::WriteAllText(${quote(directory+'.error.log')},(${quote(config.name+'\n')}+($_ | Out-String))); exit 1 } finally { try { [IO.Directory]::Delete(${quote(directory)},$true) } catch { [Console]::Error.WriteLine('containment TEMP cleanup: '+($_ | Out-String)) } }\n`, { mode: 0o600 });
   try { await runWindowless(script, {}, true); }
