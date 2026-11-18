@@ -10117,7 +10117,7 @@
     "file": "src/core/win-job-host.ts",
     "from": "const SPAWN_SECURITY_CODES = ['ENOENT', 'EACCES', 'EPERM', 'UNKNOWN'];",
     "to": "const SPAWN_SECURITY_CODES = ['EACCES', 'EPERM', 'UNKNOWN'];",
-    "expect": "啟動時輔助程式真的不見（ENOENT）會說 missing",
+    "expect": "啟動時輔助程式被刪（ENOENT）→ 改走 PowerShell host",
     "script": "verify-win-helper-antivirus.mjs"
   },
   {
