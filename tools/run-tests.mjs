@@ -83,6 +83,7 @@ const TESTS = [
   {file:'verify-jobobj-fix12.mjs',timeoutMs:300000},
   'verify-win-job-late-exit.mjs',
   'verify-win-job-fix1.mjs',
+  'verify-win-helper-antivirus.mjs',
   'verify-win-job-fix2.mjs',
   'verify-win-job-unknown.mjs',
   'verify-win-job-windowless.mjs',

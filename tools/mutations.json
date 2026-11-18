@@ -601,8 +601,8 @@
   {
     "name": "doctor 自己編一份空身分，與 models 分岔",
     "file": "src/core/doctor.ts",
-    "from": "  ), update: getUpdateStatus(), server: getServerIdentity() };",
-    "to": "  ), update: getUpdateStatus(), server: { name: null, version: null, repository: null, homepage: null, note: null } };",
+    "from": "  ), update: getUpdateStatus(), server: getServerIdentity(), ...(windowlessHelper ? { windowlessHelper } : {}) };",
+    "to": "  ), update: getUpdateStatus(), server: { name: null, version: null, repository: null, homepage: null, note: null }, ...(windowlessHelper ? { windowlessHelper } : {}) };",
     "expect": "doctor 與 models 回報同一個身分",
     "script": "verify-mcp.mjs"
   },
@@ -10071,5 +10071,69 @@
     "to": "chunk (${data.length} chars, not valid JSON): ${data}`);",
     "expect": "無效 JSON chunk 等於金鑰",
     "script": "verify-native-api-formats.mjs"
+  },
+  {
+    "name": "#25 防毒提示：編好卻不見也不提示（退回舊的 ACL 訊息）",
+    "file": "src/core/win-job-host.ts",
+    "from": "  const vanished = (code === 0 && !targetExists) || stderr.includes(VANISHED_MARKER);",
+    "to": "  const vanished = false;",
+    "expect": "bootstrap 成功但目標不見時提示防毒",
+    "script": "verify-win-helper-antivirus.mjs"
+  },
+  {
+    "name": "#25 防毒提示：任何失敗都指向防毒（誤導查錯方向）",
+    "file": "src/core/win-job-host.ts",
+    "from": "  const vanished = (code === 0 && !targetExists) || stderr.includes(VANISHED_MARKER);",
+    "to": "  const vanished = true;",
+    "expect": "其他失敗不亂指防毒",
+    "script": "verify-win-helper-antivirus.mjs"
+  },
+  {
+    "name": "#25 防毒提示：消失標記退回比對一般文字",
+    "file": "src/core/win-job-host.ts",
+    "from": "  const vanished = (code === 0 && !targetExists) || stderr.includes(VANISHED_MARKER);",
+    "to": "  const vanished = (code === 0 && !targetExists) || stderr.includes(VANISHED_MARKER) || stderr.includes('helper vanished');",
+    "expect": "一般文字碰巧含 helper vanished 不算消失標記",
+    "script": "verify-win-helper-antivirus.mjs"
+  },
+  {
+    "name": "#25 清理殘留：不看時間，連別的行程剛編的檔也刪",
+    "file": "src/core/win-job-host.ts",
+    "from": "$stale=[DateTime]::UtcNow.AddHours(-1)",
+    "to": "$stale=[DateTime]::UtcNow.AddHours(1)",
+    "expect": "一小時內的 GUID 檔保留",
+    "script": "verify-win-helper-antivirus.mjs"
+  },
+  {
+    "name": "#25 清理殘留：成功路徑不清這次的 .cs",
+    "file": "src/core/win-job-host.ts",
+    "from": "Clear-Temp\nexit 0",
+    "to": "exit 0",
+    "expect": "這次編譯沒有留下自己的",
+    "script": "verify-win-helper-antivirus.mjs"
+  },
+  {
+    "name": "#25 啟動時輔助程式不見：ENOENT 不再改寫成防毒提示",
+    "file": "src/core/win-job-host.ts",
+    "from": "const SPAWN_SECURITY_CODES = ['ENOENT', 'EACCES', 'EPERM', 'UNKNOWN'];",
+    "to": "const SPAWN_SECURITY_CODES = ['EACCES', 'EPERM', 'UNKNOWN'];",
+    "expect": "啟動時輔助程式真的不見（ENOENT）會說 missing",
+    "script": "verify-win-helper-antivirus.mjs"
+  },
+  {
+    "name": "#25 啟動時同步丟出的 EPERM 繞過改寫",
+    "file": "src/core/win-job-host.ts",
+    "from": "    catch(error){reject(spawnFailure(error as NodeJS.ErrnoException));return;}",
+    "to": "    catch(error){reject(error);return;}",
+    "expect": "spawn 同步丟出 EPERM",
+    "script": "verify-win-helper-antivirus.mjs"
+  },
+  {
+    "name": "#25 檔案還在卻說被隔離（blocked／missing 顛倒）",
+    "file": "src/core/win-job-host.ts",
+    "from": "  return hostExists\n    ? new Error(`Windowless helper blocked",
+    "to": "  return !hostExists\n    ? new Error(`Windowless helper blocked",
+    "expect": "spawn EPERM 且檔案還在＝blocked",
+    "script": "verify-win-helper-antivirus.mjs"
   }
 ]

@@ -235,7 +235,7 @@ const defaultDeps: CliDeps = {
     getFileProcessService().peekProcesses(pids, peekTimeSec, includeToolCalls),
   killProcess: (pid) => getFileProcessService().killProcess(pid),
   cleanupProcesses: () => getFileProcessService().cleanupProcesses(),
-  getDoctorStatus: () => getCliDoctorStatus(),
+  getDoctorStatus: () => getCliDoctorStatus({ probeAntivirus: true }),
 };
 
 interface ParsedArgs {

@@ -15,7 +15,7 @@ import {
   type ServerResult,
 } from '@modelcontextprotocol/sdk/types.js';
 import { debugLog } from '../core/debug.js';
-import { getCliDoctorStatus, resolveAllCliPaths } from '../core/doctor.js';
+import { getCliDoctorStatus, listAntivirusProductsAsync, resolveAllCliPaths } from '../core/doctor.js';
 import {
   MODEL_ALIASES,
   getModelParameterDescription,
@@ -381,8 +381,12 @@ Note: antigravity (agy) does accept model selection — the resolved name is nor
           return this.handleKillProcess(toolArguments);
         case 'cleanup_processes':
           return this.jsonResult(this.processService.cleanupProcesses());
-        case 'doctor':
-          return this.jsonResult(getCliDoctorStatus());
+        case 'doctor': {
+          // 只有使用者主動叫 doctor 才查防毒（PowerShell，約 1 秒）；啟動檢查不查。非同步，不擋其他請求。
+          const status = getCliDoctorStatus();
+          if (status.windowlessHelper) status.windowlessHelper.antivirus = await listAntivirusProductsAsync();
+          return this.jsonResult(status);
+        }
         case 'models':
           await refreshCatalogV2();
           return this.jsonResult(getModelsPayload());
