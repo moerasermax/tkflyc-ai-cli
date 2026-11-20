@@ -33,7 +33,8 @@ import { join, basename, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import type { AgentId } from '../agents/types.js';
 import { getAgent } from '../agents/registry.js';
-import { buildCliCommand, type BuildCliCommandOptions } from './command-builder.js';
+import { resolveSpawnMode } from '../agents/spawn-mode.js';
+import { buildCliCommand, discardTemporaryPrompt, handOffTemporaryPrompt, type BuildCliCommandOptions } from './command-builder.js';
 import { resolveAllCliPaths } from './doctor.js';
 import { buildProcessResult } from './process-result.js';
 import { buildLiveness, emptyOutputStats, listProcessTiming, type ProcessOutputStats } from './liveness.js';
@@ -168,20 +169,25 @@ export class FileProcessService {
       cliPaths: this.cliPaths,
     } as BuildCliCommandOptions);
     cmd.sessionId = options.session_id;
-    // 熔斷器：偵測同一行程內框架迴圈造成的爆量/重複啟動。
-    this.breaker.check(cmd.agent, cmd.prompt);
-    const result = await this.startDetachedTracked(cmd, options.model);
+    let result: Awaited<ReturnType<FileProcessService['startDetachedTracked']>>;
+    try {
+      // 熔斷器：偵測同一行程內框架迴圈造成的爆量/重複啟動。
+      this.breaker.check(cmd.agent, cmd.prompt);
+      result = await this.startDetachedTracked(cmd, options.model);
+    } catch (error) { discardTemporaryPrompt(cmd); throw error; }
     return { ...result, ...((cmd.warnings || 'warnings' in result) ? { warnings: [...('warnings' in result ? result.warnings as string[] : []), ...(cmd.warnings ?? [])] } : {}) };
   }
 
   private async startDetachedTracked(cmd: ReturnType<typeof buildCliCommand>, model?: string) {
     const agent = getAgent(cmd.agent);
     const isWin = process.platform === 'win32';
-    const spawnMode = isWin && agent.win32SpawnMode ? agent.win32SpawnMode : agent.spawnMode || 'pipe';
+    const spawnMode = await resolveSpawnMode(agent, cmd.cliPath);
+    cmd.spawnMode = spawnMode;
     if (spawnMode === 'direct') {
       return this.startDirectTracked(cmd, model);
     }
-    if (cmd.agent !== 'antigravity' || isWin && spawnMode === 'pty') {
+    // Windows 的 agy 不論 PTY 或 pipe 都走持久化 runner；POSIX agy 保留 legacy 路徑。
+    if (cmd.agent !== 'antigravity' || isWin) {
       await this.store.ready; await this.store.identify();
       const job = await this.store.start(cmd, model);
       const pending = this.waitForRunnerMeta(job.pid);
@@ -206,6 +212,8 @@ export class FileProcessService {
     const child = spawn(this.ensureDetachedWrapperScript(), [this.stateDir, cwdKey, cmd.cliPath, ...cmd.args], { env: buildWorkerEnv(), cwd: cmd.cwd, detached: true, stdio: 'ignore' });
     child.on('error', () => {}); child.unref();
     if (!child.pid) throw new Error(`Failed to start ${cmd.agent} CLI process`);
+    // wrapper 已啟動、之後會讀檔：之後的 metadata 失敗不可再刪它（交給核對擁有者的 GC）。
+    handOffTemporaryPrompt(cmd, child.pid);
     const processDir = this.resolveProcessDir(cmd.cwd, child.pid); mkdirSync(processDir, { recursive: true });
     const stdoutPath = this.resolveStdoutPath(processDir), stderrPath = this.resolveStderrPath(processDir);
     this.touchFile(stdoutPath); this.touchFile(stderrPath);

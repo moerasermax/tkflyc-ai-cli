@@ -1,8 +1,9 @@
 /**
  * MCP process 管理：pipe／Windows PTY 交給持久化 runner，direct 保持行程內管理。
  * spawn 決策由 agent 定義驅動：
- *   - agent.win32SpawnMode === 'pty' 且 win32 → detached runner 持有 ConPTY（agy）
- *   - claude/codex → JobStore；agy 的 POSIX pipe 維持舊路徑
+ *   - win32 的模式由 resolveSpawnMode() 決定（agent 可依 CLI 版本選：agy ≥ 1.5.13 走 pipe，
+ *     較舊／量不到版本走 ConPTY），結果寫進 cmd.spawnMode，JobStore 讀同一個值
+ *   - claude/codex 與 win32 agy（pty 或 pipe）→ JobStore；agy 的 POSIX pipe 維持舊路徑
  *
  * parser 改呼叫 agent.parseOutput；preserveRawOnFailure 由 process-result 處理。
  */
@@ -14,7 +15,8 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { AgentId } from '../agents/types.js';
 import { getAgent } from '../agents/registry.js';
-import { buildCliCommand, type BuildCliCommandOptions } from './command-builder.js';
+import { resolveSpawnMode } from '../agents/spawn-mode.js';
+import { buildCliCommand, discardTemporaryPrompt, handOffTemporaryPrompt, type BuildCliCommandOptions } from './command-builder.js';
 import { buildProcessResult } from './process-result.js';
 import { buildLiveness, emptyOutputStats, elapsedSeconds, listProcessTiming, type ProcessOutputStats } from './liveness.js';
 import {
@@ -166,30 +168,37 @@ export class ProcessService {
     // agent builder 只把 resume session 放進 argv；store 另需保留原始 session 欄位。
     cmd.sessionId = options.session_id;
 
+    try { return await this.startBuilt(cmd, options.model); }
+    catch (error) { discardTemporaryPrompt(cmd); throw error; }
+  }
+
+  private async startBuilt(cmd: ReturnType<typeof buildCliCommand>, model?: string) {
     // 熔斷器：偵測框架迴圈造成的爆量/重複啟動，啟動前先攔截。
     this.breaker.check(cmd.agent, cmd.prompt);
 
     const agent = getAgent(cmd.agent);
     const isWin = process.platform === 'win32';
-    const spawnMode = isWin && agent.win32SpawnMode ? agent.win32SpawnMode : agent.spawnMode || 'pipe';
+    const spawnMode = await resolveSpawnMode(agent, cmd.cliPath);
+    cmd.spawnMode = spawnMode;
 
     if (spawnMode === 'direct') {
-      return this.startDirectProcess(cmd, options.model);
+      return this.startDirectProcess(cmd, model);
     }
 
-    // Windows PTY 與一般 pipe 共用持久化 runner；POSIX agy 保留 legacy 路徑。
-    if (cmd.agent !== 'antigravity' || isWin && spawnMode === 'pty') {
-      const job = await this.store.start(cmd, options.model);
+    // Windows 的 agy 不論 PTY 或 pipe 都走持久化 runner；POSIX agy 保留 legacy 路徑。
+    if (cmd.agent !== 'antigravity' || isWin) {
+      const job = await this.store.start(cmd, model);
       this.processManager.set(job.meta.jobId, job as unknown as ProcessEntry);
       return { pid: job.pid, jobId: job.meta.jobId, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully`, ...(cmd.warnings ? { warnings: cmd.warnings } : {}) };
     }
-    return this.startLegacyPipe(cmd, options.model);
+    return this.startLegacyPipe(cmd, model);
   }
 
   private startLegacyPipe(cmd: ReturnType<typeof buildCliCommand>, model?: string) {
     const child = spawn(cmd.cliPath, cmd.args, { cwd: cmd.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: buildWorkerEnv(), detached: false });
     child.on('error', error => { const entry = child.pid ? this.processManager.get(child.pid) : undefined; if (entry) { entry.status = 'failed'; entry.stderr += error.message; } });
     if (!child.pid) throw new Error(`Failed to start ${cmd.agent} CLI process`);
+    handOffTemporaryPrompt(cmd, child.pid);
     if (cmd.stdinPrompt !== undefined) { child.stdin?.on('error', () => {}); child.stdin?.end(cmd.stdinPrompt); } else child.stdin?.end();
     const entry: ProcessEntry = { ...emptyOutputStats(), pid: child.pid, process: child, prompt: cmd.prompt, workFolder: cmd.cwd, model, resolvedModel: cmd.resolvedModel,
       reasoning_effort: cmd.reasoningEffort, toolType: cmd.agent, startTime: new Date().toISOString(), closed: false, stdout: '', stderr: '', status: 'running' };

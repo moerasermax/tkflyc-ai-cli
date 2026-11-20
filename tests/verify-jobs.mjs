@@ -321,7 +321,8 @@ const ids=await lookupIdentities([123,999999]);assert.equal(ids.size,1);assert.e
     const cp = createRequire(import.meta.url)('node:child_process'), originalSpawn = cp.spawn;
     const agent = getAgent('antigravity'), build = agent.buildCommand, spawnMode=agent.win32SpawnMode, platform = Object.getOwnPropertyDescriptor(process, 'platform');
     const state = join(dir, 'async-identities'), calls = [], resolvers = []; let pid = 54320;
-    Object.defineProperty(process, 'platform', { value: 'win32' });
+    // legacy detached 路徑只剩 POSIX（win32 的 agy 不論 pty／pipe 都進 JobStore），身分批次邏輯與平台無關。
+    Object.defineProperty(process, 'platform', { value: 'linux' });
     agent.win32SpawnMode='pipe';
     cp.spawn = () => ({ pid: ++pid, unref() {}, on() {} }); syncBuiltinESMExports();
     agent.buildCommand = input => ({ cliPath: process.execPath, args: [], cwd: input.cwd, agent: 'antigravity', prompt: input.prompt });

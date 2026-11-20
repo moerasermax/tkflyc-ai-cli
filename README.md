@@ -390,7 +390,7 @@ src/
 The split is the point: `agents/` is data about each CLI, `core/` is the machinery.
 A new backend never requires editing the machinery.
 
-Claude, Codex, Grok and Windows Antigravity (ConPTY) jobs run under a detached runner and outlive their MCP server or
+Claude, Codex, Grok and Windows Antigravity jobs run under a detached runner and outlive their MCP server or
 CLI launcher. A restarted MCP server recovers only jobs dispatched by the same
 principal process, verified by PID plus OS creation time; recovered results include
 `recovered: true`. Recovery observes existing work and never reruns or retries it.
@@ -398,8 +398,14 @@ A recorded exit determines completion; a live verified runner stays running; if
 both runner and worker are gone without an exit record, the job becomes `lost`
 and its output remains available. The public PID identifies the runner.
 POSIX Antigravity and `direct-api` remain unrecoverable across MCP
-restarts and cannot be adopted. Windows ConPTY workers are held by the detached runner;
-PTY stdout combines both streams and strips ANSI, while stderr holds runner errors.
+restarts and cannot be adopted. On Windows, agy 1.5.13 or newer runs over ordinary pipes like the
+other CLIs; older or unidentifiable agy versions (and bare-name or `.cmd` paths) fall back to ConPTY,
+whose 200-column wrap used to split long one-line JSON results. ConPTY workers are held by the
+detached runner; PTY stdout combines both streams and strips ANSI, while stderr holds runner errors.
+When an agy prompt would exceed the Windows command-line limit (error 206), the full prompt is written
+to a private file under `AI_CLI_STATE_DIR/agy-prompts`, handed to agy with `--add-dir`, and `-p` only
+carries a one-line "read this file" instruction; the file moves into the job directory and is collected
+with it. agy `warning:` lines (for example an unknown `--conversation`) appear in `agentOutput.warnings`.
 `direct-api` starts no subprocess at all: on the CLI it runs in-process and blocks until the request
 finishes, while the MCP server still returns a PID immediately.
 
@@ -429,7 +435,7 @@ and the dispatching process's parent name plus the ai-cli PID. Narrow terminals
 truncate columns without wrapping. Parent names can be shells or Node launchers;
 if the OS cannot provide a name, the table shows `unknown`.
 
-Claude/Codex/Grok and Windows agy (ConPTY) use `AI_CLI_STATE_DIR/jobs/<UUID>/` (default
+Claude/Codex/Grok and Windows agy use `AI_CLI_STATE_DIR/jobs/<UUID>/` (default
 `~/.local/state/ai-cli/jobs/`). `meta.json` records the agent, model, effort,
 40-character task summary, work folder, session and principal/server/runner/worker
 identities. It contains no full prompt. The runner writes metadata and `exit.json`
@@ -510,7 +516,7 @@ switch on, and not running under a worker (CLI previews use the current cwd, the
 and the environment marker). Candidate `model` matches list rows (requested model first),
 and `status` comes only from `exit.json` / `lost.json`.
 
-Only durable MCP jobs (Claude, Codex, Grok, and Windows Antigravity/ConPTY) with
+Only durable MCP jobs (Claude, Codex, Grok, and Windows Antigravity) with
 `meta.json` and a verified runner identity are eligible. POSIX Antigravity and
 `direct-api` cannot be adopted; CLI jobs are visible globally but cannot be adopted.
 The original dispatching session must have ended: an absent PID or a different OS

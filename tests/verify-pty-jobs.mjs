@@ -85,6 +85,8 @@ writeFileSync(preload, `if(!process.argv[1]?.endsWith('job-runner.js')) {
 const {getAgent}=await import(${JSON.stringify(pathToFileURL(join(ROOT, 'dist/agents/registry.js')).href)});
 // Node stub 在 pipe 對照也直接執行，避免 Windows cmd 引號先失敗而遮蔽 PTY 旗標回歸。
 getAgent('antigravity').win32DirectExec=true;
+// node.exe 冒充 agy：釘住 ConPTY，不讓版本判斷把這支測試的對象換成 pipe。
+getAgent('antigravity').resolveWin32SpawnMode=async()=>'pty';
 getAgent('antigravity').buildCommand=input=>({cliPath:process.execPath,args:[${JSON.stringify(stub)},input.prompt],cwd:input.cwd,agent:'antigravity',prompt:input.prompt,resolvedModel:'agy-default'});
 }`);
 // SDK transport 的直屬 child 是獨立 principal；server 的父行程不是本測試的共同 PID。
@@ -193,7 +195,9 @@ async function stopOwnWorker(identity) {
 let a, b, job;
 const originalBuilder = getAgent('antigravity').buildCommand;
 const originalDirectExec = getAgent('antigravity').win32DirectExec;
+const originalResolver = getAgent('antigravity').resolveWin32SpawnMode;
 getAgent('antigravity').win32DirectExec = true;
+getAgent('antigravity').resolveWin32SpawnMode = async () => 'pty';
 try {
   await test('PTY list identity accepts earlier PID reuse and rejects ambiguous jobs', async () => {
     const current = { jobId: 'current', pid: 123, status: 'running', startTime: '2026-10-20T02:00:00Z', agent: 'stub', source: 'cli' };
@@ -465,6 +469,7 @@ try {
   });
 } finally {
   getAgent('antigravity').buildCommand = originalBuilder;
+  getAgent('antigravity').resolveWin32SpawnMode = originalResolver;
   if (originalDirectExec === undefined) delete getAgent('antigravity').win32DirectExec;
   else getAgent('antigravity').win32DirectExec = originalDirectExec;
   // 只終止本測試啟動的 runner：透過已落盤身分的控制通道，不掃描其他 node/agy。

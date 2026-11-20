@@ -1,8 +1,22 @@
 /**
  * Antigravity CLI (agy) — Google Gemini 後繼 CLI (2026/05)。
  *
- * 關鍵：agy.exe 在 stdout 不是 TTY 時會靜默不輸出。所以 win32 必須走 ConPTY
- * （spawnMode pty）。
+ * Windows 的 spawn 模式依 agy 版本決定（resolveAgyWin32SpawnMode）：
+ *
+ * - **≥ 1.5.13 走一般管線**（和 claude／codex 同一條 durable job 路：runner、Job Object
+ *   包容、可接回；windowsHide、stdout 直接進檔）。2026-11-20 實測 agy 1.5.13：
+ *   `-p … --output-format json` 的 stdout 導向檔案 → exit 0、完整 JSON、stderr 空。
+ *   1.5.13 是唯一實測過的版本，所以門檻就設在這裡，不往下猜。
+ * - **較舊、或量不到版本走 ConPTY**（保守退路）。舊版 agy.exe 在 stdout 不是 TTY 時
+ *   靜默不輸出，這是當初強制 ConPTY 的理由；版本不明時不能賭它已經修好。
+ *
+ * 為什麼要離開 ConPTY：PTY 寬度是 200 欄，ConPTY 會在第 200 格插入 `\r\n`，
+ * **而且斷點處的字元會重複一次**（2026-11-20 實測 12,431 字元的稽核回覆，含大量全形字：
+ * `functio\r\non.name`、`cal\r\nll_2`、`fu\r\nunction`）。`--output-format json` 的結果是一整行，
+ * 被切斷後 parseOutput 逐行 JSON.parse 全數失敗、退回 text fallback：message 變成
+ * 整段原始 JSON，session_id（續接）與 usage 都遺失。短回覆不受影響。
+ * 斷點會重複字元，所以 parseOutput 不做「把換行接回去」的啟發式修復——修了也
+ * 不知道該刪哪個字元，誤修比明確失敗更糟。
  *
  * ★ 2026-07-31 更正：舊註解寫「模型由 CLI 內部決定，不接受 --model flag」，
  *   那是 v1.0.x 的事實。v1.1.9 實測有 `--model`、`--output-format
@@ -17,9 +31,14 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { withWorkerContext } from '../core/worker-context.js';
 import { buildWorkerEnv } from '../core/worker-env.js';
+import { jobStateDir, lookupIdentities, type IdentityLookup } from '../core/live-jobs.js';
+import { claimPromptOwner, promptDirOwnersGone } from '../core/prompt-owner.js';
+import { truncateWarning, WARNING_MAX_CHARS, WARNING_MAX_COUNT } from '../core/warning-text.js';
+import { randomUUID } from 'node:crypto';
+import { lstatSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import type { AgentDefinition, BuildCommandInput, BuiltCommand, ModelDiscoveryResult } from './types.js';
+import { isAbsolute, join, resolve, win32 as win32Path } from 'node:path';
+import type { AgentDefinition, BuildCommandInput, BuiltCommand, ModelDiscoveryResult, SpawnMode } from './types.js';
 
 /**
  * 靜態後備清單。**只有在尚無可用的 vendor 查詢結果／快取時才會被用到。**
@@ -48,6 +67,180 @@ const ANTIGRAVITY_FALLBACK_MODELS = [
  * 非同步 + 快取才是避免卡住 MCP 的解法；15 秒只限制背景／明確查詢的等待。
  */
 const DISCOVER_TIMEOUT_MS = 15_000;
+
+/**
+ * 實測過「非 TTY 也正常輸出」的最低 agy 版本。只有這一版實測過，不往下推。
+ */
+export const AGY_PIPE_MIN_VERSION = [1, 5, 13] as const;
+
+/**
+ * `agy --version` 的逾時。2026-11-20 實測 agy 1.5.13 stdout 導向檔案：
+ * 250 / 258 / 261 ms，輸出就是 `1.5.13\n`。它擋在 run 回 PID 之前，所以要短；
+ * 逾時＝unknown＝走 ConPTY，不讓 run 失敗。
+ */
+const AGY_VERSION_TIMEOUT_MS = 5_000;
+
+/**
+ * 版本 < 門檻或量不到時，多久之後重新問。agy 會自動更新，舊版本的結論會過期；
+ * 但不能每次 run 都問（每次多 ~250 ms，失敗時多到逾時上限）。
+ * ≥ 門檻的結論不按時間過期，但綁著執行檔身分（size＋mtime）：同一路徑被換成
+ * 別的版本（自動更新、手動降版）時身分改變，一定重問。
+ */
+const AGY_VERSION_RECHECK_MS = 5 * 60_000;
+
+/** `--version` 輸出的收集上限。超過就整筆作廢（unknown），不拿截斷的前綴判版本。 */
+const AGY_VERSION_OUTPUT_LIMIT = 4096;
+
+/**
+ * 只認 `1.5.13` 這種整段就是版本號的輸出（前後空白除外）。
+ * 刻意不從任意文字裡挑數字：`v22.19.0`、`agy 1.6.0 (beta)` 這類不是實測過的格式，
+ * 一律當 unknown → ConPTY。寧可少走 pipe，不可把不輸出的舊版送進管線。
+ */
+export function parseAgyVersion(output: string): [number, number, number] | null {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(output.trim());
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+/** 版本 ≥ AGY_PIPE_MIN_VERSION 才可走管線；量不到版本一律否。 */
+export function agyVersionSupportsPipe(output: string | null): boolean {
+  const version = output === null ? null : parseAgyVersion(output);
+  if (!version) return false;
+  for (let i = 0; i < 3; i++) {
+    if (version[i] !== AGY_PIPE_MIN_VERSION[i]) return version[i] > AGY_PIPE_MIN_VERSION[i];
+  }
+  return true;
+}
+
+/**
+ * 執行 `<cliPath> --version`，回 stdout；失敗、逾時、非零退出、輸出超過上限一律 null。
+ * shell:false——只問 .exe；.cmd／.bat 由呼叫端直接判 ConPTY，不在這裡經 cmd.exe。
+ *
+ * 逾時立刻判 unknown，不等 close；結束子行程只用 child handle（child.kill()：Windows 是
+ * 對 handle 的 TerminateProcess），**不用 PID 做 taskkill /T**——逾時當下 PID 可能已被重用。
+ * `--version` 不該有子孫；萬一有，留下的是它自己的孫行程，不會誤殺別人。
+ */
+export function probeAgyVersion(
+  cliPath: string,
+  timeoutMs: number = AGY_VERSION_TIMEOUT_MS,
+  args: readonly string[] = ['--version']
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (value: string | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    let child: ChildProcess;
+    try {
+      child = spawn(cliPath, [...args], {
+        env: buildWorkerEnv(),
+        windowsHide: true,
+        shell: false,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      finish(null);
+      return;
+    }
+    let stdout = '';
+    let overflow = false;
+    child.stdout!.setEncoding('utf8');
+    child.stdout!.on('data', (data: string) => {
+      if (overflow) return;
+      if (stdout.length + data.length > AGY_VERSION_OUTPUT_LIMIT) { overflow = true; stdout = ''; return; }
+      stdout += data;
+    });
+    child.on('error', () => finish(null));
+    timer = setTimeout(() => {
+      finish(null);
+      try { child.kill(); } catch { /* 已退出；不可讓計時器拋例外。 */ }
+    }, timeoutMs);
+    child.on('close', (code) => finish(code === 0 && !overflow ? stdout : null));
+  });
+}
+
+/** 執行檔身分：size＋mtime。量不到（不存在、無權限）回 null＝不快取。 */
+function agyBinaryIdentity(cliPath: string): string | null {
+  try {
+    const stat = statSync(cliPath);
+    return stat.isFile() ? `${stat.size}:${stat.mtimeMs}` : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface AgySpawnModeResolverOptions {
+  probe?: (cliPath: string) => Promise<string | null>;
+  identity?: (cliPath: string) => string | null;
+  now?: () => number;
+  recheckMs?: number;
+  platform?: NodeJS.Platform;
+}
+
+/**
+ * 可以替它擔保版本的路徑：Windows 只接受 `C:\…` 或 UNC（`\\server\share\…`）。
+ * `\agy\bin\agy.exe` 這種 drive-relative 路徑 `isAbsolute` 為真，卻依「目前磁碟機」解析——
+ * 探測與 runner 的目前磁碟機不一定相同，和裸名稱是同一類問題。
+ */
+export function agyProbeablePath(cliPath: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== 'win32') return isAbsolute(cliPath);
+  return /^[A-Za-z]:[\\/]/.test(cliPath) || /^[\\/]{2}[^\\/]+[\\/]+[^\\/]+/.test(cliPath);
+}
+
+/**
+ * 依 agy 版本選 win32 spawn 模式，並在行程內快取（鍵是 cliPath，值綁執行檔身分）。
+ * - cliPath 不是可擔保的絕對路徑 → 'pty'，不問：裸名稱（例如 `AGY_CLI_NAME=agy`）的探測在 ai-cli 的 cwd
+ *   解析，runner 卻在 job 的 workFolder 解析，兩邊可能是不同的 exe。binary-resolver 對裸名稱
+ *   刻意保留原字串交給 spawn 解析，這裡不改那個語意，只是不替它擔保版本。drive-relative 同理。
+ * - .cmd／.bat → 'pty'，不問：管線模式不經 cmd.exe（prompt 在 argv，cmd 會重新切詞）。
+ *   注意 ConPTY 啟動 .cmd 時仍由 cmd.exe 解讀命令列——既有行為，正式安裝的 agy 是 .exe，不在此修。
+ * - 同時多個 run 共用同一次查詢，不重複 spawn。
+ * - ≥ 門檻 → 'pipe'，身分不變就不再問。
+ * - 較舊／unknown → 'pty'，AGY_VERSION_RECHECK_MS 後或身分改變時重問（自動更新後能切過去）。
+ * - 探測完成後再讀一次身分；探測期間被換掉（TOCTOU）就不寫快取、這次判 'pty'。
+ * - Windows 的快取鍵正規化大小寫與分隔符（`C:\A\agy.exe` 與 `c:/a/AGY.EXE` 是同一支）。
+ * - 已知不擋：核對版本之後、runner spawn 之前若被換成舊版，這一次仍走管線。接受的理由：agy 只會
+ *   自動往前更新，降版要手動、時間窗只有數秒；萬一發生，後果是那一次輸出為空、呼叫端看得到，
+ *   不是靜默錯誤。
+ */
+export function createAgySpawnModeResolver(options: AgySpawnModeResolverOptions = {}) {
+  const probe = options.probe ?? ((cliPath: string) => probeAgyVersion(cliPath));
+  const identityOf = options.identity ?? agyBinaryIdentity;
+  const now = options.now ?? Date.now;
+  const recheckMs = options.recheckMs ?? AGY_VERSION_RECHECK_MS;
+  const platform = options.platform ?? process.platform;
+  const keyOf = (cliPath: string) => platform === 'win32' ? win32Path.normalize(cliPath).toLowerCase() : cliPath;
+  const cache = new Map<string, { identity: string; mode: SpawnMode; expiresAt: number }>();
+  const inflight = new Map<string, Promise<SpawnMode>>();
+  return function resolveAgyWin32SpawnMode(cliPath: string): Promise<SpawnMode> {
+    if (!agyProbeablePath(cliPath, platform)) return Promise.resolve('pty');
+    if (/\.(cmd|bat)$/i.test(cliPath)) return Promise.resolve('pty');
+    const identity = identityOf(cliPath);
+    if (identity === null) return Promise.resolve('pty');
+    const cacheKey = keyOf(cliPath);
+    const cached = cache.get(cacheKey);
+    if (cached && cached.identity === identity && now() < cached.expiresAt) return Promise.resolve(cached.mode);
+    const key = `${cacheKey}\0${identity}`;
+    const pending = inflight.get(key);
+    if (pending) return pending;
+    const run = (async (): Promise<SpawnMode> => {
+      let output: string | null = null;
+      try { output = await probe(cliPath); } catch { output = null; }
+      if (identityOf(cliPath) !== identity) return 'pty';
+      const mode: SpawnMode = agyVersionSupportsPipe(output) ? 'pipe' : 'pty';
+      cache.set(cacheKey, { identity, mode, expiresAt: mode === 'pipe' ? Infinity : now() + recheckMs });
+      return mode;
+    })().finally(() => inflight.delete(key));
+    inflight.set(key, run);
+    return run;
+  };
+}
+
+const resolveAgyWin32SpawnMode = createAgySpawnModeResolver();
 
 /** Windows 的 .cmd 有 shell 子層，必須連子程序一起終止。 */
 function killDiscovery(child: ChildProcess): void {
@@ -255,8 +448,123 @@ function buildStrictCommand(
   if (sessionId) args.push('--conversation', sessionId);
   const cliModel = normalizeAgyModel(resolvedModel);
   if (cliModel !== null) args.push('--model', cliModel);
-  args.push('-p', prompt);
-  return { cliPath, args, cwd, agent: 'antigravity', prompt, resolvedModel };
+  return withPromptArg(input, args, prompt);
+}
+
+/**
+ * ── 長 prompt 改走檔案 ──────────────────────────────────────────
+ * agy 的 prompt 只能從 `-p` 進來。Windows 命令列上限 32,767 個 UTF-16 單位，超過就
+ * `Cannot create process, error code: 206`（2026-10-19／10-22 實測：3.5 萬～8.5 萬字的派工
+ * 秒退；呼叫端把原文寫成檔、命令列只送一行「去讀那個檔」就能 spawn 並交件，3.5 萬字那次
+ * 128 秒交件）。這裡在**序列化後的命令列**估計超過門檻時，把完整 prompt 寫進 ai-cli 自己的
+ * 私有目錄（每個 prompt 一個目錄，只放這一個檔——`--add-dir` 給 agent 的就是這個目錄，
+ * 不可讓它看到別的 job 的 prompt），`-p` 只送身分鎖＋一行指示。
+ *
+ * 門檻：Windows 估計命令列 > 24,000（留給 exe 路徑、模型、其他引數與跳脫的餘裕）。
+ * POSIX 也做，但看的是單一引數的位元組數：Linux 的 MAX_ARG_STRLEN 是 128 KiB，
+ * 超過就 E2BIG；門檻取 100,000 bytes。中文 3 bytes／字，約 3.3 萬字才觸發。
+ *
+ * 位置：每使用者私有的 ai-cli state 目錄底下（`<state>/agy-prompts`），不用共用的 /tmp——
+ * POSIX 的 /tmp 是多使用者共用、可被預先放 symlink。根目錄若是 symlink 就拒絕寫入。
+ *
+ * 清理：
+ * - durable job（JobStore）把整個目錄搬進 job 目錄（prompt-dir），隨 job 目錄回收；
+ * - 啟動前失敗（breaker、spawn mode、store 搬移之前）由 service 當場刪掉；
+ * - `ai-cli exec` 是前景執行，子行程結束、本行程退出時刪；
+ * - POSIX 的 legacy detached 路徑**不在**派工行程結束時刪（agy 可能還沒讀檔），
+ *   和其他沒搬走的一樣交給 TTL：JobStore 的 GC（collectStoreFiles）與下次寫入時清掉超過 24 小時的。
+ */
+export const AGY_WIN32_COMMAND_LINE_LIMIT = 24_000;
+export const AGY_POSIX_ARG_LIMIT_BYTES = 100_000;
+export const AGY_PROMPT_FILE_NAME = 'prompt.md';
+export const AGY_PROMPT_TTL_MS = 24 * 60 * 60 * 1000;
+/** 每次呼叫重讀環境變數：測試與多 store 可改 AI_CLI_STATE_DIR。 */
+export function agyPromptRoot(): string { return resolve(jobStateDir(), 'agy-prompts'); }
+
+/** libuv／node-pty 組 Windows 命令列的保守估計：每個引數加引號與空白，`"` 與 `\` 各算兩倍。 */
+export function estimateWin32CommandLine(cliPath: string, args: readonly string[]): number {
+  let length = cliPath.length + 3;
+  for (const arg of args) {
+    length += arg.length + 3;
+    for (let i = 0; i < arg.length; i++) {
+      const code = arg.charCodeAt(i);
+      if (code === 34 || code === 92) length++;
+    }
+  }
+  return length;
+}
+
+export function agyPromptNeedsFile(
+  cliPath: string,
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (platform === 'win32') return estimateWin32CommandLine(cliPath, args) > AGY_WIN32_COMMAND_LINE_LIMIT;
+  return args.some((arg) => Buffer.byteLength(arg) > AGY_POSIX_ARG_LIMIT_BYTES);
+}
+
+export function agyPromptFileInstruction(file: string): string {
+  return [
+    `本則訊息超過命令列長度上限，完整內容放在這個檔案（UTF-8）：${file}`,
+    '請先把檔案完整讀完（不要只讀開頭），再把檔案內容當成這則訊息本身來執行。',
+    `This message exceeded the command-line limit; its full text is in the file above: ${file}`,
+    'Read the entire file first, then treat its contents as this message itself and carry it out.',
+  ].join('\n');
+}
+
+/** 清掉超過 TTL 的 prompt 目錄。只認 `agy-<uuid>` 目錄，symlink 一律跳過（lstat，不跟隨）。 */
+export async function collectAgyPromptDirs(
+  now = Date.now(),
+  lookup: IdentityLookup = lookupIdentities,
+  isAlive?: (pid: number) => boolean
+): Promise<void> {
+  const root = agyPromptRoot();
+  try { if (!lstatSync(root).isDirectory()) return; } catch { return; }
+  let names: string[];
+  try { names = readdirSync(root); } catch { return; }
+  for (const name of names) {
+    if (!/^agy-[0-9a-f-]{36}$/.test(name)) continue;
+    const path = join(root, name);
+    try {
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+      if (now - stat.mtimeMs <= AGY_PROMPT_TTL_MS) continue;
+      // 過了 TTL 還要擁有者確認不在：exec／legacy job 可能跑超過 24 小時，還在讀這個檔。
+      if (!(await promptDirOwnersGone(path, lookup, isAlive))) continue;
+      rmSync(path, { recursive: true, force: true });
+    } catch { /* 清理失敗不可擋住派工。 */ }
+  }
+}
+
+function writeAgyPromptDir(prompt: string): string {
+  const root = agyPromptRoot();
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const stat = lstatSync(root);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error(`agy 長 prompt 的私有目錄不是一般目錄（可能是 symlink），拒絕寫入：${root}`);
+  }
+  const dir = join(root, `agy-${randomUUID()}`);
+  mkdirSync(dir, { mode: 0o700 });
+  // 交出去之前擁有者是派工行程本身；spawn 成功後由 handOffTemporaryPrompt 改成 vendor 子行程。
+  void claimPromptOwner(dir, process.pid);
+  // 只用 `ai-cli exec` 的機器沒有 JobStore 回收者：建立時順手清一次過期目錄。不等待、錯誤吞掉，
+  // 不拖慢 run；判斷擁有者用既有的行程身分查詢。剛建立的這個目錄沒過期，不會被收。
+  void collectAgyPromptDirs().catch(() => undefined);
+  writeFileSync(join(dir, AGY_PROMPT_FILE_NAME), prompt, { encoding: 'utf8', mode: 0o600 });
+  return dir;
+}
+
+/** 兩個 builder 共用：命令列放得下就照舊 `-p <prompt>`，放不下改走檔案。 */
+function withPromptArg(input: BuildCommandInput, args: string[], prompt: string): BuiltCommand {
+  const { cliPath, cwd, resolvedModel } = input;
+  const inline = [...args, '-p', prompt];
+  if (!agyPromptNeedsFile(cliPath, inline)) {
+    return { cliPath, args: inline, cwd, agent: 'antigravity', prompt, resolvedModel };
+  }
+  const dir = writeAgyPromptDir(input.prompt);
+  const instruction = withWorkerContext(agyPromptFileInstruction(join(dir, AGY_PROMPT_FILE_NAME)));
+  return { cliPath, args: [...args, '--add-dir', dir, '-p', instruction], cwd, agent: 'antigravity', prompt,
+    resolvedModel, temporaryPromptDir: dir };
 }
 
 function buildCommand(input: BuildCommandInput): BuiltCommand {
@@ -282,8 +590,7 @@ function buildCommand(input: BuildCommandInput): BuiltCommand {
   if (cliModel !== null) {
     args.push('--model', cliModel);
   }
-  args.push('-p', prompt);
-  return { cliPath, args, cwd, agent: 'antigravity', prompt, resolvedModel };
+  return withPromptArg(input, args, prompt);
 }
 
 /** `致 User\n---\n<body>\n---` 這個信封；剝不掉就原樣回。 */
@@ -335,17 +642,20 @@ function normalizeJobUsage(raw: any) {
  *   ② text 解析保留成 fallback：舊版 agy、或哪天 json 格式又變，
  *      至少本文還拿得到，不要為了新欄位把既有能力弄丟。
  */
-function parseOutput(stdout: string): unknown {
-  if (!stdout) return null;
-  const trimmed = stdout.trim();
-  if (!trimmed) return null;
+function parseOutput(stdout: string, stderr = ''): unknown {
+  // 管線模式下 agy 的 warning 印在 stderr（2026-11-20 實測續接失敗）；POSIX legacy 也靠這裡帶出。
+  const stderrWarnings = collectAgyWarnings(stderr);
+  // 嚴格模式固定那行（在 PTY 下會併進 stdout）不是回覆：拿掉之後沒東西，就走警告／raw 退路，
+  // 不可讓它變成 message 把 stderr 的致命診斷遮住。
+  const trimmed = (stdout ?? '').split(/\r?\n/).filter((line) => !isHarmlessAgyWarning(line.trim())).join('\n').trim();
+  if (!trimmed) return stderrWarnings.length > 0 ? { warnings: stderrWarnings } : null;
 
   const lines = trimmed.split(/\r?\n/);
   const preamble: string[] = [];
   for (const line of lines) {
     const candidate = line.trim();
     if (!candidate.startsWith('{')) {
-      if (candidate) preamble.push(candidate);
+      if (candidate && !isHarmlessAgyWarning(candidate)) preamble.push(candidate);
       continue;
     }
     let parsed: {
@@ -364,6 +674,7 @@ function parseOutput(stdout: string): unknown {
     }
     if (typeof parsed.response !== 'string') continue;
     const usage = normalizeJobUsage(parsed.usage);
+    const warnings = limitAgyWarnings([...preamble, ...stderrWarnings]);
     return {
       message: unwrapAgyBody(parsed.response),
       ...(usage ? { usage } : {}),
@@ -374,12 +685,61 @@ function parseOutput(stdout: string): unknown {
       ...(parsed.usage !== undefined && parsed.usage !== null ? { tokens: parsed.usage } : {}),
       ...(typeof parsed.num_turns === 'number' ? { num_turns: parsed.num_turns } : {}),
       // `warning: conversation "…" not found` 會落在這裡。呼叫端據此判 resume 失敗。
-      ...(preamble.length > 0 ? { warnings: preamble } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
     };
   }
 
   // fallback：text 格式（或 json 解析全數落空）。
-  return { message: unwrapAgyBody(trimmed) };
+  return { message: unwrapAgyBody(trimmed), ...(stderrWarnings.length > 0 ? { warnings: stderrWarnings } : {}) };
+}
+
+/** 與 core 的 durable 上限一致：最多 20 筆、每筆 1,000 字。 */
+export const AGY_WARNING_MAX_COUNT = WARNING_MAX_COUNT;
+export const AGY_WARNING_MAX_CHARS = WARNING_MAX_CHARS;
+
+/**
+ * 嚴格模式固定組合 `--mode plan --disable-slash-commands` 時，agy 每次都會印這行
+ * （2026-09-10 實測，2026-11-20 在 stderr 再次確認）。它是 ai-cli 自己的參數組合造成的、
+ * 不代表任何失敗；留著會讓每個嚴格模式 job 都帶一筆假警告。只排除這一行，其他 warning 照收。
+ */
+const HARMLESS_AGY_WARNING = /^warning: --mode plan has no effect while slash command expansion is disabled\.?$/i;
+function isHarmlessAgyWarning(text: string): boolean {
+  return HARMLESS_AGY_WARNING.test(text);
+}
+
+/**
+ * 續接失敗（`warning: conversation "…" not found`）是呼叫端判斷 resume 有沒有成功的唯一訊號，
+ * 不可被一般警告擠出上限：排在最前面，再截到上限。選「優先名額」而不是另開欄位，
+ * 是因為呼叫端（與 parseOutput 的文件）已經約定看 warnings，另開欄位等於要所有讀端改寫。
+ */
+export function isAgyResumeWarning(text: string): boolean {
+  return /^warning: conversation ".*" not found/i.test(text);
+}
+
+function limitAgyWarnings(list: readonly string[]): string[] {
+  const ordered = [...list.filter(isAgyResumeWarning), ...list.filter((text) => !isAgyResumeWarning(text))];
+  // 排序用未截斷的原文；截斷保留結尾（與 durable 路徑同一個函式）。
+  return ordered.slice(0, AGY_WARNING_MAX_COUNT).map((text) => truncateWarning(text));
+}
+
+function collectAgyWarnings(text: string): string[] {
+  if (!text) return [];
+  const found: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const warning = agyDurableWarning(line);
+    if (warning) found.push(warning);
+  }
+  return limitAgyWarnings(found);
+}
+
+/**
+ * durable job 逐行解析時保留 `warning: …` 行。`warning: conversation "<id>" not found` 是
+ * 續接失敗的唯一訊號（agy 會改開新對話、照樣回 JSON），預設結果不帶它就等於把 resume 失敗
+ * 靜默折成成功。只收 `warning:` 開頭的行，不收一般本文；嚴格模式固定出現的那行排除。
+ */
+export function agyDurableWarning(line: string): string | null {
+  const text = line.trim();
+  return /^warning:/i.test(text) && !isHarmlessAgyWarning(text) ? text : null;
 }
 
 function resolveAntigravityLocalPath(): string {
@@ -434,6 +794,13 @@ export const antigravityAgent: AgentDefinition = {
   buildCommand,
   buildStrictCommand,
   parseOutput,
-  // agy 在 win32 非 TTY 下靜默無輸出 → 強制走 ConPTY
+  durableWarning: agyDurableWarning,
+  priorityWarning: isAgyResumeWarning,
+  // 保守退路：版本量不到或 < 1.5.13 時，舊版 agy 非 TTY 會靜默無輸出 → ConPTY。
   win32SpawnMode: 'pty',
+  // ≥ 1.5.13 改走管線（見檔頭）。
+  resolveWin32SpawnMode: resolveAgyWin32SpawnMode,
+  // 管線模式不經 cmd.exe：prompt 在 argv（-p），cmd 會對引號、%、換行重新切詞。
+  // 只影響 pipe；ConPTY 本來就直接啟動 exe。.cmd／.bat 由 resolver 留在 ConPTY。
+  win32DirectExec: true,
 };

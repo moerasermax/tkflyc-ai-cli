@@ -45,6 +45,7 @@ const TESTS = [
   { file: 'verify-alias-config.mjs', nodeArgs: ['--import', './tools/stubs/catalog-test-env.mjs'] },
   'verify-catalog-source.mjs',
   'verify-agy-parse.mjs',
+  'verify-agy-pipe-mode.mjs',
   'verify-usage-parse.mjs',
   'verify-codex-app-server.mjs',
   'verify-codex-usage-schema.mjs',

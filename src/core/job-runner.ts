@@ -122,6 +122,7 @@ async function execute(directory: string, options: RunnerOptions): Promise<void>
   try {
     if (spec.pty) {
       // JobStore 已以 buildWorkerEnv 啟動 runner，直接繼承；ConPTY 不經 cmd.exe。
+      // 200 欄會把長的單行輸出切斷並重複斷點字元（見 pty-runner.ts 檔頭）；新版 agy 已改走 pipe。
       ptyProc = loadPtyModule().spawn(spec.command, spec.args, {
         name: 'xterm-color', cols: 200, rows: 50, cwd: spec.cwd, env: process.env,
       });

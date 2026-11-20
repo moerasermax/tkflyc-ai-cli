@@ -1023,16 +1023,16 @@
     "name": "usage 被誤認為回覆而隱藏原始錯誤",
     "file": "src/core/process-result.ts",
     "script": "verify-job-usage.mjs",
-    "from": "if (key === 'session_id' || key === 'usage') {",
-    "to": "if (key === 'session_id') {",
+    "from": "if (key === 'session_id' || key === 'usage' || key === 'warnings') {",
+    "to": "if (key === 'session_id' || key === 'warnings') {",
     "expect": "Usage-only failed result keeps raw output and usage"
   },
   {
     "name": "原始錯誤退路漏回傳 usage",
     "file": "src/core/process-result.ts",
     "script": "verify-job-usage.mjs",
-    "from": "if (!response.agentOutput && shapedAgentOutput?.usage) {",
-    "to": "if (false && !response.agentOutput && shapedAgentOutput?.usage) {",
+    "from": "if (!response.agentOutput && (shapedAgentOutput?.usage || shapedAgentOutput?.warnings)) {",
+    "to": "if (false && !response.agentOutput && (shapedAgentOutput?.usage || shapedAgentOutput?.warnings)) {",
     "expect": "Usage-only failed result keeps raw output and usage"
   },
   {
@@ -1386,14 +1386,6 @@
     "to": "",
     "expect": "存／取游標位置",
     "script": "verify-usage-parse.mjs"
-  },
-  {
-    "name": "direct-api 同一回應的 usage 加總（累計值會倍增）",
-    "file": "src/agents/direct-api.ts",
-    "from": "    else state.jobUsage = next;",
-    "to": "    else if (!state.jobUsage) state.jobUsage = next; else { state.jobUsage.input_tokens += next.input_tokens; state.jobUsage.output_tokens += next.output_tokens; }",
-    "expect": "Direct-api stream and JSON usage shape",
-    "script": "verify-job-usage.mjs"
   },
   {
     "name": "執行中的 job 照樣帶原始 stdout（每次輪詢灌 90 KB）",
@@ -1854,8 +1846,8 @@
   {
     "name": "[jobs audit] CLI waits for identity before PID",
     "file": "src/core/file-process-service.ts",
-    "from": "    const result = await this.startDetachedTracked(cmd, options.model);",
-    "to": "    const result = await this.startDetachedTracked(cmd, options.model);\n    await flushJobIdentities();",
+    "from": "      result = await this.startDetachedTracked(cmd, options.model);",
+    "to": "      result = await this.startDetachedTracked(cmd, options.model);\n      await flushJobIdentities();",
     "expect": "CLI identity batching caches dispatcher without blocking PID",
     "script": "verify-jobs.mjs"
   },
@@ -2541,7 +2533,7 @@
     "name": "PTY: MCP route drops durability",
     "file": "src/core/process-service.ts",
     "script": "verify-pty-jobs.mjs",
-    "from": "if (cmd.agent !== 'antigravity' || isWin && spawnMode === 'pty') {",
+    "from": "if (cmd.agent !== 'antigravity' || isWin) {",
     "to": "if (cmd.agent !== 'antigravity') {",
     "expect": "PTY MCP run returns jobId and verified worker metadata"
   },
@@ -2549,7 +2541,7 @@
     "name": "PTY: CLI route drops durability",
     "file": "src/core/file-process-service.ts",
     "script": "verify-pty-jobs.mjs",
-    "from": "if (cmd.agent !== 'antigravity' || isWin && spawnMode === 'pty') {",
+    "from": "if (cmd.agent !== 'antigravity' || isWin) {",
     "to": "if (cmd.agent !== 'antigravity') {",
     "expect": "PTY CLI FileProcessService routes to JobStore and lists only once"
   },
@@ -10251,22 +10243,6 @@
   {
     "file": "src/agents/direct-api.ts",
     "script": "verify-direct-api.mjs",
-    "name": "direct-api 沒有 index 的 tool call 不依 id 歸併（分段參數被切斷）",
-    "from": "      index = existing >= 0 ? existing : turn.toolCallAccumulators.length;",
-    "to": "      index = turn.toolCallAccumulators.length;",
-    "expect": "依 id 歸併"
-  },
-  {
-    "file": "src/agents/direct-api.ts",
-    "script": "verify-direct-api.mjs",
-    "name": "direct-api extra_content 改回整個覆蓋（後到的 google 蓋掉先前欄位）",
-    "from": "    merged[key] = before && after ? { ...before, ...after } : value;",
-    "to": "    merged[key] = value;",
-    "expect": "兩層合併"
-  },
-  {
-    "file": "src/agents/direct-api.ts",
-    "script": "verify-direct-api.mjs",
     "name": "direct-api agentOutput.error 不遮蔽 Bearer 金鑰",
     "from": "  return out.replace(/\\bBearer\\s+[^\\s\"',;]+/gi, 'Bearer [redacted]');",
     "to": "  return out;",
@@ -10287,5 +10263,669 @@
     "from": "    for (let j = i + 1; j < Math.min(lines.length - 1, i + 6); j++) {",
     "to": "    for (let j = i + 1; j < Math.min(lines.length - 1, i + 3); j++) {",
     "expect": "說明折成多行時仍認得區段標題"
+  },
+  {
+    "name": "direct-api 逐 chunk 累計用量",
+    "file": "src/agents/direct-api.ts",
+    "from": "    turn.usage = usage;",
+    "to": "    if (typeof usage.completion_tokens === 'number') usage.completion_tokens += turn.usage?.completion_tokens ?? 0;\n    turn.usage = usage;",
+    "script": "verify-direct-api.mjs",
+    "expect": "累計串流的 usage 要取每個請求最後一筆再相加"
+  },
+  {
+    "name": "direct-api 逐 chunk 累計成本",
+    "file": "src/agents/direct-api.ts",
+    "from": "  if (cost !== undefined) turn.cost = cost;",
+    "to": "  turn.cost = mergeCost(turn.cost, cost);",
+    "script": "verify-direct-api.mjs",
+    "expect": "累計串流的 cost 要取每個請求最後一筆再相加"
+  },
+  {
+    "name": "direct-api 空名稱被當成新 call",
+    "file": "src/agents/direct-api.ts",
+    "from": "      const startsNew = !last || (name && last.function?.name);",
+    "to": "      const startsNew = !last || (typeof fn?.name === 'string' && last.function?.name);",
+    "script": "verify-direct-api.mjs",
+    "expect": "空字串 id、type、name 要視為未提供"
+  },
+  {
+    "name": "direct-api 接受無效 index",
+    "file": "src/agents/direct-api.ts",
+    "from": "    const wireIndex = typeof call.index === 'number' && Number.isInteger(call.index) && call.index >= 0\n      ? call.index\n      : undefined;",
+    "to": "    const wireIndex = typeof call.index === 'number' ? call.index : undefined;",
+    "script": "verify-direct-api.mjs",
+    "expect": "無效 index 要改走無 index 的 tool call 歸併"
+  },
+  {
+    "name": "direct-api 相同 index 合併不同 id",
+    "file": "src/agents/direct-api.ts",
+    "from": "      else if (startsNewByName || (id && previous?.id && id !== previous.id)) slot = calls.length;",
+    "to": "      else if (startsNewByName) slot = calls.length;",
+    "script": "verify-direct-api.mjs",
+    "expect": "同一 index 的不同 id 要分槽且續段歸到新槽"
+  },
+  {
+    "name": "direct-api extra_content 改回整個覆蓋",
+    "file": "src/agents/direct-api.ts",
+    "from": "    if (mergedValue !== undefined) merged[key] = mergedValue;",
+    "to": "    merged[key] = value;",
+    "script": "verify-direct-api.mjs",
+    "expect": "兩層合併"
+  },
+  {
+    "name": "direct-api extra_content 空值覆蓋既有值",
+    "file": "src/agents/direct-api.ts",
+    "from": "    if (value === null || value === undefined || value === '') continue;",
+    "to": "",
+    "script": "verify-direct-api.mjs",
+    "expect": "extra_content 空值要略過且仍接受 0 和 false"
+  },
+  {
+    "name": "direct-api extra_content 接受原型鍵",
+    "file": "src/agents/direct-api.ts",
+    "from": "    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;",
+    "to": "",
+    "script": "verify-direct-api.mjs",
+    "expect": "extra_content 的 __proto__ 不得改變序列化前物件的原型"
+  },
+  {
+    "name": "direct-api 整次無有效用量時省略缺報旗標",
+    "file": "src/agents/direct-api.ts",
+    "from": "    ...(!state.jobUsage && state.incompleteUsage ? { usage_incomplete: true } : {}),",
+    "to": "",
+    "script": "verify-direct-api.mjs",
+    "expect": "整次用量無效時須有可見的 usage_incomplete"
+  },
+  {
+    "name": "direct-api 非法總量與快取寫入進入 tokens",
+    "file": "src/agents/direct-api.ts",
+    "from": "  if (isTokenCount(cacheCreation)) tokens.cache_creation = cacheCreation;\n  if (isTokenCount(usage.total_tokens)) tokens.total = usage.total_tokens;",
+    "to": "  if (typeof cacheCreation === 'number') tokens.cache_creation = cacheCreation;\n  if (typeof usage.total_tokens === 'number') tokens.total = usage.total_tokens;",
+    "script": "verify-direct-api.mjs",
+    "expect": "非法的 cached、reasoning、total、cache_creation 不得污染 tokens"
+  },
+  {
+    "name": "direct-api 壞用量 chunk 仍採計成本",
+    "file": "src/agents/direct-api.ts",
+    "from": "      // 壞 chunk 的用量與成本都不覆蓋先前有效回報。\n      return;",
+    "to": "      const invalidChunkCost = normalizeCost(parsed);\n      if (invalidChunkCost !== undefined) turn.cost = invalidChunkCost;\n      return;",
+    "script": "verify-direct-api.mjs",
+    "expect": "壞用量 chunk 的成本不得覆蓋有效成本"
+  },
+  {
+    "name": "direct-api 同一 chunk 頂層零成本蓋掉巢狀正數",
+    "file": "src/agents/direct-api.ts",
+    "from": "  const cost = topLevelCost === 0 ? usageCost ?? topLevelCost : topLevelCost ?? usageCost;",
+    "to": "  const cost = topLevelCost ?? usageCost;",
+    "script": "verify-direct-api.mjs",
+    "expect": "累計串流的 cost 要取每個請求最後一筆再相加"
+  },
+  {
+    "name": "direct-api index 重用後忽略重現 id",
+    "file": "src/agents/direct-api.ts",
+    "from": "      if (existing >= 0 && existing !== slot) slot = existing;",
+    "to": "      if (false) slot = existing;",
+    "script": "verify-direct-api.mjs",
+    "expect": "重用 index 時重現的 id 要回原槽且接住後續片段"
+  },
+  {
+    "name": "direct-api 有效用量未清除同請求 incomplete",
+    "file": "src/agents/direct-api.ts",
+    "from": "    turn.incompleteUsage = false;",
+    "to": "",
+    "script": "verify-direct-api.mjs",
+    "expect": "同一請求之後收到有效用量應清除 incomplete"
+  },
+  {
+    "name": "direct-api 沒有 index 的 tool call 不依 id 歸併",
+    "file": "src/agents/direct-api.ts",
+    "from": "      slot = existing >= 0 ? existing : calls.length;",
+    "to": "      slot = calls.length;",
+    "script": "verify-direct-api.mjs",
+    "expect": "依 id 歸併"
+  },
+  {
+    "name": "direct-api 無 id 且名稱不同時不分槽",
+    "file": "src/agents/direct-api.ts",
+    "from": "        (name !== previousName || (args && hasCompleteToolArguments(previous.function?.arguments)));",
+    "to": "        (name === previousName && args && hasCompleteToolArguments(previous.function?.arguments));",
+    "script": "verify-direct-api.mjs",
+    "expect": "無 id 的 index 重用只在名稱改變或同名且舊參數完整時分槽"
+  },
+  {
+    "name": "direct-api 無 id 且同名完整參數時不分槽",
+    "file": "src/agents/direct-api.ts",
+    "from": "        (name !== previousName || (args && hasCompleteToolArguments(previous.function?.arguments)));",
+    "to": "        name !== previousName;",
+    "script": "verify-direct-api.mjs",
+    "expect": "無 id 的 index 重用只在名稱改變或同名且舊參數完整時分槽"
+  },
+  {
+    "name": "direct-api 串流丟掉 message metadata",
+    "file": "src/agents/direct-api.ts",
+    "from": "      const extra = asRecord(delta.extra_content);\n      if (extra) turn.extra_content = mergeExtraContent(turn.extra_content, extra);",
+    "to": "",
+    "script": "verify-direct-api.mjs",
+    "expect": "串流 message 層 extra_content 要合併並保存"
+  },
+  {
+    "name": "direct-api 非串流丟掉 message metadata",
+    "file": "src/agents/direct-api.ts",
+    "from": "      const extra = asRecord(message.extra_content);\n      if (extra) turn.extra_content = mergeExtraContent(turn.extra_content, extra);",
+    "to": "",
+    "script": "verify-direct-api.mjs",
+    "expect": "非串流 message 層 extra_content 要過濾並重播"
+  },
+  {
+    "name": "direct-api null 選填計數標 incomplete",
+    "file": "src/agents/direct-api.ts",
+    "from": "value != null && !isTokenCount(value)",
+    "to": "value !== undefined && !isTokenCount(value)",
+    "script": "verify-direct-api.mjs",
+    "expect": "null 選填計數視為未提供且不得標 incomplete"
+  },
+  {
+    "name": "direct-api extra_content 回傳空物件",
+    "file": "src/agents/direct-api.ts",
+    "from": "  return Object.keys(merged).length ? merged : undefined;",
+    "to": "  return merged;",
+    "script": "verify-direct-api.mjs",
+    "expect": "過濾後的空 extra_content 不得覆蓋純量或寫入空物件"
+  },
+  {
+    "name": "direct-api wire index 撞到既有槽位",
+    "file": "src/agents/direct-api.ts",
+    "from": "      slot = turn.toolCallSlotsByWireIndex.get(wireIndex) ?? calls.length;",
+    "to": "      slot = turn.toolCallSlotsByWireIndex.get(wireIndex) ?? (wireIndex < calls.length ? wireIndex : calls.length);",
+    "script": "verify-direct-api.mjs",
+    "expect": "wire index 要與槽位分離並原序輸出亂序及超大 index"
+  },
+  {
+    "name": "direct-api indexed tool call 按抵達順序輸出",
+    "file": "src/agents/direct-api.ts",
+    "from": "  const ordered = [...turn.toolCallAccumulators].sort(\n    (a, b) => (a.wireIndex ?? Infinity) - (b.wireIndex ?? Infinity)\n  );",
+    "to": "  const ordered = turn.toolCallAccumulators;",
+    "script": "verify-direct-api.mjs",
+    "expect": "wire index 要與槽位分離並原序輸出亂序及超大 index"
+  },
+  {
+    "name": "direct-api 尾端頂層零值覆蓋有效成本",
+    "file": "src/agents/direct-api.ts",
+    "from": "  if (topLevelCost === 0 && cost === 0 && (turn.cost ?? 0) > 0) return;",
+    "to": "",
+    "script": "verify-direct-api.mjs",
+    "expect": "尾端零值或非法成本不得覆蓋有效成本"
+  },
+  {
+    "name": "direct-api 接受非法成本",
+    "file": "src/agents/direct-api.ts",
+    "from": "  return isTokenCount(direct) ? direct : undefined;",
+    "to": "  return direct as number | undefined;",
+    "script": "verify-direct-api.mjs",
+    "expect": "尾端零值或非法成本不得覆蓋有效成本"
+  },
+  {
+    "name": "direct-api 非串流 tool call 保留空 id",
+    "file": "src/agents/direct-api.ts",
+    "from": "      id: typeof call.id === 'string' && call.id ? call.id : `call_${calls.length}`,",
+    "to": "      id: typeof call.id === 'string' ? call.id : `call_${calls.length}`,",
+    "script": "verify-direct-api.mjs",
+    "expect": "非串流 tool call 的空 id 要改用後備 id"
+  },
+  {
+    "name": "direct-api 非串流 tool call 保留未過濾 extra_content",
+    "file": "src/agents/direct-api.ts",
+    "from": "    const extra = rawExtra && (extraContentAlreadyMerged ? rawExtra : mergeExtraContent(undefined, rawExtra));",
+    "to": "    const extra = rawExtra;",
+    "script": "verify-direct-api.mjs",
+    "expect": "非串流 tool call extra_content 要過濾後重播"
+  },
+  {
+    "name": "direct-api 純缺報旗標被當成空結果",
+    "file": "src/agents/direct-api.ts",
+    "from": "!tokens && !usage && !usageIncomplete && cost === undefined",
+    "to": "!tokens && !usage && cost === undefined",
+    "script": "verify-direct-api.mjs",
+    "expect": "只有 usage_incomplete 的結果也要保留旗標"
+  },
+  {
+    "name": "direct-api 串流空 finish_reason 覆蓋既有值",
+    "file": "src/agents/direct-api.ts",
+    "from": "      appendToolCallDeltas(delta, turn);\n    }\n    if (typeof choice?.finish_reason === 'string' && choice.finish_reason) {",
+    "to": "      appendToolCallDeltas(delta, turn);\n    }\n    if (typeof choice?.finish_reason === 'string') {",
+    "script": "verify-direct-api.mjs",
+    "expect": "串流空 finish_reason 不得覆蓋已知結束原因"
+  },
+  {
+    "name": "direct-api 非串流空 finish_reason 覆蓋既有值",
+    "file": "src/agents/direct-api.ts",
+    "from": "      turn.toolCalls.push(...normalizeToolCalls(message.tool_calls));\n    }\n    if (typeof choice?.finish_reason === 'string' && choice.finish_reason) {",
+    "to": "      turn.toolCalls.push(...normalizeToolCalls(message.tool_calls));\n    }\n    if (typeof choice?.finish_reason === 'string') {",
+    "script": "verify-direct-api.mjs",
+    "expect": "非串流空 finish_reason 不得覆蓋已知結束原因"
+  },
+  {
+    "name": "direct-api 同 index 同 id 的同名續段被拆開",
+    "file": "src/agents/direct-api.ts",
+    "from": "      const startsNewByName = (!id || id !== previous?.id) && name && previousName &&",
+    "to": "      const startsNewByName = name && previousName &&",
+    "script": "verify-direct-api.mjs",
+    "expect": "同 index 同 id 的同名續段要串接參數且只重播一筆"
+  },
+  {
+    "name": "direct-api 同 index 同 id 因名稱改變被拆開",
+    "file": "src/agents/direct-api.ts",
+    "from": "      const startsNewByName = (!id || id !== previous?.id) && name && previousName &&",
+    "to": "      const startsNewByName = (!id || id !== previous?.id || name !== previousName) && name && previousName &&",
+    "script": "verify-direct-api.mjs",
+    "expect": "同 index 同 id 的名稱改變仍要串接參數且只重播一筆"
+  },
+  {
+    "name": "agy-pipe: JobStore 忽略 service 解析的 spawnMode",
+    "file": "src/core/job-store.ts",
+    "from": "(cmd.spawnMode ?? getAgent(cmd.agent).win32SpawnMode) === 'pty'",
+    "to": "getAgent(cmd.agent).win32SpawnMode === 'pty'",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "win32 agy 新版經 runner 走管線"
+  },
+  {
+    "name": "agy-pipe: FileProcessService 的 win32 pipe agy 退回 legacy 路徑",
+    "file": "src/core/file-process-service.ts",
+    "from": "if (cmd.agent !== 'antigravity' || isWin) {",
+    "to": "if (cmd.agent !== 'antigravity' || isWin && spawnMode === 'pty') {",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "win32 agy 新版經 runner 走管線"
+  },
+  {
+    "name": "agy-pipe: ProcessService 的 win32 pipe agy 退回 legacy 路徑",
+    "file": "src/core/process-service.ts",
+    "from": "if (cmd.agent !== 'antigravity' || isWin) {",
+    "to": "if (cmd.agent !== 'antigravity' || isWin && spawnMode === 'pty') {",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "MCP run（ProcessService）新版也走管線"
+  },
+  {
+    "name": "agy-pipe: 門檻降到未實測的 1.5.12",
+    "file": "src/agents/antigravity.ts",
+    "from": "export const AGY_PIPE_MIN_VERSION = [1, 5, 13] as const;",
+    "to": "export const AGY_PIPE_MIN_VERSION = [1, 5, 12] as const;",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "低於門檻判定不可走管線"
+  },
+  {
+    "name": "agy-pipe: 版本解析不再要求整段就是版本號",
+    "file": "src/agents/antigravity.ts",
+    "from": "const match = /^(\\d+)\\.(\\d+)\\.(\\d+)$/.exec(output.trim());",
+    "to": "const match = /(\\d+)\\.(\\d+)\\.(\\d+)/.exec(output.trim());",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "版本量不到"
+  },
+  {
+    "name": "agy-pipe: 新版結論也按時間過期",
+    "file": "src/agents/antigravity.ts",
+    "from": "expiresAt: mode === 'pipe' ? Infinity : now() + recheckMs",
+    "to": "expiresAt: now() + recheckMs",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "新版結論不按時間過期"
+  },
+  {
+    "name": "agy-pipe: 並行查詢不共用",
+    "file": "src/agents/antigravity.ts",
+    "from": "    if (pending) return pending;\n",
+    "to": "    if (pending && Date.now() < 0) return pending;\n",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "版本快取"
+  },
+  {
+    "name": "agy-pipe: .cmd 也走版本判斷",
+    "file": "src/agents/antigravity.ts",
+    "from": "if (/\\.(cmd|bat)$/i.test(cliPath)) return Promise.resolve('pty');",
+    "to": "if (false) return Promise.resolve('pty');",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": ".cmd／.bat 一律 pty"
+  },
+  {
+    "name": "agy-pipe: 裸名稱也探測版本",
+    "file": "src/agents/antigravity.ts",
+    "from": "if (!agyProbeablePath(cliPath, platform)) return Promise.resolve('pty');",
+    "to": "if (false) return Promise.resolve('pty');",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "非絕對路徑一律 pty"
+  },
+  {
+    "name": "agy-pipe: drive-relative 路徑也探測版本",
+    "file": "src/agents/antigravity.ts",
+    "from": "  return /^[A-Za-z]:[\\\\/]/.test(cliPath) || /^[\\\\/]{2}[^\\\\/]+[\\\\/]+[^\\\\/]+/.test(cliPath);",
+    "to": "  return isAbsolute(cliPath);",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "drive-relative 路徑一律 pty"
+  },
+  {
+    "name": "agy-pipe: 快取不核對執行檔身分",
+    "file": "src/agents/antigravity.ts",
+    "from": "if (cached && cached.identity === identity && now() < cached.expiresAt)",
+    "to": "if (cached && now() < cached.expiresAt)",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "同路徑換成舊版後從 pipe 回到 pty"
+  },
+  {
+    "name": "agy-pipe: 探測後不再核對身分（TOCTOU）",
+    "file": "src/agents/antigravity.ts",
+    "from": "      if (identityOf(cliPath) !== identity) return 'pty';\n",
+    "to": "",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "探測期間執行檔被換掉不寫快取"
+  },
+  {
+    "name": "agy-pipe: Windows 快取鍵不正規化",
+    "file": "src/agents/antigravity.ts",
+    "from": "platform === 'win32' ? win32Path.normalize(cliPath).toLowerCase() : cliPath",
+    "to": "cliPath",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "快取鍵不分大小寫與分隔符"
+  },
+  {
+    "name": "agy-pipe: 版本輸出超限仍保留前綴",
+    "file": "src/agents/antigravity.ts",
+    "from": "if (stdout.length + data.length > AGY_VERSION_OUTPUT_LIMIT) { overflow = true; stdout = ''; return; }",
+    "to": "if (stdout.length + data.length > AGY_VERSION_OUTPUT_LIMIT) return;",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "輸出超過收集上限一律 unknown"
+  },
+  {
+    "name": "agy-pipe: 探測逾時不結束子行程",
+    "file": "src/agents/antigravity.ts",
+    "from": "      try { child.kill(); } catch { /* 已退出；不可讓計時器拋例外。 */ }",
+    "to": "      try { void child; } catch { /* 已退出；不可讓計時器拋例外。 */ }",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "逾時立刻回 null 並結束子行程"
+  },
+  {
+    "name": "agy-long-prompt: 永遠把 prompt 放在 -p",
+    "file": "src/agents/antigravity.ts",
+    "from": "  if (!agyPromptNeedsFile(cliPath, inline)) {",
+    "to": "  if (true) {",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "長 prompt 超過門檻時 argv 只含短指示"
+  },
+  {
+    "name": "agy-long-prompt: JobStore 搬目錄後不改寫 args 裡的舊路徑",
+    "file": "src/core/job-store.ts",
+    "from": "      cmd.args = cmd.args.map(arg => arg.split(cmd.temporaryPromptDir!).join(target));",
+    "to": "      cmd.args = cmd.args.map(arg => arg);",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "win32 agy 長 prompt 經 runner"
+  },
+  {
+    "name": "agy-long-prompt: 搬移被鎖不重試也不複製",
+    "file": "src/core/job-store.ts",
+    "from": "      if (code === 'EXDEV' || !['EPERM', 'EBUSY', 'EACCES'].includes(code)) { if (code !== 'EXDEV') throw error; break; }",
+    "to": "      throw error;",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "agy prompt 目錄搬移"
+  },
+  {
+    "name": "agy-long-prompt: 容量不計入 prompt-dir",
+    "file": "src/core/job-store.ts",
+    "from": "    total += stat.isDirectory() ? directorySize(join(path, name)) : stat.size;",
+    "to": "    total += stat.size;",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "已結束 job 容量計入 prompt-dir"
+  },
+  {
+    "name": "agy-long-prompt: store 回收不清過期 prompt 目錄",
+    "file": "src/core/job-store.ts",
+    "from": "  await collectAgyPromptDirs(now, lookup);\n",
+    "to": "",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "TTL 清理掛在 store 回收裡"
+  },
+  {
+    "name": "agy-long-prompt: 啟動前失敗不清目錄",
+    "file": "src/core/file-process-service.ts",
+    "from": "    } catch (error) { discardTemporaryPrompt(cmd); throw error; }",
+    "to": "    } catch (error) { throw error; }",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "啟動前失敗（熔斷器）清掉私有 prompt 目錄"
+  },
+  {
+    "name": "agy-warning: durable 逐行解析丟掉非 JSON 行的警告",
+    "file": "src/core/job-store.ts",
+    "from": "catch { durableWarning(job, agent, text); return; }",
+    "to": "catch { return; }",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "win32 agy 舊版經 runner 仍走 ConPTY"
+  },
+  {
+    "name": "agy-warning: stderr 的 JSON 行蓋掉 stdout 的回覆",
+    "file": "src/core/job-store.ts",
+    "from": "  if (job.toolType === 'antigravity' && ref.stream === 'stderr') { durableWarning(job, agent, text); return; }\n",
+    "to": "",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "win32 agy 新版經 runner 走管線"
+  },
+  {
+    "name": "agy-warning: 所有非 JSON 行都當警告",
+    "file": "src/agents/antigravity.ts",
+    "from": "  return /^warning:/i.test(text) && !isHarmlessAgyWarning(text) ? text : null;",
+    "to": "  return text || null;",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "durableWarning 只收 warning: 行"
+  },
+  {
+    "name": "agy-warning: 嚴格模式固定那行也當警告",
+    "file": "src/agents/antigravity.ts",
+    "from": "  return /^warning:/i.test(text) && !isHarmlessAgyWarning(text) ? text : null;",
+    "to": "  return /^warning:/i.test(text) ? text : null;",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "--mode plan 警告不算警告"
+  },
+  {
+    "name": "agy-warning: parseOutput 不掃 stderr",
+    "file": "src/agents/antigravity.ts",
+    "from": "  const stderrWarnings = collectAgyWarnings(stderr);",
+    "to": "  const stderrWarnings: string[] = [];",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "parseOutput 也掃 stderr 的 warning"
+  },
+  {
+    "name": "agy-warning: 只有 warnings 時遮住 raw 輸出",
+    "file": "src/core/process-result.ts",
+    "from": "    if (key === 'session_id' || key === 'usage' || key === 'warnings') {",
+    "to": "    if (key === 'session_id' || key === 'usage') {",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "只有 warnings 的結果照回 raw 輸出"
+  },
+  {
+    "name": "agy-peek: 單行 JSON 不取 response",
+    "file": "src/core/peek-extractor.ts",
+    "from": "      if (typeof parsed?.response === 'string') body = parsed.response.trim();",
+    "to": "      void parsed;",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "peek 對單行 JSON 只取 response"
+  },
+  {
+    "name": "agy-peek: extractor 沒接上 agyPeekText",
+    "file": "src/core/peek-extractor.ts",
+    "from": "        const text = agyPeekText(stripAnsi(line).trim());",
+    "to": "        const text = stripAnsi(line).trim();",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "PeekEventExtractor／LivenessEventExtractor 接線"
+  },
+  {
+    "name": "agy-long-prompt: TTL 清理不核對擁有者",
+    "file": "src/agents/antigravity.ts",
+    "from": "      if (!(await promptDirOwnersGone(path, lookup, isAlive))) continue;\n",
+    "to": "",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "只回收擁有者已確認不在"
+  },
+  {
+    "name": "agy-long-prompt: 擁有者 PID 被重用仍當成本人",
+    "file": "src/core/prompt-owner.ts",
+    "from": "  if (owner.started) return current.started !== owner.started;",
+    "to": "  if (owner.started) return false;",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "只回收擁有者已確認不在"
+  },
+  {
+    "name": "agy-long-prompt: 身分查詢失敗就回收",
+    "file": "src/core/prompt-owner.ts",
+    "from": "  try { ids = await lookup([owner.pid]); } catch { return false; }",
+    "to": "  try { ids = await lookup([owner.pid]); } catch { return true; }",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "只回收擁有者已確認不在"
+  },
+  {
+    "name": "agy-long-prompt: 移交後錯誤路徑仍刪檔",
+    "file": "src/core/command-builder.ts",
+    "from": "  cmd.temporaryPromptDir = undefined;\n",
+    "to": "",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "交給 vendor 後擁有者改成子行程"
+  },
+  {
+    "name": "agy-long-prompt: 相對 state 目錄寫出相對路徑",
+    "file": "src/agents/antigravity.ts",
+    "from": "export function agyPromptRoot(): string { return resolve(jobStateDir(), 'agy-prompts'); }",
+    "to": "export function agyPromptRoot(): string { return join(jobStateDir(), 'agy-prompts'); }",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "相對 AI_CLI_STATE_DIR"
+  },
+  {
+    "name": "agy-long-prompt: 複製失敗留下部分副本",
+    "file": "src/core/job-store.ts",
+    "from": "  catch (error) { rmSync(partial, { recursive: true, force: true }); throw error; }",
+    "to": "  catch (error) { throw error; }",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "跨磁碟複製失敗不留部分副本"
+  },
+  {
+    "name": "agy-warning: 嚴格模式那行被當成回覆",
+    "file": "src/agents/antigravity.ts",
+    "from": "  const trimmed = (stdout ?? '').split(/\\r?\\n/).filter((line) => !isHarmlessAgyWarning(line.trim())).join('\\n').trim();",
+    "to": "  const trimmed = (stdout ?? '').trim();",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "stdout 只有嚴格模式那行時不當成回覆"
+  },
+  {
+    "name": "agy-warning: parseOutput 的續接失敗被上限擠掉",
+    "file": "src/agents/antigravity.ts",
+    "from": "  const ordered = [...list.filter(isAgyResumeWarning), ...list.filter((text) => !isAgyResumeWarning(text))];",
+    "to": "  const ordered = [...list];",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "續接失敗警告不會被上限擠掉"
+  },
+  {
+    "name": "agy-warning: durable 的續接失敗被上限擠掉",
+    "file": "src/core/job-store.ts",
+    "from": "  if (!priority || !urgent) return;",
+    "to": "  if (!priority || !urgent || Date.now() > 0) return;",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "win32 agy stderr 警告有上限"
+  },
+  {
+    "name": "agy-warning: raw 退路丟掉 agentOutput.session_id",
+    "file": "src/core/process-result.ts",
+    "from": "        ...(shapedAgentOutput.warnings && shapedAgentOutput.session_id ? { session_id: shapedAgentOutput.session_id } : {}),\n",
+    "to": "",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "保留 agentOutput.session_id"
+  },
+  {
+    "name": "agy-long-prompt: discard 刪目錄前不撤銷擁有者",
+    "file": "src/core/command-builder.ts",
+    "from": "  revokePromptOwners(cmd.temporaryPromptDir);\n",
+    "to": "",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "刪不掉時先撤銷擁有者"
+  },
+  {
+    "name": "agy-long-prompt: 搬移刪來源前不撤銷擁有者",
+    "file": "src/core/job-store.ts",
+    "from": "  revokePromptOwners(source);\n",
+    "to": "",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "刪不掉時先撤銷擁有者"
+  },
+  {
+    "name": "agy-long-prompt: 擁有者寫入被鎖不重試",
+    "file": "src/core/prompt-owner.ts",
+    "from": "        if (!RETRYABLE.has((error as NodeJS.ErrnoException).code ?? '') || attempt >= 7 || remaining <= 0) throw error;",
+    "to": "        throw error;",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "移交被鎖時短重試"
+  },
+  {
+    "name": "agy-long-prompt: 移交寫不進時不留 pending",
+    "file": "src/core/prompt-owner.ts",
+    "from": "    try { writeFileSync(join(dir, PROMPT_OWNER_PENDING_FILE), JSON.stringify({ pid, claimedAt }) + '\\n', { mode: 0o600 }); } catch { /* 見檔頭：殘餘風險 */ }",
+    "to": "    void 0;",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "一直寫不進時保守保留"
+  },
+  {
+    "name": "agy-long-prompt: GC 只看 owner.json 不看 pending",
+    "file": "src/core/prompt-owner.ts",
+    "from": "  return [readOwnerFile(join(dir, PROMPT_OWNER_FILE)), readOwnerFile(join(dir, PROMPT_OWNER_PENDING_FILE))]",
+    "to": "  return [readOwnerFile(join(dir, PROMPT_OWNER_FILE))]",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "一直寫不進時保守保留"
+  },
+  {
+    "name": "agy-long-prompt: 只有 PID 時不比對建立時間",
+    "file": "src/core/prompt-owner.ts",
+    "from": "  return Number.isFinite(born) && born > owner.claimedAt! + CLAIM_CLOCK_SLACK_MS;",
+    "to": "  return false;",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "只有 PID 的擁有者"
+  },
+  {
+    "name": "agy-long-prompt: 非 ISO 的建立時間也拿來比",
+    "file": "src/core/prompt-owner.ts",
+    "from": "  if (!/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}/.test(current.started)) return false;\n",
+    "to": "",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "只有 PID 的擁有者"
+  },
+  {
+    "name": "agy-warning: 截斷不保留結尾",
+    "file": "src/core/warning-text.ts",
+    "from": "  return `${head}…${tail}`;",
+    "to": "  return text.slice(0, max);",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "警告截斷保留結尾"
+  },
+  {
+    "name": "agy-warning: durable 用截斷後的文字判斷優先",
+    "file": "src/core/job-store.ts",
+    "from": "  const urgent = priority?.(warning) === true;",
+    "to": "  const urgent = priority?.(warning.slice(0, 1000)) === true;",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "win32 agy stderr 警告有上限"
+  },
+  {
+    "name": "agy-warning: durable 截頭不留結尾",
+    "file": "src/core/job-store.ts",
+    "from": "  const kept = Buffer.from(truncateWarning(warning)).toString('utf8');",
+    "to": "  const kept = Buffer.from(warning.slice(0, 1000)).toString('utf8');",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "win32 agy stderr 警告有上限"
+  },
+  {
+    "name": "agy-warning: parseOutput 截頭不留結尾",
+    "file": "src/agents/antigravity.ts",
+    "from": "  return ordered.slice(0, AGY_WARNING_MAX_COUNT).map((text) => truncateWarning(text));",
+    "to": "  return ordered.slice(0, AGY_WARNING_MAX_COUNT).map((text) => text.slice(0, AGY_WARNING_MAX_CHARS));",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "警告截斷保留結尾"
+  },
+  {
+    "name": "agy-long-prompt: 建立時不順手清過期目錄",
+    "file": "src/agents/antigravity.ts",
+    "from": "  void collectAgyPromptDirs().catch(() => undefined);\n",
+    "to": "",
+    "script": "verify-agy-pipe-mode.mjs",
+    "expect": "建立長 prompt 時順手清掉過期目錄"
   }
 ]

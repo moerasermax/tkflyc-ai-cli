@@ -8,7 +8,7 @@
  * direct-api 的 <provider>-<model> 在這裡專門解析（先於一般 routing）。
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { resolve as pathResolve, isAbsolute } from 'node:path';
 import type { AgentDefinition, AgentId, BuiltCommand } from '../agents/types.js';
 import { selectAgentForModel, getAgent } from '../agents/registry.js';
@@ -22,6 +22,7 @@ import {
 } from './user-config.js';
 import { debugLog } from './debug.js';
 import { assertCanStartJob } from './worker-env.js';
+import { claimPromptOwner, revokePromptOwners } from './prompt-owner.js';
 
 export interface BuildCliCommandOptions {
   prompt?: string;
@@ -132,6 +133,29 @@ function resolveDefaultReasoningEffort(
     return { ...resolved, effort: undefined };
   }
   return resolved;
+}
+
+/**
+ * 啟動前失敗（熔斷器、spawn mode、store 搬移之前）時清掉 builder 建的私有 prompt 目錄。
+ * 成功進 JobStore 的已被搬走（這裡是 no-op）；成功走 legacy 路徑的不可呼叫——agy 之後才讀檔。
+ */
+export function discardTemporaryPrompt(cmd: Pick<BuiltCommand, 'temporaryPromptDir'>,
+  remove: (path: string) => void = (path) => rmSync(path, { recursive: true, force: true })): void {
+  if (!cmd.temporaryPromptDir) return;
+  // 先撤銷擁有者：刪不掉的殘骸在 TTL 後就可回收，不會被還活著的派工行程「擁有」著。
+  revokePromptOwners(cmd.temporaryPromptDir);
+  try { remove(cmd.temporaryPromptDir); } catch { /* 交給 TTL GC。 */ }
+}
+
+/**
+ * vendor 已經 spawn、接下來由它讀檔：擁有者改成那個子行程（GC 會核對它在不在），並把欄位清掉，
+ * 之後的錯誤路徑（例如寫 metadata 失敗）不可再刪 vendor 還要讀的檔。
+ */
+export function handOffTemporaryPrompt(cmd: Pick<BuiltCommand, 'temporaryPromptDir'>, pid: number): void {
+  const dir = cmd.temporaryPromptDir;
+  if (!dir) return;
+  cmd.temporaryPromptDir = undefined;
+  void claimPromptOwner(dir, pid);
 }
 
 export function buildCliCommand(options: BuildCliCommandOptions): BuiltCommand & { warnings?: string[] } {

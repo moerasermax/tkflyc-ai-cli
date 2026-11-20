@@ -27,7 +27,6 @@ import {
   type ApiFormat,
   type ProtocolAdapter,
   type ProtocolNative,
-  type ProtocolUsage,
 } from './direct-api-protocols.js';
 
 /**
@@ -353,6 +352,7 @@ interface ChatMessage {
   content?: ChatContent | null;
   tool_calls?: ChatToolCall[];
   tool_call_id?: string;
+  extra_content?: Record<string, unknown>;
   /**
    * 上一輪 assistant 的推理內容，回送給要求保留它的模型。
    *
@@ -379,15 +379,14 @@ interface SessionFile {
 }
 
 interface CompletionUsage {
-  [key: string]: unknown;
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
   input_tokens?: number;
   output_tokens?: number;
-  reasoning_tokens?: number;
-  prompt_tokens_details?: { cached_tokens?: number; cache_creation_tokens?: number };
-  completion_tokens_details?: { reasoning_tokens?: number };
+  reasoning_tokens?: number | null;
+  prompt_tokens_details?: { cached_tokens?: number | null; cache_creation_tokens?: number };
+  completion_tokens_details?: { reasoning_tokens?: number | null };
 }
 
 interface StreamState {
@@ -396,14 +395,15 @@ interface StreamState {
   modelName: string;
   assistantText: string;
   reasoningText: string;
-  usage?: CompletionUsage;
+  tokens?: Record<string, number>;
   jobUsage?: ReturnType<typeof normalizeJobUsage>;
   incompleteUsage?: boolean;
-  cost?: unknown;
+  cost?: number;
   finishReason?: string;
 }
 
 interface StreamToolCallAccumulator {
+  wireIndex?: number;
   id?: string;
   type?: string;
   function?: {
@@ -417,7 +417,12 @@ interface CompletionTurn {
   assistantText: string;
   reasoningText: string;
   toolCallAccumulators: StreamToolCallAccumulator[];
+  toolCallSlotsByWireIndex: Map<number, number>;
   toolCalls: ChatToolCall[];
+  extra_content?: Record<string, unknown>;
+  usage?: CompletionUsage;
+  incompleteUsage?: boolean;
+  cost?: number;
   finishReason?: string;
   /** 原生協定的原始輸出（見 ChatMessage.native）。 */
   native?: ProtocolNative;
@@ -977,6 +982,7 @@ function parseOutput(stdout: string, stderr?: string, exitCode?: number | null):
   let message = '';
   let tokens: unknown;
   let usage: ReturnType<typeof normalizeJobUsage>;
+  let usageIncomplete = false;
   let cost: unknown;
   let sessionPath: string | undefined;
   let finishReason: string | undefined;
@@ -1022,6 +1028,7 @@ function parseOutput(stdout: string, stderr?: string, exitCode?: number | null):
       }
       tokens = parsed.tokens;
       usage = parsed.usage ?? usage;
+      usageIncomplete = parsed.usage_incomplete === true;
       cost = parsed.cost;
       sessionPath = typeof parsed.session_path === 'string' ? parsed.session_path : undefined;
       finishReason = typeof parsed.finish_reason === 'string' ? parsed.finish_reason : undefined;
@@ -1029,7 +1036,7 @@ function parseOutput(stdout: string, stderr?: string, exitCode?: number | null):
   }
 
   const tools = Array.from(toolsMap.values());
-  if (!message && !sessionId && !tokens && !usage && cost === undefined && tools.length === 0) {
+  if (!message && !sessionId && !tokens && !usage && !usageIncomplete && cost === undefined && tools.length === 0) {
     return error ? { message: '', error } : null;
   }
   return {
@@ -1037,6 +1044,7 @@ function parseOutput(stdout: string, stderr?: string, exitCode?: number | null):
     ...(error ? { error } : {}),
     tokens,
     ...(usage ? { usage } : {}),
+    ...(usageIncomplete ? { usage_incomplete: true } : {}),
     cost,
     session_id: sessionId,
     sessionPath,
@@ -1336,49 +1344,44 @@ function extractReasoning(delta: Record<string, unknown>): string {
   return '';
 }
 
-/** 與既有 tokens/cost 分開累計，壞 chunk 不得污染有效 job 用量。 */
+function isTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
 function normalizeJobUsage(raw: CompletionUsage) {
-  const valid = (value: unknown): value is number =>
-    typeof value === 'number' && Number.isFinite(value) && value >= 0;
   const input = raw.prompt_tokens ?? raw.input_tokens;
   const output = raw.completion_tokens ?? raw.output_tokens;
-  if (!valid(input) || !valid(output)) return undefined;
+  if (!isTokenCount(input) || !isTokenCount(output)) return undefined;
   const cached = raw.prompt_tokens_details?.cached_tokens;
   const reasoning = raw.completion_tokens_details?.reasoning_tokens ?? raw.reasoning_tokens;
   return {
     // OpenAI prompt_tokens 已含快取，不能再加 cached。
     input_tokens: input,
     output_tokens: output,
-    ...(valid(cached) ? { cached_input_tokens: cached } : {}),
-    ...(valid(reasoning) ? { reasoning_output_tokens: reasoning } : {}),
-    ...([cached, reasoning].some((value) => value !== undefined && !valid(value)) ? { incomplete: true } : {}),
+    ...(isTokenCount(cached) ? { cached_input_tokens: cached } : {}),
+    ...(isTokenCount(reasoning) ? { reasoning_output_tokens: reasoning } : {}),
+    ...([cached, reasoning].some((value) => value != null && !isTokenCount(value)) ? { incomplete: true } : {}),
     source: 'direct-api usage',
   };
 }
 
-function normalizeTokens(usage: CompletionUsage | undefined): Record<string, number> | undefined {
-  if (!usage) return undefined;
-  const tokens: Record<string, number> = {};
-  const input = usage.prompt_tokens ?? usage.input_tokens;
-  const output = usage.completion_tokens ?? usage.output_tokens;
-  const reasoning = usage.completion_tokens_details?.reasoning_tokens ?? usage.reasoning_tokens;
-  const cached = usage.prompt_tokens_details?.cached_tokens;
-  if (typeof input === 'number') tokens.input = input;
-  if (typeof output === 'number') tokens.output = output;
-  if (typeof reasoning === 'number') tokens.reasoning = reasoning;
-  if (typeof cached === 'number') tokens.cached = cached;
+function normalizeTokens(
+  usage: CompletionUsage,
+  normalized: NonNullable<ReturnType<typeof normalizeJobUsage>>
+): Record<string, number> {
+  const tokens: Record<string, number> = { input: normalized.input_tokens, output: normalized.output_tokens };
+  if (normalized.reasoning_output_tokens !== undefined) tokens.reasoning = normalized.reasoning_output_tokens;
+  if (normalized.cached_input_tokens !== undefined) tokens.cached = normalized.cached_input_tokens;
   const cacheCreation = usage.prompt_tokens_details?.cache_creation_tokens;
-  if (typeof cacheCreation === 'number') tokens.cache_creation = cacheCreation;
-  if (typeof usage.total_tokens === 'number') tokens.total = usage.total_tokens;
-  return Object.keys(tokens).length > 0 ? tokens : undefined;
+  if (isTokenCount(cacheCreation)) tokens.cache_creation = cacheCreation;
+  if (isTokenCount(usage.total_tokens)) tokens.total = usage.total_tokens;
+  return tokens;
 }
 
-function normalizeCost(value: unknown): unknown {
+function normalizeCost(value: unknown): number | undefined {
   const record = asRecord(value);
   const direct = record?.cost ?? record?.total_cost ?? record?.totalCost;
-  if (typeof direct === 'number' || typeof direct === 'string') return direct;
-  if (direct && typeof direct === 'object') return direct;
-  return undefined;
+  return isTokenCount(direct) ? direct : undefined;
 }
 
 function redactApiKey(text: string, apiKey: string): string {
@@ -1390,78 +1393,42 @@ function createEmptyTurn(): CompletionTurn {
     assistantText: '',
     reasoningText: '',
     toolCallAccumulators: [],
+    toolCallSlotsByWireIndex: new Map(),
     toolCalls: [],
   };
 }
 
-function mergeCompletionUsage(
-  current: CompletionUsage | undefined,
-  next: CompletionUsage
-): CompletionUsage {
-  const merged: CompletionUsage = { ...(current || {}) };
-  const numericKeys = [
-    'prompt_tokens',
-    'completion_tokens',
-    'total_tokens',
-    'input_tokens',
-    'output_tokens',
-    'reasoning_tokens',
-  ] as const;
-  for (const key of numericKeys) {
-    const value = next[key];
-    if (typeof value === 'number') {
-      const existing = typeof merged[key] === 'number' ? merged[key] as number : 0;
-      merged[key] = existing + value;
-    }
-  }
-  const cached = next.prompt_tokens_details?.cached_tokens;
-  if (typeof cached === 'number') {
-    const existing = merged.prompt_tokens_details?.cached_tokens || 0;
-    merged.prompt_tokens_details = {
-      ...(merged.prompt_tokens_details || {}),
-      cached_tokens: existing + cached,
-    };
-  }
-  // Anthropic 的快取寫入（cache_creation_input_tokens），由 direct-api-protocols 正規化而來。
-  const cacheCreation = next.prompt_tokens_details?.cache_creation_tokens;
-  if (typeof cacheCreation === 'number') {
-    const existing = merged.prompt_tokens_details?.cache_creation_tokens || 0;
-    merged.prompt_tokens_details = {
-      ...(merged.prompt_tokens_details || {}),
-      cache_creation_tokens: existing + cacheCreation,
-    };
-  }
-  const reasoning = next.completion_tokens_details?.reasoning_tokens;
-  if (typeof reasoning === 'number') {
-    const existing = merged.completion_tokens_details?.reasoning_tokens || 0;
-    merged.completion_tokens_details = {
-      ...(merged.completion_tokens_details || {}),
-      reasoning_tokens: existing + reasoning,
-    };
-  }
-  return merged;
-}
-
-function mergeCost(current: unknown, next: unknown): unknown {
+function mergeCost(current: number | undefined, next: number | undefined): number | undefined {
   if (next === undefined) return current;
-  if (typeof current === 'number' && typeof next === 'number') return current + next;
-  return next;
+  return (current ?? 0) + next;
 }
 
-function captureUsageAndCost(parsed: any, state: StreamState): void {
-  // OpenAI 的一般串流 chunk 會帶 usage:null；只有實際回報才參與累計。
+function captureUsageAndCost(parsed: any, turn: CompletionTurn): void {
+  // 同一請求的串流用量可能是累計值。usage:null 是 OpenAI 的佔位值。
   if (parsed?.usage !== undefined && parsed?.usage !== null) {
-    const next = parsed.usage && normalizeJobUsage(parsed.usage);
-    if (!next) state.incompleteUsage = true;
-    // 同一個回應的 usage 取最後一筆、不加總：有些供應商每個 chunk 都送「累計」值，加總會倍增。
-    // 一次 run 只發一個請求，所以最後一筆就是整個 job 的用量。（既有的 tokens 欄位仍逐筆加總，未改。）
-    else state.jobUsage = next;
+    const usage = asRecord(parsed.usage) as CompletionUsage | null;
+    if (!usage || !normalizeJobUsage(usage)) {
+      turn.incompleteUsage = true;
+      // 壞 chunk 的用量與成本都不覆蓋先前有效回報。
+      return;
+    }
+    turn.usage = usage;
+    turn.incompleteUsage = false;
   }
-  if (parsed?.usage) {
-    state.usage = mergeCompletionUsage(state.usage, parsed.usage as CompletionUsage);
-    state.cost = mergeCost(state.cost, normalizeCost(parsed.usage));
+  const topLevelCost = normalizeCost(parsed);
+  const usageCost = normalizeCost(parsed?.usage);
+  const cost = topLevelCost === 0 ? usageCost ?? topLevelCost : topLevelCost ?? usageCost;
+  if (topLevelCost === 0 && cost === 0 && (turn.cost ?? 0) > 0) return;
+  if (cost !== undefined) turn.cost = cost;
+}
+
+function hasCompleteToolArguments(args: string | undefined): boolean {
+  if (!args) return false;
+  try {
+    return asRecord(JSON.parse(args)) !== null;
+  } catch {
+    return false;
   }
-  state.cost = mergeCost(state.cost, normalizeCost(parsed));
 }
 
 function appendToolCallDeltas(delta: Record<string, unknown>, turn: CompletionTurn): void {
@@ -1469,53 +1436,69 @@ function appendToolCallDeltas(delta: Record<string, unknown>, turn: CompletionTu
   for (const rawCall of delta.tool_calls) {
     const call = asRecord(rawCall);
     if (!call) continue;
+    const fn = asRecord(call.function);
+    const id = typeof call.id === 'string' && call.id ? call.id : undefined;
+    const name = typeof fn?.name === 'string' && fn.name ? fn.name : undefined;
+    const args = typeof fn?.arguments === 'string' ? fn.arguments : '';
     // OpenAI 規格每個 delta 都帶 index；Gemini 的 OpenAI-compatible 端點不帶（整筆 call 一個 chunk）。
     // 沒有 index 時：id 對得上既有的就併進去（同一 call 分多個 chunk）；沒有 id 的續段併進最後一筆；
     // 只用「目前長度」當 index 會把同一個 call 的續段拆成兩筆、參數被切斷（2026-11-20 稽核指出）。
-    let index: number;
-    if (typeof call.index === 'number') {
-      index = call.index;
-    } else if (typeof call.id === 'string') {
-      const existing = turn.toolCallAccumulators.findIndex((acc) => acc?.id === call.id);
-      index = existing >= 0 ? existing : turn.toolCallAccumulators.length;
+    const calls = turn.toolCallAccumulators;
+    const existing = id ? calls.findIndex((acc) => acc.id === id) : -1;
+    const wireIndex = typeof call.index === 'number' && Number.isInteger(call.index) && call.index >= 0
+      ? call.index
+      : undefined;
+    let slot: number;
+    if (wireIndex !== undefined) {
+      slot = turn.toolCallSlotsByWireIndex.get(wireIndex) ?? calls.length;
+      const previous = calls[slot];
+      const previousName = previous?.function?.name;
+      const startsNewByName = (!id || id !== previous?.id) && name && previousName &&
+        (name !== previousName || (args && hasCompleteToolArguments(previous.function?.arguments)));
+      if (existing >= 0 && existing !== slot) slot = existing;
+      else if (startsNewByName || (id && previous?.id && id !== previous.id)) slot = calls.length;
+      // wire index 與槽位分開，重用 wire index 時，續段跟著最新辨認出的呼叫。
+      turn.toolCallSlotsByWireIndex.set(wireIndex, slot);
+    } else if (id) {
+      slot = existing >= 0 ? existing : calls.length;
     } else {
       // 沒有 id 也沒有 index：帶了函式名稱、而最後一筆已經有名稱，就是新的一筆；否則是續段。
-      const last = turn.toolCallAccumulators[turn.toolCallAccumulators.length - 1];
-      const startsNew = !last || (typeof asRecord(call.function)?.name === 'string' && Boolean(last.function?.name));
-      index = startsNew ? turn.toolCallAccumulators.length : turn.toolCallAccumulators.length - 1;
+      const last = calls[calls.length - 1];
+      const startsNew = !last || (name && last.function?.name);
+      slot = startsNew ? calls.length : calls.length - 1;
     }
-    const accumulator = turn.toolCallAccumulators[index] || {};
-    if (typeof call.id === 'string') accumulator.id = call.id;
-    if (typeof call.type === 'string') accumulator.type = call.type;
+    const accumulator = calls[slot] || {};
+    accumulator.wireIndex ??= wireIndex;
+    if (id) accumulator.id = id;
+    if (typeof call.type === 'string' && call.type) accumulator.type = call.type;
     const extra = asRecord(call.extra_content);
     if (extra) accumulator.extra_content = mergeExtraContent(accumulator.extra_content, extra);
-    const fn = asRecord(call.function);
     if (fn) {
       accumulator.function = accumulator.function || {};
-      if (typeof fn.name === 'string') accumulator.function.name = fn.name;
-      if (typeof fn.arguments === 'string') {
-        accumulator.function.arguments = `${accumulator.function.arguments || ''}${fn.arguments}`;
-      }
+      if (name) accumulator.function.name = name;
+      if (args) accumulator.function.arguments = `${accumulator.function.arguments || ''}${args}`;
     }
-    turn.toolCallAccumulators[index] = accumulator;
+    calls[slot] = accumulator;
   }
 }
 
-/** 合併兩層：`extra_content.google` 之類的命名空間各自合併，後到的同名欄位才覆蓋，不整個蓋掉。 */
+/** 遞迴合併供應商的延伸欄位，略過空值與原型相關鍵。 */
 function mergeExtraContent(
   current: Record<string, unknown> | undefined,
   next: Record<string, unknown>
-): Record<string, unknown> {
+): Record<string, unknown> | undefined {
   const merged: Record<string, unknown> = { ...(current || {}) };
   for (const [key, value] of Object.entries(next)) {
-    const before = asRecord(merged[key]);
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+    if (value === null || value === undefined || value === '') continue;
     const after = asRecord(value);
-    merged[key] = before && after ? { ...before, ...after } : value;
+    const mergedValue = after ? mergeExtraContent(asRecord(merged[key]) ?? undefined, after) : value;
+    if (mergedValue !== undefined) merged[key] = mergedValue;
   }
-  return merged;
+  return Object.keys(merged).length ? merged : undefined;
 }
 
-function normalizeToolCalls(value: unknown): ChatToolCall[] {
+function normalizeToolCalls(value: unknown, { extraContentAlreadyMerged = false } = {}): ChatToolCall[] {
   if (!Array.isArray(value)) return [];
   const calls: ChatToolCall[] = [];
   for (const rawCall of value) {
@@ -1523,9 +1506,10 @@ function normalizeToolCalls(value: unknown): ChatToolCall[] {
     const fn = asRecord(call?.function);
     const name = typeof fn?.name === 'string' ? fn.name : '';
     if (!call || !name) continue;
-    const extra = asRecord(call.extra_content);
+    const rawExtra = asRecord(call.extra_content);
+    const extra = rawExtra && (extraContentAlreadyMerged ? rawExtra : mergeExtraContent(undefined, rawExtra));
     calls.push({
-      id: typeof call.id === 'string' ? call.id : `call_${calls.length}`,
+      id: typeof call.id === 'string' && call.id ? call.id : `call_${calls.length}`,
       type: 'function',
       function: {
         name,
@@ -1568,8 +1552,11 @@ function stripXmlToolCallText(text: string): string {
 
 function finalizeStreamToolCalls(turn: CompletionTurn): void {
   if (turn.toolCalls.length > 0) return;
+  const ordered = [...turn.toolCallAccumulators].sort(
+    (a, b) => (a.wireIndex ?? Infinity) - (b.wireIndex ?? Infinity)
+  );
   turn.toolCalls = normalizeToolCalls(
-    turn.toolCallAccumulators.map((call, index) => ({
+    ordered.map((call, index) => ({
       id: call.id || `call_${index}`,
       type: call.type || 'function',
       function: {
@@ -1577,16 +1564,19 @@ function finalizeStreamToolCalls(turn: CompletionTurn): void {
         arguments: call.function?.arguments || '',
       },
       ...(call.extra_content ? { extra_content: call.extra_content } : {}),
-    }))
+    })),
+    { extraContentAlreadyMerged: true }
   );
 }
 
 function handleCompletionChunk(parsed: any, state: StreamState, turn: CompletionTurn, io: DirectRunIO): void {
-  captureUsageAndCost(parsed, state);
+  captureUsageAndCost(parsed, turn);
   if (!Array.isArray(parsed?.choices)) return;
   for (const choice of parsed.choices) {
     const delta = asRecord(choice?.delta);
     if (delta) {
+      const extra = asRecord(delta.extra_content);
+      if (extra) turn.extra_content = mergeExtraContent(turn.extra_content, extra);
       const textDelta = extractText(delta.content);
       if (textDelta) {
         state.assistantText += textDelta;
@@ -1609,7 +1599,7 @@ function handleCompletionChunk(parsed: any, state: StreamState, turn: Completion
       }
       appendToolCallDeltas(delta, turn);
     }
-    if (typeof choice?.finish_reason === 'string') {
+    if (typeof choice?.finish_reason === 'string' && choice.finish_reason) {
       state.finishReason = choice.finish_reason;
       turn.finishReason = choice.finish_reason;
     }
@@ -1617,12 +1607,14 @@ function handleCompletionChunk(parsed: any, state: StreamState, turn: Completion
 }
 
 function handleCompletionObject(parsed: any, state: StreamState, turn: CompletionTurn, io: DirectRunIO): void {
-  captureUsageAndCost(parsed, state);
+  captureUsageAndCost(parsed, turn);
   if (!Array.isArray(parsed?.choices)) return;
   const textParts: string[] = [];
   for (const choice of parsed.choices) {
     const message = asRecord(choice?.message);
     if (message) {
+      const extra = asRecord(message.extra_content);
+      if (extra) turn.extra_content = mergeExtraContent(turn.extra_content, extra);
       const text = extractText(message.content);
       if (text) textParts.push(text);
       const reasoning = extractReasoning(message);
@@ -1632,7 +1624,7 @@ function handleCompletionObject(parsed: any, state: StreamState, turn: Completio
       }
       turn.toolCalls.push(...normalizeToolCalls(message.tool_calls));
     }
-    if (typeof choice?.finish_reason === 'string') {
+    if (typeof choice?.finish_reason === 'string' && choice.finish_reason) {
       state.finishReason = choice.finish_reason;
       turn.finishReason = choice.finish_reason;
     }
@@ -1713,6 +1705,7 @@ function buildAssistantMessage(turn: CompletionTurn, replayReasoning: boolean): 
   if (turn.toolCalls.length > 0) {
     message.tool_calls = turn.toolCalls;
   }
+  if (turn.extra_content) message.extra_content = turn.extra_content;
   /*
     用 `turn.reasoningText`（這一輪）而不是 `state.reasoningText`（整次 run 的累積）——
     後者會讓第二輪把第一輪的推理再附一次，越滾越長。
@@ -1903,25 +1896,32 @@ async function requestCompletion(params: {
   }
 
   const response = await fetchWithRetry(params, requestBody);
-  return consumeResponse(response, params.state, params.io);
+  const turn = await consumeResponse(response, params.state, params.io);
+  if (turn.incompleteUsage) params.state.incompleteUsage = true;
+  addRequestUsage(params.state, turn.usage);
+  params.state.cost = mergeCost(params.state.cost, turn.cost);
+  return turn;
 }
 
 /**
  * 把一個請求的最終用量併進整次 run。
  *
- * 原生協定的轉接層已經把串流裡的「累計值」收斂成**每個請求一筆**最終用量，
+ * 各協定都已把串流裡的「累計值」收斂成**每個請求一筆**最終用量，
  * 所以這裡跨請求（工具迴圈的每一輪）相加才是整個 job 的用量，不會重複計算。
  */
-function addRequestUsage(state: StreamState, usage: ProtocolUsage | undefined): void {
+function addRequestUsage(state: StreamState, usage: CompletionUsage | undefined): void {
   if (!usage) {
     state.incompleteUsage = true;
     return;
   }
-  state.usage = mergeCompletionUsage(state.usage, usage as CompletionUsage);
-  const next = normalizeJobUsage(usage as CompletionUsage);
+  const next = normalizeJobUsage(usage);
   if (!next) {
     state.incompleteUsage = true;
     return;
+  }
+  const totals = state.tokens ??= {};
+  for (const [key, value] of Object.entries(normalizeTokens(usage, next))) {
+    totals[key] = (totals[key] ?? 0) + value;
   }
   const prev = state.jobUsage;
   if (!prev) {
@@ -2100,7 +2100,7 @@ async function runDirect(cmd: BuiltCommand, io: DirectRunIO): Promise<void> {
     io.stderr(`[direct-api] Reached maximum tool/API calls (${maxToolLoops}).\n`);
   }
 
-  const tokens = normalizeTokens(state.usage);
+  const tokens = state.tokens;
   saveSession({
     sessionPath,
     existing,
@@ -2119,6 +2119,7 @@ async function runDirect(cmd: BuiltCommand, io: DirectRunIO): Promise<void> {
     model: config.modelName,
     result: state.assistantText,
     ...(state.jobUsage ? { usage: { ...state.jobUsage, ...(state.incompleteUsage ? { incomplete: true } : {}) } } : {}),
+    ...(!state.jobUsage && state.incompleteUsage ? { usage_incomplete: true } : {}),
     tokens,
     cost: state.cost,
     finish_reason: state.finishReason,

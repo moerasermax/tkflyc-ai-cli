@@ -192,13 +192,14 @@ try {
     } finally { globalThis.fetch = oldFetch; }
   });
   await check('F3 agy ProcessService CLI stub 實際收到身分鎖開頭 prompt', async () => withEnv(baseEnv, async () => {
-    const agent = getAgent('antigravity'); const saved = { spawnMode: agent.spawnMode, win32SpawnMode: agent.win32SpawnMode, win32DirectExec: agent.win32DirectExec, buildCommand: agent.buildCommand };
+    const agent = getAgent('antigravity'); const saved = { spawnMode: agent.spawnMode, win32SpawnMode: agent.win32SpawnMode, resolveWin32SpawnMode: agent.resolveWin32SpawnMode, win32DirectExec: agent.win32DirectExec, buildCommand: agent.buildCommand };
     // .cmd 的 %* 轉送會拆開多行 prompt；用 Node fixture 直接收 argv，仍由正式 agy builder 組參數。
-    agent.spawnMode = 'pipe'; agent.win32SpawnMode = 'pipe'; agent.win32DirectExec = true;
+    agent.spawnMode = 'pipe'; agent.win32SpawnMode = 'pipe'; agent.resolveWin32SpawnMode = async () => 'pipe'; agent.win32DirectExec = true;
     agent.buildCommand = input => { const built = saved.buildCommand(input); return { ...built, cliPath: process.execPath, args: [js, ...built.args] }; };
     try {
       const service = new ProcessService({ cliPaths: paths }); const start = await service.startProcess({ workFolder: temp, model: 'agy', prompt: '實送測試', session_id: 'resume-agy' });
-      const [result] = await service.waitForProcesses([start.pid], 5, true); assert.equal(result.status, 'completed');
+      // win32 的 agy pipe 走 durable runner（launcher＋包容），5 秒不夠；POSIX 仍是行程內 legacy。
+      const [result] = await service.waitForProcesses([start.pid], 30, true); assert.equal(result.status, 'completed');
       const calls = (await readFile(trace, 'utf8')).trim().split('\n').map(JSON.parse); const args = calls.at(-1).args;
       assert.equal(args[args.indexOf('-p') + 1], `${WORKER_CONTEXT}\n\n實送測試`); assert(args.includes('resume-agy'));
     } finally { Object.assign(agent, saved); }

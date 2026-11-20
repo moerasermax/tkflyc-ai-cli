@@ -37,8 +37,19 @@ export interface BuiltCommand {
   /** 檔案 prompt 的建置暫存；持久化 store 接管到 job 目錄後解除 fallback 清理。 */
   temporaryPromptFile?: string;
   releaseTemporaryPrompt?: () => void;
+  /**
+   * 建置時建立、只放這次 prompt 的私有目錄（agy 長 prompt：`--add-dir` 給的就是它）。
+   * 持久化 store 會把整個目錄搬進 job 目錄，並把 args 裡出現的舊路徑全部換成新路徑，
+   * 之後隨 job 目錄回收。
+   */
+  temporaryPromptDir?: string;
   /** direct-api 專用：OpenAI-compatible API 連線資訊。 */
   directApi?: DirectApiCommandConfig;
+  /**
+   * core 在啟動前以 resolveSpawnMode() 決定的實際 spawn 模式。
+   * 未填（舊呼叫端直接呼叫 JobStore.start）時，store 退回 agent 的靜態設定。
+   */
+  spawnMode?: SpawnMode;
 }
 
 /** buildCommand 的輸入。 */
@@ -235,6 +246,25 @@ export interface AgentDefinition {
    * 用於「只有 win32 才需要 PTY」這類情境（例如 agy）。
    */
   win32SpawnMode?: SpawnMode;
+
+  /**
+   * Windows 上依執行期條件（例如 CLI 版本）決定 spawn 模式。有定義時優先於
+   * win32SpawnMode；win32SpawnMode 仍是它失敗時的保守退路。
+   * 實作必須自行逾時與快取：core 在每次 run 回 PID 之前 await 它。
+   */
+  resolveWin32SpawnMode?(cliPath: string): Promise<SpawnMode>;
+
+  /**
+   * durable job 逐行解析時，非 JSON 的行預設被略過。若這種行帶有呼叫端必須看到的訊號
+   * （例如 agy 續接失敗的 `warning: conversation "…" not found`），回傳要保留的文字；
+   * 不相干的行回 null。core 會把結果累積進 agentOutput.warnings（有上限）。
+   */
+  durableWarning?(line: string): string | null;
+
+  /**
+   * 這筆警告在上限滿了時仍要保留（例如 agy 的續接失敗）。core 會擠掉最後一筆非優先的警告。
+   */
+  priorityWarning?(warning: string): boolean;
 
   /** 失敗時保留 raw stdout/stderr（不靠 parser）。 */
   preserveRawOnFailure?: boolean;

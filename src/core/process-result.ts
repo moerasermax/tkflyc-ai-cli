@@ -40,7 +40,8 @@ function hasMeaningfulParsedOutput(agentOutput: any): boolean {
     if (value === undefined || value === null) {
       return false;
     }
-    if (key === 'session_id' || key === 'usage') {
+    // warnings 也不構成回覆：只有警告（沒有 message／error）時，失敗原因在 raw 輸出裡，不可被遮住。
+    if (key === 'session_id' || key === 'usage' || key === 'warnings') {
       return false;
     }
     if (key === 'tools') {
@@ -104,8 +105,14 @@ export function buildProcessResult(
       Object.assign(response, _rawTail('stdout', context.stdout), _rawTail('stderr', context.stderr));
     }
     // 用量不構成回覆內容；保留原始錯誤輸出的同時，仍在固定位置回傳用量。
-    if (!response.agentOutput && shapedAgentOutput?.usage) {
-      response.agentOutput = { usage: shapedAgentOutput.usage };
+    if (!response.agentOutput && (shapedAgentOutput?.usage || shapedAgentOutput?.warnings)) {
+      // 有 warnings 時 agentOutput 以前就是整份成形（含 session_id）；改走 raw 退路後仍保留它，
+      // 不讓讀 agentOutput.session_id 的呼叫端在「只有警告」時拿不到。只有 usage 的舊形狀不變。
+      response.agentOutput = {
+        ...(shapedAgentOutput.warnings && shapedAgentOutput.session_id ? { session_id: shapedAgentOutput.session_id } : {}),
+        ...(shapedAgentOutput.usage ? { usage: shapedAgentOutput.usage } : {}),
+        ...(shapedAgentOutput.warnings ? { warnings: shapedAgentOutput.warnings } : {}),
+      };
     }
   }
   return response;

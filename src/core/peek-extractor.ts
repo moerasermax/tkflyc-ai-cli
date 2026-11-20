@@ -12,6 +12,26 @@ import { StringDecoder } from 'node:string_decoder';
 
 const PEEK_TOOL_SUMMARY_MAX_LENGTH = 200;
 
+/**
+ * agy 的 `--output-format json` 是一整行 envelope（管線模式下長回覆不再被 PTY 切行）。
+ * peek 只要本文：解析得出 `response` 就只取它，並限制單筆長度，超過加截斷標記。
+ * 解析不出（text 格式、半行）就照原文、同樣限長。
+ */
+export const AGY_PEEK_TEXT_MAX_LENGTH = 2000;
+export function agyPeekText(text: string): string {
+  let body = text;
+  if (text.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed?.response === 'string') body = parsed.response.trim();
+    } catch { /* 不是完整 JSON：照原文。 */ }
+  }
+  if (body.length <= AGY_PEEK_TEXT_MAX_LENGTH) return body;
+  let head = body.slice(0, AGY_PEEK_TEXT_MAX_LENGTH);
+  if (/[\uD800-\uDBFF]$/.test(head)) head = head.slice(0, -1); // 不留半個代理對
+  return `${head}…[truncated: ${body.length} chars]`;
+}
+
 function oneLine(value: unknown): string {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
@@ -296,7 +316,7 @@ class AgentEventDecoder {
     const events: any[] = [];
     for (const line of lines) {
       if (this.agent === 'antigravity') {
-        const text = stripAnsi(line).trim();
+        const text = agyPeekText(stripAnsi(line).trim());
         if (text) events.push({ type: 'text', text });
       } else if (line.trim()) {
         try {

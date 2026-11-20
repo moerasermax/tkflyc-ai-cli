@@ -1,7 +1,16 @@
 /**
- * ConPTY 子程序執行器。供需要「真實終端機」的 agent 使用（目前 agy/win32）。
+ * ConPTY 子程序執行器。供需要「真實終端機」的 agent 使用（目前只剩舊版／版本不明的 agy/win32）。
  *
- * agy.exe 在 stdout 不是 TTY 時靜默不輸出。透過 @homebridge/node-pty-prebuilt-multiarch
+ * 舊版 agy.exe 在 stdout 不是 TTY 時靜默不輸出。2026-11-20 實測 agy 1.5.13 非 TTY 正常輸出，
+ * 所以 ≥ 1.5.13 改走一般管線（antigravity.ts 的 resolveWin32SpawnMode）；這裡保留給較舊
+ * 或量不到版本的 agy 當保守退路。
+ *
+ * ★ PTY 不適合長的單行輸出：寬度 200 欄（下方 cols），ConPTY 會在第 200 格插入 `\r\n`，
+ *   而且斷點處的字元會重複一次（實測 `functio\r\non.name`、`cal\r\nll_2`）。agy 的
+ *   `--output-format json` 是一整行，長回覆會被切成無法 JSON.parse 的碎片。斷點重複字元
+ *   使「把換行接回去」的修復不可靠，所以不在這層或 parser 修，而是讓新版離開 PTY。
+ *
+ * 透過 @homebridge/node-pty-prebuilt-multiarch
  * 配置 ConPTY，並把 pty handle 包成 ChildProcess-like 介面，讓 process-service
  * 的其餘程式碼（list/wait/peek/kill）對 PTY 完全無感。
  *

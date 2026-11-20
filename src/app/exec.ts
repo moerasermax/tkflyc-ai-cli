@@ -31,7 +31,7 @@
 
 import { spawn } from 'node:child_process';
 import { buildWorkerEnv, assertCanStartJob } from '../core/worker-env.js';
-import { buildCliCommand } from '../core/command-builder.js';
+import { buildCliCommand, discardTemporaryPrompt, handOffTemporaryPrompt } from '../core/command-builder.js';
 import { inspectCliBinary } from '../core/binary-resolver.js';
 import { listAgents, selectAgentForModel } from '../agents/registry.js';
 import { resolveModelAlias } from '../models/catalog.js';
@@ -285,8 +285,17 @@ export async function runExec(): Promise<number> {
   }
 
   const built = plan.built;
+  /*
+    agy 長 prompt 的私有目錄：vendor 確定沒啟動（找不到 CLI、spawn 失敗）或已經 close，才由這裡刪。
+    不用 process 'exit'：呼叫端提早關 stdout（EPIPE）時本行程會先退出，vendor 卻可能還沒讀檔。
+    spawn 成功後擁有者改成 vendor 子行程——還要讀檔的是它，不是 exec；exec 異常退出時
+    vendor 可能仍在跑，GC 核對它還在就保留。
+  */
+  const promptDir = built.temporaryPromptDir;
+  const discardPrompt = () => discardTemporaryPrompt({ temporaryPromptDir: promptDir });
 
   if (built.cliPath.trim() === '') {
+    discardPrompt();
     /*
       解析不到二進位檔。**在 started 之前**就回報——送出 started 再失敗，
       呼叫端會以為程序真的起來過。
@@ -336,6 +345,7 @@ export async function runExec(): Promise<number> {
       windowsHide: true,
     });
   } catch (error) {
+    discardPrompt();
     writeFrame({
       v: 1,
       type: 'terminal',
@@ -346,6 +356,7 @@ export async function runExec(): Promise<number> {
     });
     return 2;
   }
+  if (promptDir && child.pid) handOffTemporaryPrompt({ temporaryPromptDir: promptDir }, child.pid);
 
   let seq = 0;
   let stdoutEnded = false;
@@ -384,6 +395,7 @@ export async function runExec(): Promise<number> {
 
   const code = await new Promise<number>((resolve) => {
     child.on('error', (error) => {
+      discardPrompt();
       spawnError = error.message;
       stdoutEnded = true;
       stderrEnded = true;
@@ -406,6 +418,7 @@ export async function runExec(): Promise<number> {
       finish(resolve);
     });
     child.on('close', (childCode, childSignal) => {
+      discardPrompt();
       exitCode = childCode;
       signal = childSignal;
       closed = true;

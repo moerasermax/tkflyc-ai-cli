@@ -3,13 +3,16 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, cpSync, lstatSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, parse, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
 import type { AgentId, BuiltCommand } from '../agents/types.js';
 import { getAgent } from '../agents/registry.js';
 import { grokResultFailed, collectGrokPromptFiles } from '../agents/grok.js';
+import { collectAgyPromptDirs } from '../agents/antigravity.js';
+import { revokePromptOwners } from './prompt-owner.js';
+import { truncateWarning, WARNING_MAX_COUNT } from './warning-text.js';
 import { assertCanStartJob, buildWorkerEnv, isNestedWorker } from './worker-env.js';
 import { jobStateDir, lookupIdentities, lookupPrincipalIdentities, taskSummary, shortText, type ProcessIdentity, type IdentityLookup, type LiveJob } from './live-jobs.js';
 import { buildLiveness, emptyOutputStats, listProcessTiming, elapsedSeconds, type ProcessOutputStats } from './liveness.js';
@@ -74,6 +77,44 @@ export function atomicJson(path: string, value: unknown): void {
     }
   }
   finally { rmSync(temp, { force: true }); }
+}
+/**
+ * 把 agy 的私有 prompt 目錄搬進 job 目錄。Windows 上防毒或索引器開著檔案時 rename 會丟
+ * EPERM／EBUSY／EACCES：比照 atomicJson 短重試；仍失敗或跨磁碟（EXDEV）就複製。
+ * 複製成功後刪舊目錄失敗不可讓 run 失敗——舊目錄在 agy-prompts 底下，交給 TTL GC。
+ */
+export function movePromptDirectory(source: string, target: string, rename: (from: string, to: string) => void = renameSync,
+  copy: (from: string, to: string) => void = (from, to) => cpSync(from, to, { recursive: true }),
+  remove: (path: string) => void = (path) => rmSync(path, { recursive: true, force: true })): void {
+  const deadline = performance.now() + 250;
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; ; attempt++) {
+    try { rename(source, target); return; }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? '';
+      const remaining = deadline - performance.now();
+      if (code === 'EXDEV' || !['EPERM', 'EBUSY', 'EACCES'].includes(code)) { if (code !== 'EXDEV') throw error; break; }
+      if (attempt >= 7 || remaining <= 0) break;
+      Atomics.wait(sleeper, 0, 0, Math.min(10 * 2 ** attempt, 50, remaining));
+    }
+  }
+  // 先複製到 job 內的暫存目錄、成功後再改名發布；中途失敗清掉部分副本，不留半份 prompt-dir。
+  const partial = `${target}.partial-${randomUUID()}`;
+  try { copy(source, partial); renameSync(partial, target); }
+  catch (error) { rmSync(partial, { recursive: true, force: true }); throw error; }
+  // 先讓來源的擁有者失效再刪：刪不掉的殘骸在 TTL 後變成無擁有者、可回收，
+  // 不會因為標記上的派工行程還活著而一直留著（Windows runner 路徑沒有移交）。
+  revokePromptOwners(source);
+  try { remove(source); } catch { /* 交給 collectAgyPromptDirs 的 TTL。 */ }
+}
+/** 已結束 job 的容量：job 目錄第一層檔案，加上 prompt-dir 這類子目錄裡的檔案（lstat，不跟隨 symlink）。 */
+export function directorySize(path: string): number {
+  let total = 0;
+  for (const name of readdirSync(path)) {
+    const stat = lstatSync(join(path, name));
+    total += stat.isDirectory() ? directorySize(join(path, name)) : stat.size;
+  }
+  return total;
 }
 /** Whole-job termination can kill this runner before its next instruction. */
 export function recordJobFailure(directory: string, message: string): void {
@@ -246,6 +287,7 @@ export function removeJobDirectory(directory: string): boolean {
 /** 整個 store 共用容量上限，跨主導者回收只處理已結束／已確認遺失的 job。 */
 export async function collectStoreFiles(dir: string, now = Date.now(), lookup: IdentityLookup = lookupIdentities): Promise<string[]> {
   collectGrokPromptFiles();
+  await collectAgyPromptDirs(now, lookup);
   const metas = readJobMetas(dir);
   const unidentified = metas.filter(meta => !readJobExit(join(dir, 'jobs', meta.jobId)));
   const ids = await lookup(unidentified.flatMap(meta => [meta.runner.pid, ...(meta.worker ? [meta.worker.pid] : [])]).filter(mayBeAlive));
@@ -257,9 +299,8 @@ export async function collectStoreFiles(dir: string, now = Date.now(), lookup: I
     try {
       // 沉默很久的 job 可能剛剛才死；不能用舊 log mtime 把 lost 輸出立刻回收。
       if (!exit && !lostTime(directory)) atomicJson(join(directory, 'lost.json'), { endTime: new Date(now).toISOString() });
-      const files = readdirSync(directory).map(f => statSync(join(directory, f)));
       const end = Date.parse(exit?.endTime ?? lostTime(directory)!);
-      return [{ meta, directory, end, size: files.reduce((sum, f) => sum + f.size, 0) }];
+      return [{ meta, directory, end, size: directorySize(directory) }];
     } catch { return []; }
   }).sort((a, b) => a.end - b.end);
   let count = finished.length, size = finished.reduce((sum, j) => sum + j.size, 0); const removed: string[] = [];
@@ -331,8 +372,10 @@ function event(job: StoredJob, text: string, ref: Reference): void {
   const events = job.cursors[ref.stream].extractor.push(text.endsWith('\n') ? text : text + '\n');
   // V8 sliced/cons strings 可能讓 80 字摘要仍引用整筆 1 MB JSON，必須實體複製。
   job.eventCount += events.length; if (events.length) job.lastEvent = Buffer.from(events.at(-1)!).toString('utf8');
+  // agy 的 stderr 只有診斷（warning: …），不可讓那裡的 JSON 行蓋掉 stdout 的回覆座標。
+  if (job.toolType === 'antigravity' && ref.stream === 'stderr') { durableWarning(job, agent, text); return; }
   const parsed: any = agent.parseOutput(job.toolType === 'claude' ? '{}\n' + text : text, '', job.exitCode, { workFolder: job.workFolder, status: job.status, strict: job.meta.strict });
-  let raw: any; try { raw = JSON.parse(text); } catch { return; }
+  let raw: any; try { raw = JSON.parse(text); } catch { durableWarning(job, agent, text); return; }
   if (parsed?.sandbox_warning) { job.parsed.sandbox_warning = parsed.sandbox_warning; job.outputFailed = true; }
   if (parsed?.session_id) job.parsed.session_id = Buffer.from(String(parsed.session_id)).toString('utf8');
   if (parsed?.message || (job.toolType === 'claude' && raw.type === 'result' && raw.result)) job.messageRef = ref;
@@ -347,6 +390,22 @@ function event(job: StoredJob, text: string, ref: Reference): void {
       for (const [key, value] of Object.entries(parsed.usage)) if (typeof value === 'number') job.parsed.usage[key] = (job.parsed.usage[key] ?? 0) + value;
     } else job.parsed.usage = parsed.usage;
   }
+}
+/** 非 JSON 行裡 agent 宣告要保留的訊號；有上限，不讓雜訊行撐大 heap。 */
+function durableWarning(job: StoredJob, agent: ReturnType<typeof getAgent>, text: string): void {
+  const warning = agent.durableWarning?.(text);
+  if (!warning) return;
+  const list: string[] = job.parsed.warnings ??= [];
+  // 先用未截斷的原文判斷優先，再截（保留結尾）：超長 id 的續接失敗截頭後會認不出來。
+  const priority = agent.priorityWarning;
+  const urgent = priority?.(warning) === true;
+  const kept = Buffer.from(truncateWarning(warning)).toString('utf8');
+  if (list.length < WARNING_MAX_COUNT) { list.push(kept); return; }
+  // 上限滿了：優先警告（agy 的續接失敗）擠掉最後一筆一般警告，不可被雜訊擠出去。
+  if (!priority || !urgent) return;
+  let victim = list.length - 1;
+  while (victim >= 0 && priority(list[victim])) victim--;
+  if (victim >= 0) { list.splice(victim, 1); list.unshift(kept); }
 }
 export function refreshJob(job: StoredJob): void {
   if (job.closed) {
@@ -716,7 +775,8 @@ export class JobStore {
   async start(cmd: BuiltCommand, model?: string, timeoutMs?: number): Promise<StoredJob> {
     // 直接呼叫底層也要擋。pty-runner 的 spawnPty 刻意不加：runner 本來就帶 worker 標記，加了會連授權的 vendor 都啟動不了。
     assertCanStartJob();
-    const pty = process.platform === 'win32' && getAgent(cmd.agent).win32SpawnMode === 'pty';
+    // cmd.spawnMode 是 service 啟動前解析的結果（agy 依版本選 pty／pipe）；直接呼叫 store 的舊路徑沒有它，退回靜態設定。
+    const pty = process.platform === 'win32' && (cmd.spawnMode ?? getAgent(cmd.agent).win32SpawnMode) === 'pty';
     // ConPTY 沒有 stdin prompt 通道；現有 agy 只傳 -p argv，不可默默遺失未來的 prompt。
     if (pty && typeof cmd.stdinPrompt === 'string') throw new Error('PTY jobs do not support stdinPrompt');
     const jobId = randomUUID(), directory = join(this.dir, 'jobs', jobId);
@@ -736,6 +796,13 @@ export class JobStore {
       }
       cmd.args = cmd.args.map(arg => arg === cmd.temporaryPromptFile ? target : arg);
       cmd.releaseTemporaryPrompt?.();
+    }
+    if (cmd.temporaryPromptDir) {
+      // agy 長 prompt：整個私有目錄搬進 job 目錄，隨 job 回收；args 裡（含 -p 指示文字）的舊路徑全部換掉。
+      // 絕對路徑：相對的 AI_CLI_STATE_DIR 會讓 runner（cwd 是 workFolder）找不到檔。
+      const source = resolve(cmd.temporaryPromptDir), target = resolve(directory, 'prompt-dir');
+      movePromptDirectory(source, target);
+      cmd.args = cmd.args.map(arg => arg.split(cmd.temporaryPromptDir!).join(target));
     }
     if (typeof cmd.stdinPrompt === 'string') writeFileSync(join(directory, 'stdin.tmp'), cmd.stdinPrompt, { mode: 0o600 });
     const metaBase: RunnerSpec['meta'] = { ...(containment ? { containment, containmentProtocol: 1 as const } : {}), ...(cmd.strict ? { strict: true } : {}), version: 1, jobId, agent: cmd.agent, model, resolvedModel: cmd.resolvedModel, effort: cmd.reasoningEffort,
@@ -909,7 +976,7 @@ export class JobStore {
   collect(now = Date.now(), immediate = false): number[] {
     this.refresh();
     const finished = [...this.jobs.values()].filter(j => j.status !== 'running').sort((a, b) => (a.endTime ?? a.startTime).localeCompare(b.endTime ?? b.startTime));
-    const bytes = (j: StoredJob) => { try { return readdirSync(j.directory).reduce((sum, f) => sum + statSync(join(j.directory, f)).size, 0); } catch { return 0; } };
+    const bytes = (j: StoredJob) => { try { return directorySize(j.directory); } catch { return 0; } };
     let count = finished.length, total = finished.reduce((sum, j) => sum + bytes(j), 0); const removed: number[] = [];
     for (const job of finished) {
       if (!immediate && now - Date.parse(job.endTime ?? job.startTime) < RETENTION_MS && count <= MAX_FINISHED_JOBS && total <= MAX_FINISHED_BYTES) continue;

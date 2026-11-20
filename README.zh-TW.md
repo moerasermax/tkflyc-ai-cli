@@ -700,7 +700,7 @@ prompt 第一個有意義行的 40 字摘要、經過時間 m:ss、最後事件�
 ai-cli PID）。窄終端機會截短欄位，避免換行。父行程可能是 shell 或 Node launcher；
 無法取得名稱時顯示 `unknown`。
 
-Claude／Codex／Grok／Windows agy（ConPTY）的 MCP 與 CLI job 共用 `AI_CLI_STATE_DIR/jobs/<UUID>/`，
+Claude／Codex／Grok／Windows agy 的 MCP 與 CLI job 共用 `AI_CLI_STATE_DIR/jobs/<UUID>/`，
 預設為 `~/.local/state/ai-cli/jobs/`。每個 job 都由 detached runner 當 worker 的父行程，
 MCP server 或 CLI 啟動端退出後仍可繼續。對外 PID 為 runner PID；目錄 UUID 才是 job 身分。
 Windows 由短命 launcher 建立 runner，確認 launcher 已退出才派 worker；runner 不在 server 的行程樹內，
@@ -708,7 +708,11 @@ Windows 由短命 launcher 建立 runner，確認 launcher 已退出才派 worke
 MCP 重啟只接回同一主導者（排除套件啟動器後的祖先 PID＋OS 建立時間）派的 job，結果附
 `recovered: true`，接回絕不重跑、重試或重派。有 `exit.json` 就還原完成／失敗；
 runner 身分相符且活著則繼續追蹤；runner 與 worker 都消失且無 exit 時標為 `lost`，保留輸出。
-Windows agy 的 ConPTY 由 detached runner 持有，PTY 合併 stdout／stderr 並清除 ANSI，stderr.log 只放 runner 錯誤與終止提示。
+Windows 上 agy 1.5.13 以上和其他 CLI 一樣走一般管線；版本較舊或量不到（以及裸名稱、`.cmd` 路徑）才退回 ConPTY——
+ConPTY 寬 200 欄，會把長的單行 JSON 結果切斷。ConPTY 由 detached runner 持有，PTY 合併 stdout／stderr 並清除 ANSI，stderr.log 只放 runner 錯誤與終止提示。
+agy 的 prompt 會超過 Windows 命令列上限（錯誤 206）時，完整 prompt 寫進 `AI_CLI_STATE_DIR/agy-prompts` 底下的私有檔案，
+以 `--add-dir` 交給 agy，`-p` 只送一行「去讀這個檔」；檔案搬進 job 目錄、隨 job 回收。agy 的 `warning:`（例如續接的 conversation 不存在）
+會出現在 `agentOutput.warnings`。
 POSIX agy 與 direct-api 維持現有執行方式，無法在 MCP 重啟後接回或接管。
 
 主導者取第一個不是套件啟動器的祖先：以命令列精準跳過 `npx-cli.js`、
@@ -771,7 +775,7 @@ runner 不可能在更上面）。祖先鏈查不到時視為無法確認，只�
 候選帶 `projectDir`（舊 job 為 `null`）與 `autoAdopt`，表示本 MCP 會不會自動接它：在自動範圍內、開關未關、且不是 worker 底下的 MCP；
 CLI 以目前 cwd、開關與環境標記預覽。候選的 `model` 與 list 相同（優先請求的模型），`status` 只依 `exit.json`／`lost.json` 判定。
 
-只有已寫入 `meta.json` 且 runner 身分已確認的持久化 MCP job（Claude／Codex／Grok／Windows agy ConPTY）才可接管。
+只有已寫入 `meta.json` 且 runner 身分已確認的持久化 MCP job（Claude／Codex／Grok／Windows agy）才可接管。
 POSIX agy、direct-api 不可接管；CLI job 全域可見，但不適用 MCP 接管。
 原派工 session 必須已結束：PID 不存在或 OS 建立時間不同才算確認；身分查詢失敗會拒絕。
 principal 為 null（派工時辨識 principal 失敗）時改看派工的 MCP server：server 已確認結束才可接；
