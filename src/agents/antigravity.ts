@@ -37,7 +37,7 @@ import type { AgentDefinition, BuildCommandInput, BuiltCommand, ModelDiscoveryRe
 const ANTIGRAVITY_FALLBACK_MODELS = [
   'agy',
   'agy-default',
-  'gemini-3.1-pro-high',
+  'gemini-4-neon-xhigh',
   'gemini-3.8-flash-high',
 ] as const;
 
@@ -274,11 +274,9 @@ function buildCommand(input: BuildCommandInput): BuiltCommand {
     ★ `--model` 曾經被註解成「不支援」，那是 v1.0.x 的事實，
       到 v1.1.9 已經不成立（`agy --help` 有 --model）。
 
-      但**不能把 resolvedModel 原樣傳過去**：既有的 alias
-      （`agy-ultra` → `Gemini 3.1 Pro (High)`）用的是 agy settings.json
-      的顯示寫法，而 CLI 的 `--model` 只吃 `gemini-3.1-pro-high` 這種 id。
-      原樣傳會讓每一次 agy 呼叫都失敗。先正規化，認不出來就**不傳**
-      ——回到「由 CLI 決定」的舊行為，而不是送一個必定錯的值。
+      CLI 的 `--model` 接受模型 id。內建 `agy-ultra` 解析成 `gemini-4-neon-xhigh`，
+      使用者自訂 alias 也可能指向顯示名稱。統一正規化，無法轉成 id 時省略參數，
+      由 CLI 選擇預設模型。
   */
   const cliModel = normalizeAgyModel(resolvedModel);
   if (cliModel !== null) {

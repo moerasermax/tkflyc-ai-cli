@@ -60,7 +60,8 @@ console.log('== 模型目錄的出處標示 ==');
 const { buildCatalogV2, clearCatalogCache, refreshCatalogV2, FRESH_TTL_MS } = await load('models/catalog-v2.js');
 const { getModelsPayload, isKnownModelTarget, resolveModelAlias } = await load('models/catalog.js');
 const { selectModels } = await import('../tools/acceptance/worker-identity-logic.mjs');
-const fallback = ['agy', 'agy-default', 'gemini-3.1-pro-high', 'gemini-3.8-flash-high'];
+const agyUltraId = 'gemini-4-neon-xhigh';
+const fallback = ['agy', 'agy-default', agyUltraId, 'gemini-3.8-flash-high'];
 const sameModels = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 const registry = await load('agents/registry.js');
 const { buildDoctorStatus, inspectCliBinary } = await load('core/binary-resolver.js');
@@ -158,9 +159,9 @@ try {
   const defaults = selectModels(payload, { families: ['antigravity'] }).map(e => e.model);
   check(sameModels(defaults, payload.antigravity) && !defaults.includes('gemini-3.5-flash-high'),
     '驗收預設清單使用 vendor 候選且不含退役模型');
-  check(!payload.antigravity.includes('gemini-3.1-pro-high')
-    && isKnownModelTarget('gemini-3.1-pro-high')
-    && registry.selectAgentForModel('gemini-3.1-pro-high').id === 'antigravity'
+  check(!payload.antigravity.includes(agyUltraId)
+    && isKnownModelTarget(agyUltraId)
+    && registry.selectAgentForModel(agyUltraId).id === 'antigravity'
     && registry.selectAgentForModel(resolveModelAlias('agy-ultra')).id === 'antigravity',
     '候選清單移除名稱不影響明確模型路由與 alias');
   const verifiedAt = rowOf(fresh).verifiedAt;
@@ -362,7 +363,7 @@ try {
     env: { ...process.env, AI_CLI_AUTO_UPDATE: 'off', AI_CLI_CATALOG_CACHE_PATH: join(TEMP, 'cli-cache.json') }, timeout: 10000,
   });
   const cliPayload = JSON.parse(cli.stdout);
-  check(sameModels(cliPayload.antigravity, ['agy', 'agy-default', 'gemini-3.8-flash-high', 'gemini-3.1-pro-high'])
+  check(sameModels(cliPayload.antigravity, fallback)
     && !selectModels(cliPayload).some(e => e.model === 'gemini-3.5-flash-high'),
     'CLI stub 成功查詢與驗收預設清單不含退役模型');
   check(rowOf(cliPayload.catalogV2).source === 'vendor-cli', 'ai-cli models 等待 refresh 後回 payload');
@@ -391,9 +392,7 @@ try {
 
 // ── 3b. ★ 加了 --model 之後，既有 alias 不得因此壞掉 ──────────
 //
-// 這條差點變成「修一個誤會、製造另一個」：alias `agy-ultra` 解析成
-// `Gemini 3.1 Pro (High)`（agy settings.json 的顯示寫法），而 CLI 的
-// --model 只吃 `gemini-3.1-pro-high`。原樣傳會讓每一次 agy 呼叫都失敗。
+// 自訂 alias 可用顯示名稱，內建 ultra alias 則直接指向 CLI id。
 {
   const agy = registry.getAgent('antigravity');
   const build = (model) =>
@@ -412,19 +411,26 @@ try {
   };
 
   check(
-    modelArg('Gemini 3.1 Pro (High)') === 'gemini-3.1-pro-high',
-    '★ 舊顯示寫法要正規化成 CLI 吃得下的 id（否則既有 alias 全部失效）',
-    String(modelArg('Gemini 3.1 Pro (High)'))
+    modelArg('Gemini 4 Neon (XHigh)') === agyUltraId,
+    '★ 顯示寫法要正規化成 CLI 吃得下的 id',
+    String(modelArg('Gemini 4 Neon (XHigh)'))
   );
-  check(modelArg('gemini-3.6-flash-high') === 'gemini-3.6-flash-high', '真實 id 原樣傳');
+  check(modelArg(agyUltraId) === agyUltraId, '真實 id 原樣傳');
+  const aliases = getModelsPayload().aliases;
+  for (const name of ['agy-ultra', 'antigravity-ultra']) {
+    const resolved = resolveModelAlias(name);
+    check(resolved === agyUltraId && modelArg(resolved) === agyUltraId
+      && aliases.find((alias) => alias.name === name)?.resolvesTo === agyUltraId,
+    `${name} 的內建目標、CLI 參數與目錄一致`);
+  }
   check(modelArg('agy') === null, "'agy' 是框架 alias 不是模型名 → 不傳 --model");
   check(
     modelArg('這不是模型名') === null,
     '★ 認不出來就不傳（寧可回到 CLI 預設，也不要送一個必定失敗的值）'
   );
   check(
-    agy.matchesModel('gemini-3.6-flash-high') && agy.matchesModel('Gemini 3.1 Pro (High)'),
-    '新舊兩種寫法都路由到 antigravity'
+    agy.matchesModel(agyUltraId) && agy.matchesModel('Gemini 4 Neon (XHigh)'),
+    '模型 id 與顯示名稱都路由到 antigravity'
   );
   check(
     !agy.matchesModel('claude-sonnet-4-6') && !agy.matchesModel('gpt-oss-120b-medium'),

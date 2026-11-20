@@ -186,6 +186,12 @@ model 名稱用 **`<provider>-<model>`**，前綴就是 `providers.json` 裡的�
   既有的 `openai`／`anthropic` 設定若自己寫了 `base_url`，維持 `chat_completions`——
   改動前這種設定只能走那個協定，升級不該讓它悄悄換路徑。
 - 呼叫方式是 `anthropic-<model>`／`openai-<model>`。部分 codex 系列模型只能走 Responses API。
+- `google` key 內建 Gemini API 的 OpenAI-compatible 端點（`https://generativelanguage.googleapis.com/v1beta/openai`，
+  走 `chat_completions`），只寫 `{ "google": { "api_key": "..." } }` 即可，呼叫方式是 `google-<model>`。
+- `gemini`、`gpt`、`grok`、`claude`、`codex`、`agy`、`antigravity` 是**保留的 provider key**：
+  `<key>-<model>` 會蓋住其他 agent 的模型名稱（例如 `gemini-*` 屬於 Antigravity），
+  所以那一項會被略過，而不是悄悄把那些 job 改送 direct-api。同檔其他 provider 照常載入，
+  `models` 的 note 會點名被略過的 key 並建議改名（Gemini 請用 `google`）。key 區分大小寫：`Gemini` 不算保留名稱。
 - 未知的 `api_format` 值**整份 fail-closed**：丟錯並點名 provider 與錯的值，**不會**默默退回 `chat_completions`。
 - 用量：每個請求取串流裡的最終累計值（不重複加），再跨工具迴圈各輪相加。Anthropic 的結果
   `input_tokens` 含快取讀寫（與 OpenAI 同語意），快取讀取另列 `cached_input_tokens`。
@@ -501,7 +507,7 @@ MCP 工具 `ai-cli_kernel_*` 預設不列出且拒絕呼叫；`ai-cli kernel ena
 
 `models` payload 保留既有各 agent 字串陣列與 aliases，詳細來源看 `catalogV2`。
 頂層 antigravity 清單採可路由的 vendor 結果（含成功快取）加 `agy`／`agy-default`；
-尚無可用結果時才回後備 `agy`、`agy-default`、`gemini-3.1-pro-high`、`gemini-3.8-flash-high`。
+尚無可用結果時才回後備 `agy`、`agy-default`、`gemini-4-neon-xhigh`、`gemini-3.8-flash-high`。
 `catalogV2.entries[]` 保留 `id / agent / model / displayName / billingRoute / source / verifiedAt / routable`；
 `catalogV2.agents[]` 每列是 `{ agent, binaryFound, source, verifiedAt, discoveryNote }`。
 每列的 `verifiedAt` 與所屬 entries 一致，快取不會把原時間改成現在。
@@ -620,7 +626,7 @@ reasoning 預設值的優先序（高 → 低）：
 | `claude-ultra` | `opus` |
 | `codex-ultra` | `gpt-6.2-astra`（effort max） |
 | `codex-ultracode` | `gpt-6.2-astra`（effort ultra） |
-| `agy-ultra` / `antigravity-ultra` | `Gemini 3.1 Pro (High)` |
+| `agy-ultra` / `antigravity-ultra` | `gemini-4-neon-xhigh` |
 
 > **`gpt-6-astra` 需要 codex-cli 0.153 以上。** 0.151.0 的模型快取雖然列得出它，實跑會被 API 以
 > `requires a newer version of Codex` 拒絕（2026-09-05 實測；0.153.4 可用）。`codex-ultra` 既然改指它，
@@ -638,8 +644,8 @@ reasoning 預設值的優先序（高 → 低）：
 
 **為什麼改完立刻生效**：`resolveModelAlias()` 是每次組指令時才呼叫（不是啟動時算好的常數），
 而設定檔每次都會重讀，所以下一次 `run` 就會改用新的模型與路由，不必 `npm run build`、不必重連 MCP。
-（實際怎麼傳給 CLI 依 agent 而定：claude / codex 走 `--model`，direct-api 走 API 請求，
-agy 則完全不吃模型選擇 —— 見下方已知限制。）
+（實際怎麼傳給 CLI 依 agent 而定：claude / codex / agy 走 `--model`（agy 會先把顯示名稱正規化成
+模型 id，例如 `Gemini 4 Neon (XHigh)` → `gemini-4-neon-xhigh`），direct-api 走 API 請求。）
 
 ### 用 `set_config` 工具寫入
 
@@ -665,8 +671,9 @@ claude agent 的 `matchesModel` 是 registry 最後一位的 catch-all（永遠�
 
 ### 已知限制
 
-- **antigravity（agy）不吃 `--model`**：其 CLI 沒有這個旗標，實際模型由登入帳號的 Google AI tier 決定。
-  重指 `agy-ultra` / `antigravity-ultra` 只改變回報內容，不改變實際執行的模型。
+- **antigravity（agy）**：v1.1.9 起支援 `--model`，ai-cli 會把名稱正規化成 agy 的模型 id 再傳；
+  只有 `agy`／`agy-default` 不傳，由 agy CLI 自己的預設決定（2026-11-20 是 Gemini 4 Argon）。
+  可用的模型依登入帳號的方案而定，以 `agy models` 為準；指到帳號沒有的 id 會直接報錯（exit 1）。
 - 模型的**自報名稱不可信**（問 `gpt-5.6-terra`「你是哪個模型」它會說 GPT-5）。要驗證 `--model`
   真的送出去，把 alias 指到一個不存在但能過驗證的名稱（如 `gpt-5.6-doesnotexist`）再 `run`，
   看 CLI 是否回報該模型不支援。

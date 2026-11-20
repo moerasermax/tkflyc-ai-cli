@@ -142,6 +142,66 @@ ${xmlReportContent}
       { usage: { prompt_tokens: 6, completion_tokens: 4, total_tokens: 10 } },
     ]);
   }
+  // Gemini API（OpenAI-compatible）的形狀：tool call 整筆在一個 chunk、沒有 index、
+  // finish_reason 是 stop，thought_signature 放在 extra_content.google；下一輪少送就 400。
+  if (firstUserContent === 'Gemini signature probe' && !messages.some((message) => message?.role === 'tool')) {
+    return streamResponse([
+      {
+        choices: [
+          {
+            delta: {
+              role: 'assistant',
+              tool_calls: [
+                {
+                  extra_content: { google: { thought_signature: 'SIG-abc' } },
+                  function: { arguments: '{"path":"package.json"}', name: 'read_file' },
+                  id: 'call_gemini',
+                  type: 'function',
+                },
+              ],
+            },
+          },
+        ],
+        usage: { completion_tokens: 20, prompt_tokens: 90, total_tokens: 154 },
+      },
+      { choices: [{ delta: { role: 'assistant' }, finish_reason: 'stop' }], usage: { completion_tokens: 26, prompt_tokens: 90, total_tokens: 160 } },
+    ]);
+  }
+  // 預付額度用完：Gemini 回的是排版過的多行 JSON。
+  if (firstUserContent === 'Payment probe') {
+    return new Response(
+      '[{\n  "error": {\n    "code": 402,\n    "message": "Your prepayment credits are depleted.",\n    "status": "RESOURCE_EXHAUSTED"\n  }\n}\n]',
+      { status: 402, headers: { 'content-type': 'application/json' } }
+    );
+  }
+  // 沒有 index、同一個 id 分兩個 chunk：參數要接起來，extra_content 要兩層合併。
+  if (firstUserContent === 'Chunked no-index probe' && !messages.some((message) => message?.role === 'tool')) {
+    return streamResponse([
+      { choices: [{ delta: { tool_calls: [{ id: 'call_ck', type: 'function', function: { name: 'read_file', arguments: '{"path":' }, extra_content: { google: { part: 1 } } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ id: 'call_ck', function: { arguments: '"package.json"}' }, extra_content: { google: { thought_signature: 'SIG-ck' } } }] }, finish_reason: 'stop' }] },
+    ]);
+  }
+  if (messages.some((message) => message?.tool_call_id === 'call_ck')) {
+    const assistant = messages.find((message) => message?.role === 'assistant' && Array.isArray(message.tool_calls));
+    const call = assistant?.tool_calls?.[0];
+    const good = assistant?.tool_calls?.length === 1
+      && call?.function?.arguments === '{"path":"package.json"}'
+      && call?.extra_content?.google?.part === 1
+      && call?.extra_content?.google?.thought_signature === 'SIG-ck';
+    return good
+      ? streamResponse([{ choices: [{ delta: { content: 'chunk ok' }, finish_reason: 'stop' }] }])
+      : new Response(JSON.stringify({ error: { message: `bad replay ${JSON.stringify(assistant?.tool_calls)}` } }), { status: 400 });
+  }
+  if (messages.some((message) => message?.tool_call_id === 'call_gemini')) {
+    const assistant = messages.find((message) => message?.role === 'assistant' && Array.isArray(message.tool_calls));
+    if (assistant?.tool_calls?.[0]?.extra_content?.google?.thought_signature !== 'SIG-abc') {
+      return new Response(
+        JSON.stringify({ error: { code: 400, message: 'Function call is missing a thought_signature in functionCall parts.' } }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    return streamResponse([{ choices: [{ delta: { content: 'signed ok' }, finish_reason: 'stop' }] }]);
+  }
   return streamResponse([
     { choices: [{ delta: { content: 'Hello without tools' }, finish_reason: 'stop' }] },
     { usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
@@ -318,4 +378,134 @@ console.log('PASS: direct-api mock fetch route/output/session verified');
   delete withNv.providers.nv;
   writeFileSync(providersPath, JSON.stringify(withNv, null, 2));
   console.log('PASS: catalog routable 跟隨 providers.json，且寫壞的名字不會靜默改跑 Claude');
+}
+
+// provider key 不可蓋住其他 agent 的 model 命名空間；Gemini API 用內建的 google 端點。
+{
+  const { directApiAgent, loadProvidersConfig } = await import('../dist/agents/direct-api.js');
+  const { selectAgentForModel } = await import('../dist/agents/registry.js');
+  const original = readFileSync(providersPath, 'utf8');
+
+  // google 省略 base_url 時要拿到 Gemini API 的 OpenAI-compatible 端點，且走 chat_completions。
+  const withGoogle = JSON.parse(original);
+  withGoogle.providers.google = { api_key: 'test-key' };
+  writeFileSync(providersPath, JSON.stringify(withGoogle, null, 2));
+  let google;
+  try {
+    google = loadProvidersConfig().providers.google;
+  } catch (error) {
+    assert.fail(`★ google provider 省略 base_url 時要用 Gemini API 的內建端點（載入失敗：${error.message}）`);
+  }
+  assert.strictEqual(
+    google?.base_url,
+    'https://generativelanguage.googleapis.com/v1beta/openai',
+    '★ google provider 省略 base_url 時要用 Gemini API 的內建端點'
+  );
+  assert.strictEqual(google?.api_format, undefined, 'google 內建端點走 chat_completions（不設 api_format）');
+  assert.strictEqual(selectAgentForModel('google-gemini-x').id, 'direct-api', 'google-<model> 由 direct-api 接');
+  assert.strictEqual(selectAgentForModel('gemini-4-neon-high').id, 'antigravity', '設了 google 後 gemini-* 仍歸 agy');
+
+  // providers.gemini 會讓 gemini-* 的 agy 模型被 direct-api 搶走：只略過那一項並點名，
+  // 不讓整份設定失敗（同檔的其他 provider 照常可派）。
+  const { describeConfiguredProviders } = await import('../dist/agents/direct-api.js');
+  const withGemini = JSON.parse(original);
+  withGemini.providers.gemini = { base_url: 'https://mock.gemini.test/v1', api_key: 'test-key' };
+  withGemini.providers.Gemini = { base_url: 'https://mock.gemini.test/v1', api_key: 'test-key' };
+  withGemini.providers.nv = { base_url: 'https://mock.nv.test/v1', api_key: 'test-key' };
+  writeFileSync(providersPath, JSON.stringify(withGemini, null, 2));
+  let loaded;
+  try {
+    loaded = loadProvidersConfig();
+  } catch (error) {
+    assert.fail(`★ 保留的 provider key 只略過那一項，不得讓整份設定失敗（實得：${error.message}）`);
+  }
+  assert.ok(!loaded.providers.gemini, '★ 保留的 provider key 要被略過，不得進入可派工的 provider');
+  assert.deepStrictEqual(loaded.ignoredReservedKeys, ['gemini'], '略過的保留 key 要被記下（大小寫與前綴比對一致，Gemini 不算）');
+  assert.ok(loaded.providers.Gemini, '大寫的 Gemini 蓋不住 gemini-*（前綴比對區分大小寫），照常載入');
+  assert.strictEqual(
+    selectAgentForModel('gemini-4-neon-high').id,
+    'antigravity',
+    '★ 保留的 provider key 不得把 gemini-* 從 agy 搶走'
+  );
+  assert.strictEqual(selectAgentForModel('nv-openai/gpt-oss-20b').id, 'direct-api', '★ 同檔其他 provider 照常可派');
+  assert.strictEqual(selectAgentForModel('gpt-6.2-sol').id, 'codex', '保留 key 不影響其他 agent 的路由');
+  assert.match(describeConfiguredProviders().note ?? '', /"gemini".*保留名稱/, 'models 的 note 要點名被略過的保留 key');
+
+  writeFileSync(providersPath, original);
+  console.log('PASS: 保留 provider key 只略過該項並點名，google 內建 Gemini API 端點且不搶 agy 的 gemini-*');
+}
+
+// 失敗 job 要帶出錯誤原文：stdout 有 session_id 時上層不附 stderr，只剩 message ""。
+{
+  const { directApiAgent } = await import('../dist/agents/direct-api.js');
+  const stdout = `${JSON.stringify({ type: 'system', session_id: 's-402' })}\n`;
+  const stderr = [
+    'some other tool noise secret-ish',
+    '[direct-api] HTTP 402: {"error":{"code":402,"message":"Your prepayment credits are depleted."}}',
+    '',
+    'Direct API error: direct-api request failed with HTTP 402',
+  ].join('\n');
+  const failed = directApiAgent.parseOutput(stdout, stderr, 1);
+  assert.ok(
+    typeof failed?.error === 'string' && failed.error.includes('HTTP 402') && failed.error.includes('prepayment credits'),
+    '★ 失敗的 direct-api job 要在 agentOutput.error 帶出 HTTP 錯誤原文'
+  );
+  assert.ok(!failed.error.includes('secret-ish'), 'error 只收 direct-api 自己寫的錯誤行');
+  const noStdout = directApiAgent.parseOutput('', stderr, 1);
+  assert.ok(noStdout?.error?.includes('HTTP 402'), '★ 連 stdout 都沒有時也要帶出錯誤原文');
+  const ok = directApiAgent.parseOutput(stdout, stderr, 0);
+  assert.strictEqual(ok?.error, undefined, '成功的 job 不附 error');
+  const cancelled = directApiAgent.parseOutput(stdout, stderr, 143);
+  assert.strictEqual(cancelled?.error, undefined, '取消（143）不是失敗，不附 error');
+  const leaky = directApiAgent.parseOutput(
+    stdout,
+    'Direct API error: Headers.append: "Bearer sk-LEAKY-1234567890 x" is an invalid header value.',
+    1
+  );
+  assert.ok(
+    leaky?.error && !leaky.error.includes('sk-LEAKY-1234567890') && leaky.error.includes('Bearer [redacted]'),
+    '★ agentOutput.error 不得夾帶 Bearer 金鑰'
+  );
+  console.log('PASS: 失敗的 direct-api job 帶出錯誤原文（只收 direct-api 錯誤行）');
+}
+
+// Gemini 的 thought_signature：tool call 的 extra_content 要原樣送回下一輪，少送就 400。
+{
+  const geminiStarted = await service.startProcess({
+    workFolder: tempRoot,
+    model: 'or-test/model',
+    prompt: 'Gemini signature probe',
+  });
+  const [gemini] = await service.waitForProcesses([geminiStarted.pid], 5, true);
+  assert.strictEqual(
+    gemini.agentOutput?.message,
+    'signed ok',
+    `★ tool call 的 extra_content（Gemini thought_signature）要原樣送回下一輪（實得 ${gemini.status}／${JSON.stringify(gemini.agentOutput?.error ?? gemini.agentOutput?.message)}）`
+  );
+  const saved = JSON.parse(readFileSync(gemini.agentOutput.sessionPath, 'utf-8'));
+  const savedCall = saved.messages.find((message) => message.role === 'assistant' && message.tool_calls)?.tool_calls?.[0];
+  assert.deepStrictEqual(
+    savedCall?.extra_content,
+    { google: { thought_signature: 'SIG-abc' } },
+    'session 檔也要保存 extra_content，續跑時才送得回去'
+  );
+  console.log('PASS: Gemini thought_signature 隨 tool call 原樣送回並存進 session');
+}
+
+// 工作層級：402 的錯誤原文要出現在 job 結果；沒有 index 的分段 tool call 要正確歸併。
+{
+  const payStarted = await service.startProcess({ workFolder: tempRoot, model: 'or-test/model', prompt: 'Payment probe' });
+  const [pay] = await service.waitForProcesses([payStarted.pid], 5, true);
+  assert.ok(
+    pay.status === 'failed' && pay.agentOutput?.error?.includes('HTTP 402') && pay.agentOutput.error.includes('prepayment credits are depleted'),
+    `★ job 結果要帶出 402 的完整錯誤原文（實得 ${JSON.stringify(pay.agentOutput)}）`
+  );
+  const ckStarted = await service.startProcess({ workFolder: tempRoot, model: 'or-test/model', prompt: 'Chunked no-index probe' });
+  const [ck] = await service.waitForProcesses([ckStarted.pid], 5, true);
+  assert.strictEqual(
+    ck.agentOutput?.message,
+    'chunk ok',
+    `★ 沒有 index 的分段 tool call 要依 id 歸併、extra_content 兩層合併（實得 ${JSON.stringify(ck.agentOutput?.error ?? ck.agentOutput?.message)}）`
+  );
+  console.log('PASS: 402 原文出現在 job 結果；沒有 index 的分段 tool call 正確歸併');
 }

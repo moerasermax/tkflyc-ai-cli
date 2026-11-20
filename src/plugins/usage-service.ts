@@ -317,14 +317,40 @@ export function parseAgyUsage(text: string) {
   const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
   const models: Record<string, unknown>[] = [];
   const round2 = (n: number) => Math.round(n * 100) / 100;
+  const percentage = /(\d+(?:\.\d+)?)\s*%\s*$/;
+  const limitBasis = (name: string, next: string) => {
+    const explicit = name.match(/limit\s+(remaining|used)\b/i);
+    if (explicit) return explicit[1].toLowerCase();
+    // agy 1.5.13 的獨立額度省略 Remaining，進度條仍表示剩餘量。這是依觀測推定的，不是 agy 文件寫的：
+    // 2026-11-20 Argon 滿格 98.99%／99.83% 時 Argon 派得動；2026-10-22 空格 0.00% 時派 Argon 回 429；
+    // 同面板其他列都明寫「Limit Remaining」。套用範圍是所有「Limit 結尾＋方括號進度條」的列——
+    // 目前只觀測到 Argon 這一種；若 agy 日後出現「已用」語意的同形列，這裡會讀反。
+    if (/\bLimit$/i.test(name) && /^\[[^\]]*\]\s*\d+(?:\.\d+)?\s*%$/.test(next)) return 'remaining';
+    return null;
+  };
+  const headerAt = (i: number) => {
+    const line = lines[i] ?? '';
+    const modelsHeader = line.match(/([A-Z][A-Z0-9 &/,.+-]*\bMODELS)$/);
+    if (modelsHeader && !line.includes('%')) return modelsHeader[1].trim();
+
+    // 獨立區段（`GEMINI 4 ARGON`）後面可能先有幾行方案說明（終端寬度窄時會折成多行），
+    // 再接額度標籤。往下掃到第一個額度標籤為止；途中遇到百分比行或另一個全大寫標題就不是標題。
+    // 保留舊版「大寫模型名緊接百分比」的列不被誤當標題。
+    if (!/^[A-Z][A-Z0-9 &/,.+-]*$/.test(line) || percentage.test(lines[i + 1] ?? '')) return null;
+    for (let j = i + 1; j < Math.min(lines.length - 1, i + 6); j++) {
+      if (limitBasis(lines[j], lines[j + 1] ?? '')) return line;
+      if (percentage.test(lines[j]) || /^[A-Z][A-Z0-9 &/,.+-]*$/.test(lines[j])) return null;
+    }
+    return null;
+  };
   let group: string | null = null;
 
   for (let i = 0; i < lines.length - 1; i++) {
     // agy 1.2 的面板按群組列（`GEMINI MODELS`、`CLAUDE AND GPT MODELS`），每組有自己的週／5 小時額度。
-    const header = lines[i].match(/([A-Z][A-Z0-9 &/,.+-]*\bMODELS)$/);
-    if (header && !/%/.test(lines[i])) { group = header[1].trim(); continue; }
+    const header = headerAt(i);
+    if (header) { group = header; continue; }
     const next = lines[i + 1] ?? '';
-    const percentMatch = next.match(/(\d+(?:\.\d+)?)\s*%\s*$/);
+    const percentMatch = next.match(percentage);
     if (!percentMatch) continue;
     const nameLine = lines[i];
     if (/^[─═\-=│|>◉]+$/.test(nameLine)) continue;
@@ -333,14 +359,14 @@ export function parseAgyUsage(text: string) {
     const statusLine = lines[i + 2] ?? '';
     const isNav = /↑|↓|pgup|pgdown|ctrl|esc/i.test(statusLine);
     // 百分比行後面若直接是下一個額度標籤／群組標題，就沒有狀態行——不能把它吞掉當 status。
-    const isNext = /limit\s+(remaining|used)\b/i.test(statusLine) || /\bMODELS$/.test(statusLine) || /%\s*$/.test(statusLine);
+    const isNext = limitBasis(statusLine, lines[i + 3] ?? '') || headerAt(i + 2) || /%\s*$/.test(statusLine);
     const status = (!isNav && !isNext && statusLine) ? statusLine : null;
     const pct = _toNumber(percentMatch[1]);
     // 標籤寫明「Remaining／Used」時照標籤換算。2026-10-06 實測畫面是「Weekly Limit Remaining 99.86%」，
     // 原本把它原樣放進 percentUsed，讀的人會以為已經用掉 99.86%。
-    const label = nameLine.match(/limit\s+(remaining|used)\b/i);
-    if (label) {
-      const remaining = /remaining/i.test(label[1]);
+    const basis = limitBasis(nameLine, next);
+    if (basis) {
+      const remaining = basis === 'remaining';
       models.push({
         model: group ?? nameLine,
         limit: nameLine,

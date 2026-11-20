@@ -1269,8 +1269,8 @@
   },
   {
     "name": "agy 不記群組名稱（model 變成 Weekly Limit Remaining）",
-    "from": "    if (header && !/%/.test(lines[i])) { group = header[1].trim(); continue; }",
-    "to": "    if (header && !/%/.test(lines[i])) { continue; }",
+    "from": "    if (header) { group = header; continue; }",
+    "to": "    if (header) { continue; }",
     "expect": "agy 的 model 是群組名稱",
     "file": "src/plugins/usage-service.ts",
     "script": "verify-usage-parse.mjs"
@@ -1337,6 +1337,14 @@
     "from": "  const weekly   = limitInfo(/^[ \\t]*weekly\\s*limit\\s*:/im) ?? limitInfo(/weekly\\s*limit\\s*:/i) ?? limitInfo(/\\bweek(?:ly)?[^:]*limit[^:]*:/i);",
     "to": "  const weekly   = limitInfo(/weekly\\s*limit\\s*:/i) ?? limitInfo(/\\bweek(?:ly)?[^:]*limit[^:]*:/i);",
     "expect": "Luna Reserve 排在前面時",
+    "script": "verify-usage-parse.mjs"
+  },
+  {
+    "name": "agy 把省略 Remaining 的獨立額度讀成已用比例",
+    "file": "src/plugins/usage-service.ts",
+    "from": "    if (/\\bLimit$/i.test(name) && /^\\[[^\\]]*\\]\\s*\\d+(?:\\.\\d+)?\\s*%$/.test(next)) return 'remaining';",
+    "to": "    if (/\\bLimit$/i.test(name) && /^\\[[^\\]]*\\]\\s*\\d+(?:\\.\\d+)?\\s*%$/.test(next)) return 'used';",
+    "expect": "agy 獨立額度省略 Remaining 時仍按剩餘量解析",
     "script": "verify-usage-parse.mjs"
   },
   {
@@ -10191,5 +10199,93 @@
     "to": "export function startupGraceMs(): number { return STARTUP_GRACE_MS; }",
     "expect": "PowerShell host 模式的啟動寬限期大於 register 總期限",
     "script": "verify-win-pshost.mjs"
+  },
+  {
+    "name": "direct-api 不擋保留的 provider key（providers.gemini 搶走 agy 的 gemini-*）",
+    "file": "src/agents/direct-api.ts",
+    "from": "    if (RESERVED_PROVIDER_KEYS.has(providerName)) {",
+    "to": "    if (false && RESERVED_PROVIDER_KEYS.has(providerName)) {",
+    "expect": "保留的 provider key 要被略過",
+    "script": "verify-direct-api.mjs"
+  },
+  {
+    "name": "direct-api 的 google 內建端點遺失",
+    "file": "src/agents/direct-api.ts",
+    "from": "  google: 'https://generativelanguage.googleapis.com/v1beta/openai',",
+    "to": "  google_: 'https://generativelanguage.googleapis.com/v1beta/openai',",
+    "expect": "google provider 省略 base_url",
+    "script": "verify-direct-api.mjs"
+  },
+  {
+    "name": "direct-api 失敗 job 不帶錯誤原文（402 只剩 message 空字串）",
+    "file": "src/agents/direct-api.ts",
+    "from": "    ...(error ? { error } : {}),",
+    "to": "",
+    "expect": "帶出 HTTP 錯誤原文",
+    "script": "verify-direct-api.mjs"
+  },
+  {
+    "name": "direct-api 正規化 tool call 時丟掉 extra_content（Gemini thought_signature 送不回去）",
+    "file": "src/agents/direct-api.ts",
+    "from": "      ...(extra ? { extra_content: extra } : {}),",
+    "to": "",
+    "expect": "Gemini thought_signature",
+    "script": "verify-direct-api.mjs"
+  },
+  {
+    "name": "direct-api 串流累積 tool call 時不收 extra_content",
+    "file": "src/agents/direct-api.ts",
+    "from": "    if (extra) accumulator.extra_content = mergeExtraContent(accumulator.extra_content, extra);",
+    "to": "",
+    "expect": "Gemini thought_signature",
+    "script": "verify-direct-api.mjs"
+  },
+  {
+    "file": "src/agents/direct-api.ts",
+    "script": "verify-direct-api.mjs",
+    "name": "direct-api 保留 key 改回整份丟錯（同檔 nv-／or- 一起派不出去）",
+    "from": "      ignoredReservedKeys.push(providerName);\n      continue;",
+    "to": "      throw new Error(`reserved provider key ${providerName}`);",
+    "expect": "只略過那一項"
+  },
+  {
+    "file": "src/agents/direct-api.ts",
+    "script": "verify-direct-api.mjs",
+    "name": "direct-api 沒有 index 的 tool call 不依 id 歸併（分段參數被切斷）",
+    "from": "      index = existing >= 0 ? existing : turn.toolCallAccumulators.length;",
+    "to": "      index = turn.toolCallAccumulators.length;",
+    "expect": "依 id 歸併"
+  },
+  {
+    "file": "src/agents/direct-api.ts",
+    "script": "verify-direct-api.mjs",
+    "name": "direct-api extra_content 改回整個覆蓋（後到的 google 蓋掉先前欄位）",
+    "from": "    merged[key] = before && after ? { ...before, ...after } : value;",
+    "to": "    merged[key] = value;",
+    "expect": "兩層合併"
+  },
+  {
+    "file": "src/agents/direct-api.ts",
+    "script": "verify-direct-api.mjs",
+    "name": "direct-api agentOutput.error 不遮蔽 Bearer 金鑰",
+    "from": "  return out.replace(/\\bBearer\\s+[^\\s\"',;]+/gi, 'Bearer [redacted]');",
+    "to": "  return out;",
+    "expect": "不得夾帶 Bearer 金鑰"
+  },
+  {
+    "file": "src/agents/direct-api.ts",
+    "script": "verify-direct-api.mjs",
+    "name": "direct-api 多行 HTTP 錯誤內文不收成一行（402 原文只剩第一行）",
+    "from": "errorText.replace(/\\s*\\n\\s*/g, ' ')",
+    "to": "errorText",
+    "expect": "402 的完整錯誤原文"
+  },
+  {
+    "name": "agy 獨立區段標題只往下看一行（說明折行時 Argon 額度掛到上一組）",
+    "file": "src/plugins/usage-service.ts",
+    "script": "verify-usage-parse.mjs",
+    "from": "    for (let j = i + 1; j < Math.min(lines.length - 1, i + 6); j++) {",
+    "to": "    for (let j = i + 1; j < Math.min(lines.length - 1, i + 3); j++) {",
+    "expect": "說明折成多行時仍認得區段標題"
   }
 ]

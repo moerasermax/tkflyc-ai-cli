@@ -308,6 +308,71 @@ check(
   'agy 的 model 是群組名稱、limit 是原本的標籤'
 );
 
+const argonPanel = [
+  'GEMINI 4 ARGON',
+  'For paid Pro plans, Argon quota is separate. Higher Argon quota (...) is available on Ultra plans.',
+  'Gemini 4 Argon Weekly Limit',
+];
+const argonAvailable = parseAgyUsage([
+  ...argonPanel,
+  '[█████████████████████████████████████████████████░] 98.99%',
+  'Refreshes in 167h 54m',
+].join('\n'));
+const argonQuota = argonAvailable?.models?.[0];
+check(
+  argonAvailable?.models?.length === 1 && argonQuota?.model === 'GEMINI 4 ARGON'
+    && argonQuota?.limit === 'Gemini 4 Argon Weekly Limit' && argonQuota?.percentRemaining === 98.99
+    && argonQuota?.percentUsed === 1.01 && argonQuota?.basis === 'remaining' && argonQuota?.status === 'Refreshes in 167h 54m',
+  'agy 獨立額度省略 Remaining 時仍按剩餘量解析',
+  `得到 ${JSON.stringify(argonAvailable?.models)}`
+);
+const argonExhausted = parseAgyUsage([
+  // 上一組額度沒有狀態行時，獨立區段標題仍必須保留。
+  'GEMINI MODELS',
+  'Weekly Limit Remaining',
+  '[████] 99%',
+  ...argonPanel,
+  '[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0.00%',
+  'Refreshes in 87h 57m',
+].join('\n'));
+const exhaustedQuota = argonExhausted?.models?.[1];
+check(
+  argonExhausted?.models?.length === 2 && argonExhausted.models[0].status === null
+    && exhaustedQuota?.model === 'GEMINI 4 ARGON' && exhaustedQuota?.percentRemaining === 0
+    && exhaustedQuota?.percentUsed === 100 && exhaustedQuota?.basis === 'remaining' && exhaustedQuota?.status === 'Refreshes in 87h 57m',
+  'agy 耗盡的獨立額度保留區段名稱與重置時間',
+  `得到 ${JSON.stringify(argonExhausted?.models)}`
+);
+const agyStandalone = parseAgyUsage(['Five Hour Limit', '[██░░] 50%', 'Weekly Limit', '[███░] 75%'].join('\n'));
+check(agyStandalone?.models?.length === 2 && agyStandalone.models[0].model === 'Five Hour Limit'
+  && agyStandalone.models[0].status === null && agyStandalone.models[0].percentRemaining === 50
+  && agyStandalone.models[0].basis === 'remaining' && agyStandalone.models[1].percentRemaining === 75,
+  'agy 無群組時使用額度標籤為名稱並保留相鄰額度');
+// 終端寬度窄時，方案說明會折成多行；區段標題仍要認得出來，額度不可掛到上一個群組。
+const argonWrapped = parseAgyUsage([
+  'GEMINI MODELS',
+  'Weekly Limit Remaining',
+  '[████] 99%',
+  'Refreshes in 1h',
+  'GEMINI 4 ARGON',
+  'For paid Pro plans, Argon quota is separate. Higher Argon quota (included as part of the',
+  'larger Gemini quota bucket) is available on Ultra plans.',
+  'Gemini 4 Argon Weekly Limit',
+  '[█████████████████████████████████████████████████░] 99.83%',
+  'Refreshes in 165h 31m',
+].join('\n'));
+check(
+  argonWrapped?.models?.length === 2 && argonWrapped.models[1]?.model === 'GEMINI 4 ARGON'
+    && argonWrapped.models[1]?.percentRemaining === 99.83 && argonWrapped.models[1]?.basis === 'remaining',
+  'agy 獨立區段的說明折成多行時仍認得區段標題',
+  `得到 ${JSON.stringify(argonWrapped?.models)}`
+);
+const agyLegacy = parseAgyUsage(['GEMINI LEGACY', '[██░░] 50%', 'Quota available', 'Another Limit', '25%'].join('\n'));
+check(agyLegacy?.models?.length === 2 && agyLegacy.models[0].model === 'GEMINI LEGACY'
+  && agyLegacy.models[0].percentUsed === 50 && agyLegacy.models[1].percentUsed === 25
+  && agyLegacy.models.every((quota) => quota.basis === undefined),
+  'agy 舊版模型列與沒有進度條的 Limit 維持原欄位');
+
 // ── 9. codex 讀 session 檔的 rate_limits（不開 TUI）──────────────────
 // 實測格式（2026-10-06，~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl 的 token_count 事件）。
 const now = Date.now();

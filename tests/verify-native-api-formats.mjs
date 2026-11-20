@@ -187,8 +187,8 @@ ok('★ 既有的 openai／anthropic 設定（自己寫了 base_url、沒寫 api
 });
 
 ok('自訂名稱可以明確選原生協定', () => {
-  writeProviders({ claude: { base_url: 'https://gw.example.test', api_key: 'k', api_format: 'anthropic_messages' } });
-  assert.strictEqual(loadProvidersConfig().providers.claude.api_format, 'anthropic_messages');
+  writeProviders({ gateway: { base_url: 'https://gw.example.test', api_key: 'k', api_format: 'anthropic_messages' } });
+  assert.strictEqual(loadProvidersConfig().providers.gateway.api_format, 'anthropic_messages');
 });
 
 for (const [format, key] of [

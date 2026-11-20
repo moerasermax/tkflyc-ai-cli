@@ -56,8 +56,8 @@ export const MODEL_ALIASES: Record<string, string> = {
     claude-ultracode 會和 claude-ultra 完全同義——兩個名字做同一件事是新的混淆源。
   */
   'codex-ultracode': 'gpt-6.2-astra',
-  'agy-ultra': 'Gemini 3.1 Pro (High)',
-  'antigravity-ultra': 'Gemini 3.1 Pro (High)',
+  'agy-ultra': 'gemini-4-neon-xhigh',
+  'antigravity-ultra': 'gemini-4-neon-xhigh',
 };
 
 /**
@@ -182,14 +182,24 @@ export const DISPATCH_GUIDANCE: ReadonlyArray<{
   },
   {
     situation: '稽核／第二意見',
-    model: 'claude-ultra、grok-4.7 或 gemini-3.1-pro-high',
+    model: 'claude-ultra、grok-4.7 或 gemini-4-neon-xhigh',
     note:
       '要換一家的視角才有意義；同一家的模型會犯同一種錯。結果要逐條驗證，不要照單全收。'
       + 'grok-4.7 在 2026-10-10 的審查題（4 個真 bug＋3 個誘餌）兩輪零誤報、不確定的會標存疑，但每次要 3–5 分鐘。'
-      + '⚠️ gemini-3.1-pro-high 的交付率不穩：2026-09-09 通讀長文件撞過 agy 的 5 分鐘 print timeout，'
+      + '前代 gemini-3.1-pro-high（2026-11 已下架）曾在 2026-09-09 通讀長文件時撞到 agy 的 5 分鐘 print timeout，'
       + '2026-10-03 派同一份稽核，430 秒後 stdout 累計只有 177 bytes（就是那一行 agy warning），'
       + '之後 ai-cli MCP 連線中斷、結果再也取不回來。'
-      + '要兩路稽核就別把它當其中唯一一路，或先用一個小 job 確認它會回話。',
+      + 'gemini-4-neon-xhigh 在 2026-11-20 只驗過一個簡單 job，稽核級長任務的交付尚待驗證。',
+  },
+  {
+    situation: 'Gemini 視角但不吃 agy 額度，或要用 agy 沒有的 Gemini 4 Carbon（Gemini API，按量計費）',
+    model: 'google-gemini-3.8-flash；要強一點用 google-gemini-4-neon；Google 稱最強的是 google-gemini-4-carbon（本專案未比較過）',
+    note:
+      '需要 providers.json 設了 google provider（只寫 api_key 即可）。這條走 Gemini API 的預付額度、按 token 計費，'
+      + '不是 agy 的訂閱額度，所以適合 agy 額度用完時的備援，或要 Carbon（2026-11-20 agy 清單沒有它，API 有）。'
+      + '2026-11-20 以真實金鑰實測：google-gemini-3.8-flash、google-gemini-4-neon 讀檔工具＋第二輪作答都正確（需要本版修正的 thought_signature 回送），'
+      + 'google-gemini-4-carbon 純文字正確；長任務與稽核級工作都還沒測。預付額度用完時回 HTTP 402「prepayment credits are depleted」，'
+      + '錯誤原文在 agentOutput.error。不吃 reasoning_effort。額度有限，日常量大的工作仍優先用免費的 nv-*。',
   },
   {
     situation: '大量低價值工作（分類、摘要、格式轉換、批次改寫）',
@@ -330,8 +340,8 @@ export const MODEL_ALIAS_DETAILS: ModelAliasDetail[] = [
   //    user-config.ts 的 BUILTIN_ALIAS_REASONING。兩份必須一致，
   //    verify-alias-config.mjs 有一條斷言在守這件事（兩份寫死的表最容易悄悄漂移）。
   { name: 'codex-ultracode', resolvesTo: 'gpt-6.2-astra', agent: 'codex', defaultReasoningEffort: 'ultra' },
-  { name: 'agy-ultra', resolvesTo: 'Gemini 3.1 Pro (High)', agent: 'antigravity' },
-  { name: 'antigravity-ultra', resolvesTo: 'Gemini 3.1 Pro (High)', agent: 'antigravity' },
+  { name: 'agy-ultra', resolvesTo: 'gemini-4-neon-xhigh', agent: 'antigravity' },
+  { name: 'antigravity-ultra', resolvesTo: 'gemini-4-neon-xhigh', agent: 'antigravity' },
 ];
 
 /** direct-api 動態 model 後端提示。 */

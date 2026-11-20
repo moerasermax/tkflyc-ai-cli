@@ -297,7 +297,7 @@ Use alias_model to repoint a model alias (for example {"codex-ultra": "gpt-5.6-t
 
 Use unset to drop overrides and fall back to the built-in defaults. Returns the same payload as the models tool so the effective state is visible right away.
 
-Note: antigravity (agy) does accept model selection — the resolved name is normalized to an agy model id ("Gemini 3.1 Pro (High)" -> gemini-3.1-pro-high) and passed as --model. Only "agy" and "agy-default" pass nothing and fall back to the agy CLI's own default, so repointing agy-ultra to those two changes what is reported, not what runs.`,
+Note: antigravity (agy) normalizes display names to model ids ("Gemini 4 Neon (XHigh)" -> gemini-4-neon-xhigh) and passes the id as --model. Targets "agy" and "agy-default" omit --model and let the agy CLI pick its default.`,
           inputSchema: {
             type: 'object',
             properties: {

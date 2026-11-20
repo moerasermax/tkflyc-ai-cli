@@ -188,7 +188,27 @@ const DEFAULT_PROVIDER_BASE_URLS: Record<string, string> = {
   dashscope: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
   anthropic: 'https://api.anthropic.com',
   openai: 'https://api.openai.com/v1',
+  // Gemini API（Google AI Studio 金鑰）的 OpenAI-compatible 端點，走 /chat/completions、Bearer 金鑰。
+  // key 刻意叫 google 而不是 gemini：見 RESERVED_PROVIDER_KEYS。
+  google: 'https://generativelanguage.googleapis.com/v1beta/openai',
 };
+
+/**
+ * 不可當 provider key 的名稱：`<key>-` 會蓋住其他 agent 的 model 命名空間。
+ *
+ * direct-api 在 registry 裡排第一，`tryConfiguredProviderPrefix` 只看 `<key>-` 前綴。
+ * 若有人把 Gemini API 金鑰設成 `providers.gemini`，所有 `gemini-4-neon-high` 之類的
+ * agy 模型都會被 direct-api 接走、拿 `4-neon-high` 去打 API——不報錯地換了後端與計費路線。
+ * gpt-（codex）、grok-（grok）、claude-（claude catch-all）、agy／antigravity、codex（alias）同理。
+ *
+ * 撞到時**只略過那一項**，不讓整份設定失敗：整份丟錯會連帶讓同檔的 nv-／or- 也派不出去，
+ * 而且升級前能用的設定一夕全壞（2026-11-20 稽核指出）。略過後該前綴的 model 回到原本的 agent，
+ * `models` 的 directApiProviders.note 會點名被略過的 key 與改名方式。
+ * 比對區分大小寫，與 `matchProviderPrefix` 的前綴比對一致（`Gemini` 不會蓋住 `gemini-*`，不必擋）。
+ */
+const RESERVED_PROVIDER_KEYS: ReadonlySet<string> = new Set([
+  'gemini', 'gpt', 'grok', 'claude', 'codex', 'agy', 'antigravity',
+]);
 
 /**
  * OpenCode auth.json 自動遷移只認最早那兩個預設端點。
@@ -284,6 +304,14 @@ interface ProviderConfig {
 
 interface ProvidersFile {
   providers: Record<string, ProviderConfig>;
+  /** 因為是保留名稱而略過的 provider key（見 RESERVED_PROVIDER_KEYS）。 */
+  ignoredReservedKeys?: string[];
+}
+
+function reservedKeyNote(keys: string[]): string {
+  return `providers.json 的 provider key ${keys.map((k) => `"${k}"`).join('、')} 是保留名稱（` +
+    `<key>-<model> 會蓋住其他 agent 的模型，例如 gemini-* 屬於 Antigravity），已略過、不會用於派工；` +
+    `請改名（Gemini API 請用 "google"）。`;
 }
 
 interface DirectApiModelSelection {
@@ -311,6 +339,13 @@ interface ChatToolCall {
     name: string;
     arguments: string;
   };
+  /**
+   * 供應商附在 tool call 上、要求下一輪原樣送回的資料。Gemini API（OpenAI-compatible 端點）
+   * 把 `thought_signature` 放在 `extra_content.google`，少送就 400：
+   * 「Function call is missing a thought_signature in functionCall parts」（2026-11-20 實測
+   * gemini-4-neon：不送 400、原樣送回 200）。只有供應商給了才會有，其他供應商的請求不變。
+   */
+  extra_content?: Record<string, unknown>;
 }
 
 interface ChatMessage {
@@ -375,6 +410,7 @@ interface StreamToolCallAccumulator {
     name?: string;
     arguments?: string;
   };
+  extra_content?: Record<string, unknown>;
 }
 
 interface CompletionTurn {
@@ -699,7 +735,12 @@ export function loadProvidersConfig(): ProvidersFile {
     throw new Error(`Invalid providers.json at ${targetPath}: missing "providers" object.`);
   }
   const providers: Record<string, ProviderConfig> = {};
+  const ignoredReservedKeys: string[] = [];
   for (const [providerName, rawProvider] of Object.entries(rawProviders)) {
+    if (RESERVED_PROVIDER_KEYS.has(providerName)) {
+      ignoredReservedKeys.push(providerName);
+      continue;
+    }
     const normalized = normalizeProviderConfig(providerName, rawProvider, targetPath);
     if (!normalized) {
       throw new Error(
@@ -708,7 +749,7 @@ export function loadProvidersConfig(): ProvidersFile {
     }
     providers[providerName] = normalized;
   }
-  return { providers };
+  return ignoredReservedKeys.length > 0 ? { providers, ignoredReservedKeys } : { providers };
 }
 
 export function listConfiguredProviderKeys(): string[] {
@@ -748,8 +789,11 @@ export function describeConfiguredProviders(): {
   note: string | null;
 } {
   let providers: Record<string, ProviderConfig>;
+  let ignoredReservedKeys: string[] = [];
   try {
-    providers = loadProvidersConfig().providers;
+    const loaded = loadProvidersConfig();
+    providers = loaded.providers;
+    ignoredReservedKeys = loaded.ignoredReservedKeys ?? [];
   } catch (error) {
     return { configured: {}, note: `讀不到 ${providersPath()}：${(error as Error).message}` };
   }
@@ -769,7 +813,7 @@ export function describeConfiguredProviders(): {
       example: `${prefixes[prefixes.length - 1]}-${knownModels[0] ?? '<model>'}`,
     };
   }
-  return { configured, note: null };
+  return { configured, note: ignoredReservedKeys.length > 0 ? reservedKeyNote(ignoredReservedKeys) : null };
 }
 
 function getProviderConfig(providerName: string): ProviderConfig {
@@ -886,8 +930,49 @@ function buildCommand(input: BuildCommandInput): BuiltCommand {
   };
 }
 
-function parseOutput(stdout: string): unknown {
-  if (!stdout.trim()) return null;
+/**
+ * 失敗 job 的錯誤原文。2026-11-20 Gemini API 回 402「prepayment credits are depleted」，
+ * 錯誤明明寫進了 stderr，job 結果卻只有 `message: ""`：stdout 有 session_id，
+ * parseOutput 回了非 null，上層就不再附 stderr——呼叫端看不出是帳號沒額度還是程式壞了。
+ *
+ * 只收 direct-api 自己寫的兩種行（HTTP 錯誤在寫出前已 redactApiKey；
+ * `Direct API error:` 是 process-service 寫的例外訊息），不收其他 stderr，避免夾帶未遮蔽的內容。
+ */
+function directApiErrorFromStderr(stderr: string | undefined, exitCode: number | null | undefined): string | undefined {
+  // 143 是呼叫端取消（process-service 的約定），不是失敗；null／undefined 是還沒結束。
+  if (!stderr || exitCode === 0 || exitCode === 143 || exitCode === null || exitCode === undefined) return undefined;
+  const lines = stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('[direct-api]') || line.startsWith('Direct API error:'));
+  if (lines.length === 0) return undefined;
+  return truncateText(redactKnownSecrets(lines.join('\n')), 2000);
+}
+
+/**
+ * 第二層遮蔽：來源端（HTTP 錯誤、fetch 例外）已經 redactApiKey，這裡再擋一次，
+ * 因為 error 會進精簡結果、比 stderr 更常被原樣轉貼。遮掉 providers.json 裡所有金鑰
+ * （讀不到設定檔就跳過），以及任何 `Bearer <token>` 形狀。
+ */
+function redactKnownSecrets(text: string): string {
+  let out = text;
+  try {
+    const providers = asRecord(asRecord(JSON.parse(readProvidersText(providersPath())))?.providers) ?? {};
+    for (const raw of Object.values(providers)) {
+      const record = asRecord(raw);
+      for (const value of [record?.api_key, record?.key, record?.token]) {
+        if (typeof value === 'string' && value.trim().length >= 8) out = redactApiKey(out, value.trim());
+      }
+    }
+  } catch {
+    /* 設定檔讀不到就只做形狀遮蔽 */
+  }
+  return out.replace(/\bBearer\s+[^\s"',;]+/gi, 'Bearer [redacted]');
+}
+
+function parseOutput(stdout: string, stderr?: string, exitCode?: number | null): unknown {
+  const error = directApiErrorFromStderr(stderr, exitCode);
+  if (!stdout.trim()) return error ? { message: '', error } : null;
   let sessionId: string | null = null;
   let message = '';
   let tokens: unknown;
@@ -945,10 +1030,11 @@ function parseOutput(stdout: string): unknown {
 
   const tools = Array.from(toolsMap.values());
   if (!message && !sessionId && !tokens && !usage && cost === undefined && tools.length === 0) {
-    return null;
+    return error ? { message: '', error } : null;
   }
   return {
     message,
+    ...(error ? { error } : {}),
     tokens,
     ...(usage ? { usage } : {}),
     cost,
@@ -1383,10 +1469,26 @@ function appendToolCallDeltas(delta: Record<string, unknown>, turn: CompletionTu
   for (const rawCall of delta.tool_calls) {
     const call = asRecord(rawCall);
     if (!call) continue;
-    const index = typeof call.index === 'number' ? call.index : turn.toolCallAccumulators.length;
+    // OpenAI 規格每個 delta 都帶 index；Gemini 的 OpenAI-compatible 端點不帶（整筆 call 一個 chunk）。
+    // 沒有 index 時：id 對得上既有的就併進去（同一 call 分多個 chunk）；沒有 id 的續段併進最後一筆；
+    // 只用「目前長度」當 index 會把同一個 call 的續段拆成兩筆、參數被切斷（2026-11-20 稽核指出）。
+    let index: number;
+    if (typeof call.index === 'number') {
+      index = call.index;
+    } else if (typeof call.id === 'string') {
+      const existing = turn.toolCallAccumulators.findIndex((acc) => acc?.id === call.id);
+      index = existing >= 0 ? existing : turn.toolCallAccumulators.length;
+    } else {
+      // 沒有 id 也沒有 index：帶了函式名稱、而最後一筆已經有名稱，就是新的一筆；否則是續段。
+      const last = turn.toolCallAccumulators[turn.toolCallAccumulators.length - 1];
+      const startsNew = !last || (typeof asRecord(call.function)?.name === 'string' && Boolean(last.function?.name));
+      index = startsNew ? turn.toolCallAccumulators.length : turn.toolCallAccumulators.length - 1;
+    }
     const accumulator = turn.toolCallAccumulators[index] || {};
     if (typeof call.id === 'string') accumulator.id = call.id;
     if (typeof call.type === 'string') accumulator.type = call.type;
+    const extra = asRecord(call.extra_content);
+    if (extra) accumulator.extra_content = mergeExtraContent(accumulator.extra_content, extra);
     const fn = asRecord(call.function);
     if (fn) {
       accumulator.function = accumulator.function || {};
@@ -1399,6 +1501,20 @@ function appendToolCallDeltas(delta: Record<string, unknown>, turn: CompletionTu
   }
 }
 
+/** 合併兩層：`extra_content.google` 之類的命名空間各自合併，後到的同名欄位才覆蓋，不整個蓋掉。 */
+function mergeExtraContent(
+  current: Record<string, unknown> | undefined,
+  next: Record<string, unknown>
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...(current || {}) };
+  for (const [key, value] of Object.entries(next)) {
+    const before = asRecord(merged[key]);
+    const after = asRecord(value);
+    merged[key] = before && after ? { ...before, ...after } : value;
+  }
+  return merged;
+}
+
 function normalizeToolCalls(value: unknown): ChatToolCall[] {
   if (!Array.isArray(value)) return [];
   const calls: ChatToolCall[] = [];
@@ -1407,6 +1523,7 @@ function normalizeToolCalls(value: unknown): ChatToolCall[] {
     const fn = asRecord(call?.function);
     const name = typeof fn?.name === 'string' ? fn.name : '';
     if (!call || !name) continue;
+    const extra = asRecord(call.extra_content);
     calls.push({
       id: typeof call.id === 'string' ? call.id : `call_${calls.length}`,
       type: 'function',
@@ -1414,6 +1531,7 @@ function normalizeToolCalls(value: unknown): ChatToolCall[] {
         name,
         arguments: typeof fn?.arguments === 'string' ? fn.arguments : '',
       },
+      ...(extra ? { extra_content: extra } : {}),
     });
   }
   return calls;
@@ -1458,6 +1576,7 @@ function finalizeStreamToolCalls(turn: CompletionTurn): void {
         name: call.function?.name || '',
         arguments: call.function?.arguments || '',
       },
+      ...(call.extra_content ? { extra_content: call.extra_content } : {}),
     }))
   );
 }
@@ -1703,9 +1822,13 @@ async function fetchWithRetry(
     } catch (error) {
       // 呼叫端取消不是失敗，別把它重試成四次。
       if ((error as Error).name === 'AbortError') throw error;
-      if (attempt >= maxRetries) throw error;
+      // fetch 自己的例外可能引用標頭值：金鑰含非法字元時 Headers 驗證錯誤會印出整個
+      // "Bearer <金鑰>"（2026-11-20 實測）。這段會經 process-service 寫進 stderr，
+      // 再被帶進 agentOutput.error，所以往外丟之前先遮蔽。
+      const message = redactApiKey((error as Error).message, params.apiKey);
+      if (attempt >= maxRetries) throw message === (error as Error).message ? error : new Error(message);
       lastStatus = 0;
-      lastErrorText = (error as Error).message;
+      lastErrorText = message;
       await backoff(params, attempt, initialDelayMs, null, lastStatus, lastErrorText);
       continue;
     }
@@ -1714,7 +1837,8 @@ async function fetchWithRetry(
 
     const errorText = redactApiKey(await response.text(), params.apiKey);
     if (!isRetryableStatus(response.status) || attempt >= maxRetries) {
-      params.io.stderr(`[direct-api] HTTP ${response.status}: ${errorText}\n`);
+      // 收成一行：錯誤內文常是排版過的 JSON，多行時 agentOutput.error 只收得到第一行。
+      params.io.stderr(`[direct-api] HTTP ${response.status}: ${errorText.replace(/\s*\n\s*/g, ' ')}\n`);
       throw new Error(`direct-api request failed with HTTP ${response.status}`);
     }
     lastStatus = response.status;

@@ -95,7 +95,7 @@ The strict read-only `capabilities` flags, their live verification and the F2 li
 
 Antigravity's top-level model list uses routable vendor results (including successful
 cached results) plus `agy` / `agy-default`. Without a usable result, its fallback is
-`agy`, `agy-default`, `gemini-3.1-pro-high`, and `gemini-3.8-flash-high`.
+`agy`, `agy-default`, `gemini-4-neon-xhigh`, and `gemini-3.8-flash-high`.
 
 ### direct-api
 
@@ -170,6 +170,15 @@ retry and key redaction are shared, only the request/stream translation differs.
   `chat_completions` — before this change such entries could only speak that protocol.
 - Use them as `anthropic-<model>` / `openai-<model>`. Some codex-family models are only
   served over the Responses API.
+- The `google` key has a built-in base URL for the Gemini API's OpenAI-compatible
+  endpoint (`https://generativelanguage.googleapis.com/v1beta/openai`, `chat_completions`),
+  so `{ "google": { "api_key": "..." } }` is enough; call it as `google-<model>`.
+- Provider keys `gemini`, `gpt`, `grok`, `claude`, `codex`, `agy` and `antigravity` are
+  **reserved**: `<key>-<model>` would capture model names that belong to another agent
+  (for example `gemini-*` is Antigravity), so that entry is skipped instead of silently
+  rerouting those jobs. The other providers in the file still load, and the `models` note
+  names the skipped key and suggests renaming it (for Gemini, use `google`). Keys are
+  case-sensitive: `Gemini` is not reserved.
 - An unknown `api_format` value **fails closed**: the whole file throws, naming the
   provider and the bad value. It never silently falls back to `chat_completions`.
 - Usage is accumulated per request from the final (cumulative) stream values and then
