@@ -1160,8 +1160,8 @@
     "file": "src/agents/direct-api.ts",
     "from": "if (parsed?.usage !== undefined && parsed?.usage !== null) {",
     "to": "if (parsed?.usage !== undefined) {",
-    "expect": "Direct-api stream and JSON usage shape",
-    "script": "verify-job-usage.mjs"
+    "expect": "有效用量之後的 usage:null 佔位 chunk 不得標 incomplete",
+    "script": "verify-direct-api.mjs"
   },
   {
     "name": "CLI run 丟掉高成本警告",
@@ -10318,7 +10318,7 @@
     "from": "    if (value === null || value === undefined || value === '') continue;",
     "to": "",
     "script": "verify-direct-api.mjs",
-    "expect": "extra_content 空值要略過且仍接受 0 和 false"
+    "expect": "過濾後的空 extra_content 不得覆蓋純量或寫入空物件"
   },
   {
     "name": "direct-api extra_content 接受原型鍵",

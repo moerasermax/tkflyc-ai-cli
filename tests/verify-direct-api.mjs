@@ -161,6 +161,10 @@ const usageProbes = {
       completion_tokens_details: { reasoning_tokens: null },
     } }],
   ],
+  // 有效用量之後又來一個 usage:null 的結尾 chunk（OpenAI 的佔位值）：不得被當成壞回報而標 incomplete。
+  'Trailing null usage probe': [
+    [{ usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 } }, { usage: null }],
+  ],
   'Optional usage probe': [
     [{ usage: {
       prompt_tokens: 10, completion_tokens: 4, total_tokens: -1,
@@ -754,6 +758,9 @@ async function replayedToolCalls(prompt) {
     input_tokens: 10, output_tokens: 4, source,
   }, 'null 選填計數視為未提供且不得標 incomplete');
   assert.deepStrictEqual(nullOptional.tokens, { input: 10, output: 4, total: 14 }, 'null 選填計數不得寫入 tokens');
+  const trailingNull = await runProbe('Trailing null usage probe');
+  assert.deepStrictEqual(trailingNull.usage, { input_tokens: 10, output_tokens: 4, source },
+    '有效用量之後的 usage:null 佔位 chunk 不得標 incomplete');
 
   const optional = await runProbe('Optional usage probe');
   assert.deepStrictEqual(optional.tokens, {
