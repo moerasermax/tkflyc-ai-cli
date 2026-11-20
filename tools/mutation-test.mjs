@@ -23,7 +23,8 @@
  * 如果它 SURVIVED，代表你的測試沒有真的在保護那段程式碼。
  *
  * 每個突變可用 `script` 欄位指定由哪一支 verify 腳本負責抓（預設
- * verify-alias-config.mjs）。那支腳本必須把失敗訊息印到 **stdout** 且含 "FAIL "，
+ * verify-alias-config.mjs）。那支腳本必須把失敗訊息印成含 "FAIL " 的行，或讓 node:assert
+ * 丟出未捕捉的 AssertionError（訊息在 `AssertionError ...:` 同一行），
  * 裡面要包含該突變 `expect` 的字串，否則會被判成 KILLED(其他斷言)。
  *
  * 在獨立的 git worktree 上跑，不碰主工作目錄。
@@ -209,9 +210,13 @@ for (const [i, mutation] of MUTATIONS.entries()) {
   writeFileSync(path, originalBytes);
 
   // 期待：這個突變讓測試失敗，而且失敗的是我們指定的那條斷言。
+  // ★ 2026-11-20：verify-direct-api.mjs 這類腳本直接用 node:assert，失敗時丟出未捕捉的
+  //   `AssertionError [ERR_ASSERTION]: <訊息>`（stderr），從不印 "FAIL "。原本只認 "FAIL " 行，
+  //   於是那支腳本的突變一律判成 KILLED(其他斷言)、實際欄空白——無法確認是指定斷言抓到的。
+  //   `out` 已含 stderr，所以把 AssertionError 那一行（訊息就在同一行）也算失敗行。
   const failedLines = out
     .split('\n')
-    .filter((line) => line.includes('FAIL '))
+    .filter((line) => line.includes('FAIL ') || /^\s*AssertionError\b/.test(line))
     .join(' | ');
   const killedByExpected = failedLines.includes(mutation.expect);
   const verdict =
