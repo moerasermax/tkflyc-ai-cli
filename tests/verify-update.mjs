@@ -382,21 +382,6 @@ try {
     writeFileSync(join(root, 'plugins/ai-cli-jobs/.claude-plugin/plugin.json'), '{}');
     check('repo 的 plugin.json 沒有版本號就不問（不憑猜測叫人裝）', bundledPluginActions(root, touched, claude).length === 0);
 
-    const flowDir = 'plugins/ai-cli_project-flow';
-    mkdirSync(join(root, flowDir, '.claude-plugin'), { recursive: true });
-    writeFileSync(join(root, flowDir, '.claude-plugin', 'plugin.json'), JSON.stringify({ version: '0.1.0' }));
-    write('installed_plugins.json', { version: 2, plugins: {} });
-    const flowTouched = ['"' + flowDir + '/templates/settings.md"'];
-    const flowActions = bundledPluginActions(root, flowTouched, claude);
-    check('project-flow updater 獨立偵測外掛', flowActions.length === 1
-      && flowActions[0].includes('claude plugin install ai-cli_project-flow@tkflyc-ai-cli'));
-    check('project-flow updater 使用專屬描述', flowActions[0]?.includes('依 Planner 專案身分與專案設定')
-      && !flowActions[0].includes('輸入框上方'));
-    write('installed_plugins.json', { version: 2, plugins: { 'ai-cli_project-flow@tkflyc-ai-cli': [{ version: '0.0.9' }] } });
-    const staleFlow = bundledPluginActions(root, flowTouched, claude);
-    check('project-flow updater 提示安裝副本更新', staleFlow[0]?.includes('0.0.9')
-      && staleFlow[0].includes('claude plugin update ai-cli_project-flow@tkflyc-ai-cli'));
-
     // 端到端：真的跑一次 applyUpdate，更新帶進面板的改版，提示裡要有這則提問。
     const f = fixture();
     const saved = process.env.CLAUDE_CONFIG_DIR;

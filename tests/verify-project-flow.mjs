@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { bundledPluginActions } from '../dist/core/updater.js';
 import { loadSettings, parseSettings, SETTINGS } from '../plugins/ai-cli_project-flow/lib/config.mjs';
 import { checkArchive, handleEvent, ruleContext } from '../plugins/ai-cli_project-flow/lib/flow.mjs';
 import { queryPlanner } from '../plugins/ai-cli_project-flow/lib/project.mjs';
@@ -274,6 +275,29 @@ try {
     write(fresh.hooksPath, JSON.stringify(fresh.next));
     write(fresh.receiptPath, JSON.stringify(fresh.metadata));
     assert.equal(planInstall(freshHome, { uninstall: true }).removeHooksFile, true);
+  });
+
+  const claude = join(TEMP, 'fake claude config');
+  const installed = join(claude, 'plugins', 'installed_plugins.json');
+  const pluginId = 'ai-cli_project-flow@tkflyc-ai-cli';
+  const changed = ['"plugins/ai-cli_project-flow/templates/settings.md"'];
+  const actions = () => bundledPluginActions(ROOT, changed, claude);
+  write(installed, JSON.stringify({ version: 2, plugins: {} }));
+  await checked('project-flow updater 獨立偵測外掛', () => {
+    const notices = actions();
+    assert.equal(notices.length, 1);
+    assert.ok(notices[0].includes('claude plugin install ' + pluginId));
+  });
+  await checked('project-flow updater 使用專屬描述', () => {
+    const [description] = actions();
+    assert.match(description, /依 Planner 專案身分與專案設定/);
+    assert.doesNotMatch(description, /輸入框上方/);
+  });
+  await checked('project-flow updater 提示安裝副本更新', () => {
+    write(installed, JSON.stringify({ version: 2, plugins: { [pluginId]: [{ version: '0.0.9' }] } }));
+    const [notice] = actions();
+    assert.match(notice, /0\.0\.9/);
+    assert.ok(notice.includes('claude plugin update ' + pluginId));
   });
 } finally {
   rmSync(TEMP, { recursive: true, force: true });
