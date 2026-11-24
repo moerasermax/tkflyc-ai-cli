@@ -10,7 +10,7 @@
 
 ### 新增
 
-- 新增 ai-cli_project-flow，讓 Claude Code 與 Codex 共用同一份專案流程，並依 Planner 辨識專案與 worktree。各專案可各自設定進度來源、測試和入庫位置，離線時能辨識已確認的專案。Stop 對同一批改動只補問一次收尾證據，歸檔沿用全域判定。（Codex）
+- 新增 ai-cli_project-flow，讓 Claude Code 與 Codex 共用專案流程及各自的進度、測試和入庫設定。依 Claude Opus 5.5 稽核修正補上 Planner 設定探測及離線快取復原，讓兩端辨識同一專案並優先讀取目前 worktree 的設定。Stop 對同一批改動只補問一次，純文件改動只要求進度更新。Codex 改用跨 shell 的 hook 命令，並以隔離安裝與實際歸檔腳本子行程驗證接線。（Codex）
 
 - direct-api 新增兩種原生協定，由 providers.json 的 `api_format` 選擇：`anthropic_messages`（`POST {base}/v1/messages`，`x-api-key`＋`anthropic-version: 2023-06-01`）與 `openai_responses`（`POST {base}/responses`）；預設仍是 `chat_completions`。**為什麼**：原本只打 OpenAI-compatible `/chat/completions`，接不了 Anthropic 原生 API，而部分 codex 系列模型只開放 Responses API。兩者都沿用既有的 agent loop、工具、session、重試與金鑰遮蔽，只在 `src/agents/direct-api-protocols.ts` 做請求轉換與串流解析，不另複製一份 loop、不動 `src/core/`。`anthropic`／`openai` 兩個 key 新增內建端點，**只在省略 `base_url` 時**才預設對應協定——改動前這兩個名字沒有內建端點，能載入的既有設定一定自己寫了 `base_url` 且只能走 chat completions，所以條件限縮成這樣才能讓既有設定行為完全不變；OpenCode auth.json 自動遷移也不因新預設端點多搬這兩家的金鑰。未知 `api_format` 整份 fail-closed，不退回 chat completions（退回會把拼字錯誤變成遠端 404／401）。用量依協定把串流內的累計值收斂成每請求一筆，再跨工具迴圈相加，不重複計算；Anthropic 的 input 依 OpenAI 語意計入快取讀寫。Anthropic 的 thinking（含 signature）與 Responses 的 output items（含 reasoning item）以 session 訊息的 `native` 欄位原樣重播。**實測**：2026-11-18 以真實金鑰對 `anthropic-claude-haiku-5-5` 與 `openai-gpt-6-luna` 各跑純文字與「讀檔工具＋續跑」兩種請求，皆通過；其餘邊界情況（串流中斷、incomplete、錯誤遮蔽）仍只由 `tests/verify-native-api-formats.mjs` 的模擬串流涵蓋。（Claude）
 

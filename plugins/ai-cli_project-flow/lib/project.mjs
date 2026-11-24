@@ -1,14 +1,20 @@
 /** 以 Planner 的 marker／GitHub origin 辨識專案，離線時使用同身分的本機快取。 */
 import { randomUUID } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
+const plannerUnconfigured = Symbol('Planner 未設定');
+const staleLockMs = 10_000;
 
 function canonical(path) {
-  try { return realpathSync(path); } catch { return resolve(path); }
+  try { return realpathSync.native(path); } catch { return resolve(path); }
+}
+
+export function pathKey(path) {
+  return process.platform === 'win32' ? normalize(path).toLowerCase() : path;
 }
 
 function read(path) {
@@ -45,10 +51,10 @@ export function locateProject(cwd, home = homedir()) {
     if (own !== null && !uuid.test(own)) return null;
     if (own !== null || isRepo) {
       const root = isRepo ? mainRepo(dir) : dir;
-      const id = own ?? marker(root);
-      if ((id !== null && !uuid.test(id)) || (id === null && root === canonical(home))) return null;
+      const id = root === dir ? own : marker(root) ?? own;
+      if ((id !== null && !uuid.test(id)) || (id === null && pathKey(root) === pathKey(canonical(home)))) return null;
       const remoteUrl = id ? null : origin(root);
-      return id || remoteUrl ? { root, id, remoteUrl } : null;
+      return id || remoteUrl ? { root, checkoutRoot: dir, id, remoteUrl } : null;
     }
     const parent = dirname(dir);
     if (parent === dir) return null;
@@ -57,23 +63,71 @@ export function locateProject(cwd, home = homedir()) {
   return null;
 }
 
-function credentials(env) {
-  const envFile = env.PLANNER_ENV_FILE || (env.PLANNER_ROOT && join(env.PLANNER_ROOT, '.env.local'));
+function readJson(path) {
+  try { return JSON.parse(read(path).replace(/^\uFEFF/u, '')); } catch { return null; }
+}
+
+function* detectedEnvFiles(home) {
+  for (const settingsPath of [join(home, '.claude', 'settings.json'), join(home, '.codex', 'hooks.json')]) {
+    for (const groups of Object.values(readJson(settingsPath)?.hooks ?? {})) {
+      if (!Array.isArray(groups)) continue;
+      for (const group of groups) {
+        if (!Array.isArray(group?.hooks)) continue;
+        for (const hook of group.hooks) {
+          for (const command of [hook?.command, hook?.commandWindows]) {
+            if (typeof command !== 'string') continue;
+            for (const arg of command.matchAll(/"([^"]*)"|'([^']*)'|([^\s"';|&]+)/gu)) {
+              const path = (arg[1] ?? arg[2] ?? arg[3]).replace(/^(?:~|\$HOME|\$\{HOME\}|\$env:USERPROFILE|%USERPROFILE%)(?=[\\/])/iu, () => home);
+              if (isAbsolute(path) && /[\\/]tkflyc-planner[\\/]mcp[\\/]session-(?:start|end)-hook\.mjs$/iu.test(path)) {
+                yield join(dirname(dirname(path)), '.env.local');
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+function* envFiles(env, home) {
+  if (env.PLANNER_ENV_FILE) yield env.PLANNER_ENV_FILE;
+  if (env.PLANNER_ROOT) yield join(env.PLANNER_ROOT, '.env.local');
+  const config = readJson(join(home, '.ai-cli', 'project-flow', 'config.json'));
+  if (typeof config?.plannerEnvFile === 'string' && config.plannerEnvFile) yield config.plannerEnvFile;
+  if (typeof config?.plannerRoot === 'string' && config.plannerRoot) yield join(config.plannerRoot, '.env.local');
+  yield* detectedEnvFiles(home);
+}
+
+function readEnv(path) {
   const file = new Map();
-  for (const line of (envFile ? read(envFile) : '').split(/\r?\n/)) {
-    const match = /^([A-Z_]+)=(.*)$/u.exec(line);
+  for (const line of read(path).split(/\r?\n/)) {
+    const match = /^\s*(?:export\s+)?([A-Z_]+)\s*=(.*)$/u.exec(line);
     if (match) file.set(match[1], match[2].trim().replace(/^(['"])(.*)\1$/, '$2'));
   }
-  const token = env.PLANNER_TOKEN || file.get('PLANNER_TOKEN')
-    || (env.PLANNER_API_TOKENS || file.get('PLANNER_API_TOKENS'))?.split(',')[0].trim();
-  const url = env.PLANNER_URL || file.get('PLANNER_URL')
-    || 'http://127.0.0.1:' + (file.get('PORT') || '3600');
-  if (!token) throw new Error('Planner 未設定');
+  return file;
+}
+
+function credentials(env, home) {
+  const envToken = env.PLANNER_TOKEN?.trim() || env.PLANNER_API_TOKENS?.split(',')[0].trim();
+  if (envToken && env.PLANNER_URL) return { token: envToken, url: env.PLANNER_URL.replace(/\/+$/, '') };
+  let token = envToken;
+  let url = env.PLANNER_URL;
+  for (const path of envFiles(env, home)) {
+    const file = readEnv(path);
+    const fileToken = file.get('PLANNER_TOKEN') || file.get('PLANNER_API_TOKENS')?.split(',')[0].trim();
+    const fileUrl = file.get('PLANNER_URL') || (file.get('PORT') && 'http://127.0.0.1:' + file.get('PORT'));
+    if (!(token || fileToken) || (token && !fileUrl && !fileToken)) continue;
+    token ||= fileToken;
+    url ||= fileUrl;
+    break;
+  }
+  if (!token) throw plannerUnconfigured;
+  url ||= 'http://127.0.0.1:3600';
   return { token, url: url.replace(/\/+$/, '') };
 }
 
-export async function queryPlanner(candidate, env = process.env) {
-  const { token, url } = credentials(env);
+export async function queryPlanner(candidate, env = process.env, home = homedir()) {
+  const { token, url } = credentials(env, home);
   const op = candidate.id ? 'project.list' : 'project.resolveByRemote';
   const response = await fetch(url + '/gateway', {
     method: 'POST',
@@ -108,12 +162,18 @@ async function storeEntry(path, entry) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     try { descriptor = openSync(lock, 'wx', 0o600); } catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      await delay(25);
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > staleLockMs) rmSync(lock, { force: true });
+        else await delay(25);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
       descriptor = openSync(lock, 'wx', 0o600);
     }
     const current = cacheEntries(path);
-    if (!entry.id && !current.some(item => item?.root === entry.root)) return;
-    const entries = current.filter(item => item?.root !== entry.root);
+    const rootKey = pathKey(entry.root);
+    const entries = current.filter(item => typeof item?.root === 'string' && pathKey(item.root) !== rootKey);
+    if (!entry.id && current.length === entries.length) return;
     writeFileSync(temporary, JSON.stringify([...entries, entry]) + '\n', { flag: 'wx', mode: 0o600 });
     renameSync(temporary, path);
   } catch {
@@ -131,18 +191,28 @@ async function storeEntry(path, entry) {
 
 export async function identifyProject(cwd, { home = homedir(), env = process.env, lookup = queryPlanner } = {}) {
   const candidate = locateProject(cwd, home);
-  if (!candidate) return null;
+  if (!candidate) {
+    if (lookup === queryPlanner) {
+      try { credentials(env, home); } catch (error) {
+        if (error === plannerUnconfigured) return { plannerUnconfigured: true };
+      }
+    }
+    return null;
+  }
   const path = join(home, '.ai-cli', 'project-flow', 'cache.json');
   const key = candidate.id ?? candidate.remoteUrl;
   try {
-    const id = await lookup(candidate, env);
+    const id = await lookup(candidate, env, home);
     const entry = { root: candidate.root, key, id: id?.toLowerCase() ?? null, at: new Date().toISOString() };
     // 已查證無此專案時只撤銷舊資料，INIT 不替陌生資料夾建快取。
     if (entry.id || existsSync(path)) await storeEntry(path, entry);
-    return entry.id ? { root: entry.root, id: entry.id } : null;
-  } catch {
-    const entry = cacheEntries(path).find(item => item?.root === candidate.root && item.key === key);
-    if (!uuid.test(entry?.id ?? '') || !Number.isFinite(Date.parse(entry.at))) return null;
-    return { root: candidate.root, id: entry.id, cachedAt: new Date(entry.at).toISOString() };
+    return entry.id ? { ...candidate, id: entry.id } : null;
+  } catch (error) {
+    const rootKey = pathKey(candidate.root);
+    const entry = cacheEntries(path).find(item => typeof item?.root === 'string' && pathKey(item.root) === rootKey && item.key === key);
+    if (!uuid.test(entry?.id ?? '') || !Number.isFinite(Date.parse(entry.at))) {
+      return error === plannerUnconfigured ? { plannerUnconfigured: true } : null;
+    }
+    return { ...candidate, id: entry.id, cachedAt: new Date(entry.at).toISOString() };
   }
 }

@@ -1,4 +1,5 @@
 /** 結構化合併使用者層 Codex hooks，並同步原生 skill。 */
+import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, copyFileSync, constants, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -10,18 +11,16 @@ const marker = '--ai-cli-project-flow';
 const adapter = fileURLToPath(new URL('../adapters/codex.mjs', import.meta.url));
 const sourceSkill = fileURLToPath(new URL('../skills/project-flow/SKILL.md', import.meta.url));
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-const quoteSh = path => "'" + path.replaceAll("'", "'\\''") + "'";
-const quotePs = path => "'" + path.replaceAll("'", "''") + "'";
 const digest = text => createHash('sha256').update(text).digest('hex');
 
-function hookFor(event, path, node) {
-  const args = ' ' + event + ' ' + marker;
-  return { type: 'command', command: quoteSh(node) + ' ' + quoteSh(path) + args,
-    commandWindows: '& ' + quotePs(node) + ' ' + quotePs(path) + args, timeout: 15 };
+function hookFor(event, path) {
+  if (/["$%!\x60\r\n]/u.test(path)) throw new Error('外掛路徑含 shell 展開字元，請改用可供各 shell 共用的安裝路徑');
+  const script = process.platform === 'win32' ? path.replaceAll('\\', '/') : path.replaceAll('\\', '\\\\');
+  return { type: 'command', command: 'node "' + script + '" ' + event + ' ' + marker, timeout: 15 };
 }
 
 export function mergeHooks(original, { uninstall = false, emptyEvents = [], hadHooks = true,
-  adapterPath = adapter, node = process.execPath } = {}) {
+  adapterPath = adapter } = {}) {
   if (!record(original) || (Object.hasOwn(original, 'hooks') && !record(original.hooks))) {
     throw new Error('hooks.json 根節點及 hooks 必須是物件');
   }
@@ -38,7 +37,7 @@ export function mergeHooks(original, { uninstall = false, emptyEvents = [], hadH
       if (items.length === group.hooks.length) return [group];
       return items.length ? [{ ...group, hooks: items }] : [];
     });
-    if (!uninstall) kept.push({ hooks: [hookFor(event, adapterPath, node)] });
+    if (!uninstall) kept.push({ hooks: [hookFor(event, adapterPath)] });
     if (kept.length || emptyEvents.includes(event) || !groups.length) hooks[event] = kept;
     else delete hooks[event];
   }
@@ -125,6 +124,11 @@ function main(args) {
   }
   const home = homedir();
   const options = { uninstall: args.includes('--uninstall') };
+  if (!options.uninstall) {
+    // PowerShell 對帶引號的執行檔路徑需要呼叫運算子。共用命令以 PATH 找 node。
+    const node = spawnSync('node', ['--version'], { encoding: 'utf8', timeout: 1500, windowsHide: true });
+    if (node.status !== 0) throw new Error('PATH 找不到可執行的 node，請確認啟動 Codex 的環境可執行 node --version');
+  }
   if (args.includes('--dry-run')) {
     report(planInstall(home, options), true);
     return;
@@ -132,7 +136,11 @@ function main(args) {
   const codexDir = join(home, '.codex');
   mkdirSync(codexDir, { recursive: true });
   const lock = join(codexDir, '.ai-cli-project-flow-install.lock');
-  const descriptor = openSync(lock, 'wx', 0o600);
+  let descriptor;
+  try { descriptor = openSync(lock, 'wx', 0o600); } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    throw new Error('安裝鎖已存在 ' + lock + '。請先確認有無其他安裝程序正在執行。');
+  }
   try {
     const plan = planInstall(home, options);
     report(plan, false);

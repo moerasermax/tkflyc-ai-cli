@@ -1,10 +1,17 @@
 /** 保守地檢查回覆中的收尾證據。只有可比較的 Git 狀態才會攔一次。 */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, relative, sep } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { extname, isAbsolute, join, relative, sep } from 'node:path';
+import { pathKey } from './project.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
+const docExtensions = new Set(['.md', '.markdown', '.txt', '.rst', '.adoc', '.asciidoc']);
+const docDirectory = 'docs/';
+const stateTtlMs = 14 * 24 * 60 * 60 * 1000;
+const hashPattern = /^[\da-f]{64}$/;
+const stateFilePattern = /^(?:checked|session)-[\da-f]{64}$/;
+const diffOptions = ['--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--no-renames'];
 
 function git(cwd, ...args) {
   return execFileSync('git', ['--no-pager', ...args], {
@@ -12,27 +19,62 @@ function git(cwd, ...args) {
   });
 }
 
+function pathsFromGit(output) {
+  return output.toString().split('\0').filter(Boolean);
+}
+
 function fingerprint(cwd) {
   try {
-    const root = realpathSync(git(cwd, 'rev-parse', '--show-toplevel').toString().trimEnd());
+    const root = realpathSync.native(git(cwd, 'rev-parse', '--show-toplevel').toString().trimEnd());
     const head = git(root, 'rev-parse', '--verify', 'HEAD').toString().trim();
-    const diff = git(root, 'diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--binary', 'HEAD', '--');
-    const names = git(root, 'ls-files', '--others', '--exclude-standard', '-z').toString().split('\0').filter(Boolean);
+    const diff = git(root, 'diff', ...diffOptions, '--binary', 'HEAD', '--');
+    const tracked = pathsFromGit(git(root, 'diff', ...diffOptions, '--name-only', '-z', 'HEAD', '--'));
+    // Git 以相同次序列檔名與 patch。用 latin1 保留 patch 裡可能存在的非 UTF-8 位元組。
+    const patches = diff.toString('latin1').split(/^(?=diff --git )/m).filter(Boolean);
+    if (tracked.length !== patches.length) return null;
+    const names = pathsFromGit(git(root, 'ls-files', '--others', '--exclude-standard', '-z'));
+    if (names.length > 500) return null;
     const entries = [];
     let bytes = 0;
     for (const name of names) {
       const path = join(root, name);
-      const fromRoot = relative(root, realpathSync(path));
+      const fromRoot = relative(root, realpathSync.native(path));
       if (fromRoot === '..' || fromRoot.startsWith('..' + sep) || isAbsolute(fromRoot)) return null;
       const stat = lstatSync(path);
       bytes += stat.size;
-      if (!stat.isFile() || bytes > 8 * 1024 * 1024 || names.length > 500) return null;
+      if (!stat.isFile() || bytes > 8 * 1024 * 1024) return null;
       entries.push([name, hash(readFileSync(path))]);
     }
-    return { root, value: hash(JSON.stringify([head, hash(diff), entries])) };
+    const value = hash(JSON.stringify([head, hash(diff), entries]));
+    const changes = [...tracked.map((name, index) => [name, hash(patches[index])]), ...entries];
+    return { root, value, head, changes };
   } catch {
     return null;
   }
+}
+
+function readBaseline(path) {
+  const text = readFileSync(path, 'utf8');
+  if (hashPattern.test(text)) return { value: text }; // 先前版本只存指紋。
+  const baseline = JSON.parse(text);
+  return hashPattern.test(baseline?.value ?? '') && /^[\da-f]{40}(?:[\da-f]{24})?$/.test(baseline.head)
+    && Array.isArray(baseline.changes) ? baseline : null;
+}
+
+function changedPaths(baseline, current) {
+  const before = new Map(baseline.changes);
+  const after = new Map(current.changes);
+  const names = new Set([...before.keys(), ...after.keys()]);
+  const changed = [...names].filter(name => before.get(name) !== after.get(name));
+  if (baseline.head !== current.head) {
+    changed.push(...pathsFromGit(git(current.root, 'diff', ...diffOptions, '--name-only', '-z', baseline.head, current.head, '--')));
+  }
+  return changed;
+}
+
+function documentation(name) {
+  const lower = name.toLowerCase();
+  return lower.startsWith(docDirectory) || docExtensions.has(extname(lower));
 }
 
 const evidence = [
@@ -55,30 +97,68 @@ function snapshot(payload, project, stateDir) {
   if (typeof payload.session_id !== 'string' || !payload.session_id) return null;
   const current = fingerprint(payload.cwd);
   if (!current) return null;
-  const scope = join(stateDir, 'stop', hash(JSON.stringify([project.id, current.root])));
-  return { ...current, scope, baseline: join(scope, 'session-' + hash(payload.session_id)) };
+  const rootKey = pathKey(current.root);
+  const scope = join(stateDir, 'stop', hash(JSON.stringify([project.id, rootKey])));
+  // Windows 上保留舊版以原始路徑命名的狀態，直到其自然過期。
+  const legacyScope = rootKey === current.root ? null
+    : join(stateDir, 'stop', hash(JSON.stringify([project.id, current.root])));
+  return { ...current, scope, legacyScope, sessionFile: 'session-' + hash(payload.session_id) };
+}
+
+function pruneScope(scope, cutoff) {
+  try {
+    for (const file of readdirSync(scope, { withFileTypes: true })) {
+      if (!file.isFile() || !stateFilePattern.test(file.name)) continue;
+      const path = join(scope, file.name);
+      try {
+        if (lstatSync(path).mtimeMs < cutoff) unlinkSync(path);
+      } catch { /* 其他 hook 可能已清掉同一個狀態檔。 */ }
+    }
+  } catch { /* 狀態目錄可能尚未建立。 */ }
 }
 
 export function rememberBaseline(payload, project, stateDir) {
+  const cutoff = Date.now() - stateTtlMs;
+  const stopDir = join(stateDir, 'stop');
+  try {
+    for (const scope of readdirSync(stopDir, { withFileTypes: true })) {
+      if (scope.isDirectory() && hashPattern.test(scope.name)) pruneScope(join(stopDir, scope.name), cutoff);
+    }
+  } catch { /* 尚無舊狀態。 */ }
   const current = snapshot(payload, project, stateDir);
   if (!current) return;
   try {
+    if (current.legacyScope && existsSync(join(current.legacyScope, current.sessionFile))) return;
     mkdirSync(current.scope, { recursive: true, mode: 0o700 });
-    writeOnce(current.baseline, current.value);
+    const { value, head, changes } = current;
+    writeOnce(join(current.scope, current.sessionFile), JSON.stringify({ value, head, changes }));
   } catch { /* 不能建立基準就不擋。 */ }
 }
 
 export function stopReason(payload, project, stateDir) {
   if (payload.stop_hook_active === true || typeof payload.last_assistant_message !== 'string'
       || !payload.last_assistant_message.trim()) return null;
-  const missing = evidence.filter(([, pattern]) => !pattern.test(payload.last_assistant_message)).map(([label]) => label);
   const current = snapshot(payload, project, stateDir);
   if (!current) return null;
+  pruneScope(current.scope, Date.now() - stateTtlMs);
+  if (current.legacyScope) pruneScope(current.legacyScope, Date.now() - stateTtlMs);
+  let onlyDocs = false;
   try {
-    const baseline = readFileSync(current.baseline, 'utf8');
-    if (!/^[\da-f]{64}$/.test(baseline) || baseline === current.value) return null;
+    const baselinePath = join(current.scope, current.sessionFile);
+    const baseline = readBaseline(current.legacyScope && !existsSync(baselinePath)
+      ? join(current.legacyScope, current.sessionFile) : baselinePath);
+    if (!baseline || baseline.value === current.value) return null;
+    if (baseline.changes) {
+      const changed = changedPaths(baseline, current);
+      if (!changed.length) return null;
+      onlyDocs = changed.every(documentation);
+    }
   } catch { return null; }
-  if (!writeOnce(join(current.scope, 'checked-' + current.value), '') || !missing.length) return null;
+  const required = onlyDocs ? evidence.slice(-1) : evidence;
+  const missing = required.filter(([, pattern]) => !pattern.test(payload.last_assistant_message)).map(([label]) => label);
+  const checked = 'checked-' + current.value;
+  if (current.legacyScope && existsSync(join(current.legacyScope, checked))) return null;
+  if (!writeOnce(join(current.scope, checked), '') || !missing.length) return null;
   return '專案流程看到本批 Git 改動的回覆仍缺以下證據：' + missing.join('、')
     + '。請補上實際結果與路徑，或說明哪些未完成、原因與卡關。';
 }
