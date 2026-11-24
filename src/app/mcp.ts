@@ -721,12 +721,17 @@ Note: antigravity (agy) normalizes display names to model ids ("Gemini 4 Neon (X
     // 只在送出前縮小提醒範圍，無須覆寫協定的 initialize handler。
     const send = transport.send.bind(transport);
     transport.send = async (message) => {
-      if ('result' in message && 'serverInfo' in message.result && 'protocolVersion' in message.result) {
-        const instructions = this.equipmentInstructions();
-        if (instructions) message.result.instructions = instructions;
-        else delete message.result.instructions;
-      }
-      await send(message);
+      let outgoing = message;
+      try {
+        if ('result' in message && 'serverInfo' in message.result && 'protocolVersion' in message.result) {
+          const instructions = this.equipmentInstructions();
+          const result = { ...message.result };
+          if (instructions) result.instructions = instructions;
+          else delete result.instructions;
+          outgoing = { ...message, result };
+        }
+      } catch { /* 提醒格式化失敗仍送出 SDK 的原始回應。 */ }
+      await send(outgoing);
     };
     await this.server.connect(transport);
     console.error('AI CLI MCP server running on stdio');

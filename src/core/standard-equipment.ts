@@ -50,9 +50,41 @@ function approvals(config: string): Map<string, Approval> {
   return states;
 }
 
-/** Codex 0.172 對安裝器產生的 command hook，以排序後的正規化 JSON 算 SHA-256。 */
-function declarationHash(event: string, command: string): string {
-  const identity = { event_name: event, hooks: [{ async: false, command, timeout: 15, type: 'command' }] };
+type HookEventKey = typeof HOOK_EVENTS[keyof typeof HOOK_EVENTS] | 'pre_tool_use' | 'session_end';
+interface CommandHookDeclaration {
+  command: string;
+  commandWindows?: string;
+  command_windows?: string;
+  timeout?: number;
+  async?: boolean;
+  statusMessage?: string;
+  additionalContextLimit?: number;
+}
+
+/**
+ * Codex 0.172 的 hook_hash / version_for_toml：每個 handler 各算一次，TOML 省略未設欄位，
+ * 再遞迴排序 JSON 的 key 後算 SHA-256。hooks.json 路徑只出現在核准索引。
+ * https://github.com/openai/codex/blob/rust-v0.172.0/codex-rs/hooks/src/engine/discovery.rs
+ */
+export function declarationHash(event: HookEventKey, handler: CommandHookDeclaration,
+  matcher?: string, platform = process.platform): string {
+  const sessionEnd = event === 'session_end';
+  const timeout = Math.max(1, handler.timeout ?? (sessionEnd ? 1 : 600));
+  const limit = handler.additionalContextLimit;
+  const supportsContext = !sessionEnd && event !== 'stop';
+  const supportsMatcher = event !== 'user_prompt_submit' && event !== 'stop';
+  const identity = {
+    event_name: event,
+    hooks: [{
+      additionalContextLimit: supportsContext && limit !== 2500 ? limit ?? undefined : undefined,
+      async: handler.async ?? false,
+      command: (platform === 'win32' ? handler.commandWindows ?? handler.command_windows : undefined) ?? handler.command,
+      statusMessage: handler.statusMessage ?? undefined,
+      timeout: sessionEnd ? Math.min(3, timeout) : timeout,
+      type: 'command',
+    }],
+    matcher: supportsMatcher ? matcher ?? undefined : undefined,
+  };
   return 'sha256:' + createHash('sha256').update(JSON.stringify(identity)).digest('hex');
 }
 
@@ -88,7 +120,7 @@ function codexHookIssues(codexDir: string): string | null {
             || handler.statusMessage != null || handler.additionalContextLimit != null
             || !/^node "[^"\r\n]+\/adapters\/codex\.mjs"$/.test(invocation)) continue;
           const approval = states.get(path + ':' + key + ':' + groupIndex + ':' + handlerIndex);
-          if (approval?.hash === declarationHash(key, command) && !approval.disabled) {
+          if (approval?.hash === declarationHash(key, handler, group.matcher) && !approval.disabled) {
             status = 'ok';
             break;
           }
@@ -124,5 +156,12 @@ function codexAction(root: string): string[] {
 
 export function getStandardEquipment(root = ROOT): { claude: string[]; codex: string[] } {
   if (process.env.AI_CLI_WORKER === '1') return { claude: [], codex: [] };
-  return { claude: standardClaudeActions(root), codex: codexAction(root) };
+  try {
+    return { claude: standardClaudeActions(root), codex: codexAction(root) };
+  } catch {
+    return {
+      claude: ['Claude Code 標配外掛無法判斷是否已安裝。'],
+      codex: ['ai-cli_project-flow 的 Codex hook 無法判斷是否已安裝或信任。'],
+    };
+  }
 }

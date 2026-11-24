@@ -2949,8 +2949,8 @@
     "name": "面板紀錄缺版本時當成 0.0.0",
     "file": "src/core/updater.ts",
     "script": "verify-update.mjs",
-    "from": "    if (typeof copy?.version !== 'string' || !copy.version) return null;",
-    "to": "    if (typeof copy?.version !== 'string' || !copy.version) return [{ version: '0.0.0', where: 'user' }];",
+    "from": "    if (!version) return null;",
+    "to": "    if (!version) return [{ version: '0.0.0', where: 'user', scope: 'user' }];",
     "expect": "有這個外掛的紀錄但沒有版本"
   },
   {
@@ -10939,8 +10939,8 @@
   {
     "name": "project-flow: updater 錯用 jobs 描述",
     "file": "src/core/updater.ts",
-    "from": "    return `【要問使用者】${plugin.label}有新版 ${latest}，這台機器還沒裝。${plugin.description ?? ''}` +",
-    "to": "    return `【要問使用者】${plugin.label}有新版 ${latest}，這台機器還沒裝。它會在 Claude Code 輸入框上方列出全機 ai-cli job。` +",
+    "from": "    return `【要問使用者】${plugin.label}有新版 ${latest}，${status}${plugin.description ?? ''}` +",
+    "to": "    return `【要問使用者】${plugin.label}有新版 ${latest}，${status}它會在 Claude Code 輸入框上方列出全機 ai-cli job。` +",
     "script": "verify-project-flow.mjs",
     "expect": "project-flow updater 使用專屬描述"
   },
@@ -10963,7 +10963,7 @@
   {
     "name": "標配提醒: 只看核准紀錄不比對雜湊",
     "file": "src/core/standard-equipment.ts",
-    "from": "          if (approval?.hash === declarationHash(key, command) && !approval.disabled) {",
+    "from": "          if (approval?.hash === declarationHash(key, handler, group.matcher) && !approval.disabled) {",
     "to": "          if (approval?.hash && !approval.disabled) {",
     "script": "verify-standard-equipment.mjs",
     "expect": "雜湊不符仍提示信任"
@@ -10975,5 +10975,37 @@
     "to": "",
     "script": "verify-standard-equipment.mjs",
     "expect": "worker 握手無標配提醒"
+  },
+  {
+    "name": "標配稽核: Codex 客戶端也收到 Claude 提醒",
+    "file": "src/app/mcp.ts",
+    "from": "    if (client === 'codex-mcp-client' || client === 'codex') return { claude: [], codex: this.equipment.codex };",
+    "to": "    if (client === 'codex-mcp-client' || client === 'codex') return this.equipment;",
+    "script": "verify-standard-equipment.mjs",
+    "expect": "Codex 握手只列 Codex"
+  },
+  {
+    "name": "標配稽核: transport.send 格式化例外阻擋握手",
+    "file": "src/app/mcp.ts",
+    "from": "      } catch { /* 提醒格式化失敗仍送出 SDK 的原始回應。 */ }",
+    "to": "      } catch (error) { throw error; }",
+    "script": "verify-standard-equipment.mjs",
+    "expect": "transport.send 格式化例外仍送出原始 initialize 回應"
+  },
+  {
+    "name": "標配稽核: 更新通知去重後沿用原件數",
+    "file": "src/core/updater.ts",
+    "from": "  if (pending.length) header.push(sections[countAt]!.replace(/有 \\d+ 件事/, `有 ${pending.length} 件事`));",
+    "to": "  if (pending.length) header.push(sections[countAt]!);",
+    "script": "verify-standard-equipment.mjs",
+    "expect": "當次更新去重重算件數並保留其他事項"
+  },
+  {
+    "name": "標配稽核: Codex 開場例外省略未知提醒",
+    "file": "src/core/standard-equipment.ts",
+    "from": "      codex: ['ai-cli_project-flow 的 Codex hook 無法判斷是否已安裝或信任。'],",
+    "to": "      codex: [],",
+    "script": "verify-standard-equipment.mjs",
+    "expect": "Codex 路徑解析例外仍能 initialize 並回未知"
   }
 ]

@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export type UpdatePolicy = 'on' | 'check' | 'off';
@@ -148,6 +148,16 @@ const SHIPPED_PLUGIN_VERSIONS: Readonly<Record<string, string>> = {
   'ai-cli_project-flow': '0.1.0',
 };
 
+function pluginVersion(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length <= 32 && /^\d+\.\d+\.\d+$/.test(value)
+    && !/[\r\n]/.test(value) ? value : undefined;
+}
+
+function installationLabel(text: string): string {
+  const clean = text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ').trim();
+  return clean.length > 120 ? clean.slice(0, 119) + '…' : clean;
+}
+
 /** 只比 `x.y.z`；任一邊解析不出來就當「不比」，不憑猜測叫人更新（稽核：亂碼版本曾被當成 0.0.0）。 */
 function olderVersion(installed: string, latest: string): boolean {
   const parts = (v: string) => /^(\d+)\.(\d+)\.(\d+)/.exec(v.trim())?.slice(1, 4).map(Number);
@@ -165,7 +175,7 @@ export interface InstalledCopy { version: string; where: string }
  * `knownMarketplace` 為 false 時安裝與更新都要先加 marketplace。
  */
 export function pluginAction(plugin: { name: string; marketplace: string; repo: string; label: string; description?: string },
-  latest: string, installed: readonly InstalledCopy[] | null, knownMarketplace: boolean): string | null {
+  latest: string, installed: readonly InstalledCopy[] | null, knownMarketplace: boolean, otherProject?: string): string | null {
   const id = `${plugin.name}@${plugin.marketplace}`;
   const ask = '（給呼叫端 AI：請先問使用者要不要做，使用者同意才執行；不同意就略過，不要自己裝。）';
   const add = knownMarketplace ? '' : `    claude plugin marketplace add ${plugin.repo}\n`;
@@ -176,7 +186,8 @@ export function pluginAction(plugin: { name: string; marketplace: string; repo: 
       `  已安裝的話，更新：\n${update}\n  沒裝而想裝的話：\n${install}`;
   }
   if (!installed.length) {
-    return `【要問使用者】${plugin.label}有新版 ${latest}，這台機器還沒裝。${plugin.description ?? ''}` +
+    const status = otherProject ? `只裝在 ${otherProject} 範圍，目前專案還沒裝。` : '這台機器還沒裝。';
+    return `【要問使用者】${plugin.label}有新版 ${latest}，${status}${plugin.description ?? ''}` +
       `要不要安裝？${ask}\n  安裝：\n${install}`;
   }
   const stale = installed.filter((copy) => olderVersion(copy.version, latest));
@@ -215,37 +226,53 @@ function readPluginJson(path: string): Record<string, unknown> | null | undefine
   return undefined;
 }
 
-function installedCopies(plugins: unknown, id: string): InstalledCopy[] | null {
+type ScopedCopy = InstalledCopy & { scope: string; projectPath?: string };
+
+function installedCopies(plugins: unknown, id: string): ScopedCopy[] | null {
   if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return null;
   const entries = (plugins as Record<string, unknown>)[id];
   if (entries === undefined) return [];
   if (!Array.isArray(entries)) return null;
-  const copies: InstalledCopy[] = [];
+  const copies: ScopedCopy[] = [];
   for (const copy of entries) {
-    if (typeof copy?.version !== 'string' || !copy.version) return null;
-    const where = typeof copy.projectPath === 'string' && copy.projectPath ? `project：${copy.projectPath}`
-      : typeof copy.scope === 'string' ? copy.scope : 'user';
-    copies.push({ version: copy.version, where });
+    const version = pluginVersion(copy?.version);
+    if (!version) return null;
+    const projectPath = typeof copy.projectPath === 'string' && copy.projectPath ? copy.projectPath : undefined;
+    const scope = typeof copy.scope === 'string' ? copy.scope : projectPath ? 'project' : 'user';
+    const where = projectPath && scope !== 'user' ? `project：${installationLabel(projectPath)}` : installationLabel(scope);
+    copies.push({ version, where, scope, projectPath });
   }
   return copies;
 }
 
 const claudeConfigDir = (): string => process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+const scopePath = (path: string): string => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
 
 function claudePluginActions(root: string, claudeDir: string, plugins: typeof BUNDLED_PLUGINS, session: boolean): string[] {
   if (!plugins.length) return [];
   const record = readPluginJson(join(claudeDir, 'plugins', 'installed_plugins.json'));
+  const missing = record === null && statSync(claudeDir, { throwIfNoEntry: false })?.isDirectory();
   const marketplaces = readPluginJson(join(claudeDir, 'plugins', 'known_marketplaces.json'));
+  const cwd = session ? scopePath(process.cwd()) : undefined;
   const actions: string[] = [];
   for (const plugin of plugins) {
     const manifest = readPluginJson(join(root, plugin.dir, '.claude-plugin', 'plugin.json'));
-    const latest = typeof manifest?.version === 'string' && manifest.version ? manifest.version
-      : session ? SHIPPED_PLUGIN_VERSIONS[plugin.name] : undefined;
+    const latest = pluginVersion(manifest?.version) ?? (session ? SHIPPED_PLUGIN_VERSIONS[plugin.name] : undefined);
     if (!latest) continue;
-    // updater 沿用既有「目錄存在、紀錄尚未建立＝沒裝」；開場把讀不到紀錄視為未知。
-    const installed = record === null && !session ? [] : installedCopies(record?.plugins, `${plugin.name}@${plugin.marketplace}`);
+    let installed = missing ? [] : installedCopies(record?.plugins, `${plugin.name}@${plugin.marketplace}`);
+    let otherProject: string | undefined;
+    if (cwd !== undefined && installed) {
+      const active = installed.filter(({ scope, projectPath }) => scope === 'user'
+        || (projectPath && isAbsolute(projectPath) && scopePath(projectPath) === cwd));
+      if (!active.length && installed.length) {
+        const scopes = installed.map(({ projectPath }) => projectPath && isAbsolute(projectPath) ? installationLabel(projectPath) : '');
+        if (scopes.every(Boolean)) otherProject = installationLabel([...new Set(scopes)].join('、'));
+        else installed = null;
+      }
+      if (installed) installed = active;
+    }
     const known = !!marketplaces && Object.hasOwn(marketplaces, plugin.marketplace);
-    const action = pluginAction(plugin, latest, installed, known);
+    const action = pluginAction(plugin, latest, installed, known, otherProject);
     if (!action) continue;
     if (!session) {
       actions.push(action);
@@ -276,12 +303,15 @@ export function omitStandardUpdateActions(notice: string, shown: readonly string
   const labels = BUNDLED_PLUGINS.filter(({ label }) => shown.some((item) => item.startsWith(`【要問使用者】${label}`)))
     .map(({ label }) => `【要問使用者】${label}有新版 `);
   if (!labels.length) return notice;
-  const [header = '', ...actions] = notice.split('\n\n');
+  const sections = notice.split('\n\n');
+  const countAt = sections.findIndex((part) => /^(?:這次更新|ai-cli 上次更新（[^\n]+）)有 \d+ 件事需要你在這台機器上動手：$/.test(part));
+  if (countAt < 0) return notice;
+  const actions = sections.slice(countAt + 1);
   const pending = actions.filter((action) => !labels.some((label) => action.startsWith(label)));
   if (pending.length === actions.length) return notice;
-  const summary = header.replace(/(?:\n|^)(?:這次更新|ai-cli 上次更新（[^\n]+）)有 \d+ 件事需要你在這台機器上動手：$/,
-    (line) => pending.length ? line.replace(/有 \d+ 件事/, `有 ${pending.length} 件事`) : '');
-  return [summary, ...pending].filter(Boolean).join('\n\n');
+  const header = sections.slice(0, countAt);
+  if (pending.length) header.push(sections[countAt]!.replace(/有 \d+ 件事/, `有 ${pending.length} 件事`));
+  return [...header, ...pending].join('\n\n');
 }
 
 export function getUpdatePolicy(): UpdatePolicy {
