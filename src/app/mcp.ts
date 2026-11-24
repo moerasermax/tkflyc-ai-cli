@@ -32,7 +32,8 @@ import { validatePeekPids, validatePeekTimeSec } from '../core/peek.js';
 import { ProcessService } from '../core/process-service.js';
 import { CircuitBreakerError } from '../core/circuit-breaker.js';
 import { UsageService } from '../plugins/usage-service.js';
-import { consumeNotice, scheduleBackgroundUpdates } from '../core/updater.js';
+import { consumeNotice, omitStandardUpdateActions, scheduleBackgroundUpdates } from '../core/updater.js';
+import { getStandardEquipment } from '../core/standard-equipment.js';
 import { getServerIdentity } from '../core/identity.js';
 import { assertCanStartJob } from '../core/worker-env.js';
 import { KERNEL_TOOL_PREFIX, aiCliKernelHandleTool, aiCliKernelToolDefinitions } from '../ai-cli_kernel/mcp-tools.js';
@@ -56,6 +57,7 @@ export class AiCliMcpServer {
   private sigintHandler?: () => Promise<void>;
   private closed: Promise<void>;
   private stopUpdates?: () => void;
+  private readonly equipment = getStandardEquipment();
 
   constructor() {
     const cliPaths = resolveAllCliPaths();
@@ -70,7 +72,7 @@ export class AiCliMcpServer {
 
     this.server = new Server(
       { name: 'ai_cli_mcp', version: SERVER_VERSION },
-      { capabilities: { tools: {}, logging: {} } }
+      { capabilities: { tools: {}, logging: {} }, instructions: this.equipmentInstructions() }
     );
 
     this.setupToolHandlers();
@@ -86,6 +88,28 @@ export class AiCliMcpServer {
       process.exit(0);
     };
     process.on('SIGINT', this.sigintHandler);
+  }
+
+  private sessionEquipment(): { claude: string[]; codex: string[] } {
+    const client = this.server?.getClientVersion()?.name.toLowerCase();
+    if (client === 'codex-mcp-client' || client === 'codex') return { claude: [], codex: this.equipment.codex };
+    if (client === 'claude-code' || client === 'claude-cli' || client === 'claude') return { claude: this.equipment.claude, codex: [] };
+    return this.equipment;
+  }
+
+  private equipmentInstructions(): string | undefined {
+    const { claude, codex } = this.sessionEquipment();
+    const sections = [
+      claude.length ? ['Claude Code', ...claude].join('\n\n') : '',
+      codex.length ? ['Codex', ...codex].join('\n\n') : '',
+    ].filter(Boolean);
+    if (!sections.length) return undefined;
+    return '【ai-cli 標配安裝狀態】給呼叫端 AI：請在 session 開始時告訴使用者以下狀態，並問要不要安裝、更新或信任。使用者同意才執行安裝或更新。\n\n' +
+      sections.join('\n\n');
+  }
+
+  private sessionUpdateNotice(notice: string | null): string | null {
+    return notice ? omitStandardUpdateActions(notice, this.sessionEquipment().claude) || null : notice;
   }
 
   private getCliConfigurationError(): string | null {
@@ -385,11 +409,15 @@ Note: antigravity (agy) normalizes display names to model ids ("Gemini 4 Neon (X
           // 只有使用者主動叫 doctor 才查防毒（PowerShell，約 1 秒）；啟動檢查不查。非同步，不擋其他請求。
           const status = getCliDoctorStatus();
           if (status.windowlessHelper) status.windowlessHelper.antivirus = await listAntivirusProductsAsync();
+          status.update.notice = this.sessionUpdateNotice(status.update.notice);
+          status.update.noticeDelivered = this.sessionUpdateNotice(status.update.noticeDelivered);
           return this.jsonResult(status);
         }
-        case 'models':
+        case 'models': {
           await refreshCatalogV2();
-          return this.jsonResult(getModelsPayload());
+          const payload = getModelsPayload();
+          return this.jsonResult({ ...payload, updateNotice: this.sessionUpdateNotice(payload.updateNotice) });
+        }
         case 'set_config':
           return this.handleSetConfig(toolArguments);
         case 'query_usage':
@@ -550,7 +578,8 @@ Note: antigravity (agy) normalizes display names to model ids ("Gemini 4 Neon (X
     // 直接回報「剛剛寫進去的那一份」。重新讀一次的話，中間有別的 writer 介入時，
     // 回傳的 payload 描述的就不是本次寫入的結果了（而且會多一次讀檔）。
     // set_config 也只讀同步目錄，不能等背景 vendor 查詢。
-    return this.jsonResult(getModelsPayload(written));
+    const payload = getModelsPayload(written);
+    return this.jsonResult({ ...payload, updateNotice: this.sessionUpdateNotice(payload.updateNotice) });
   }
 
   private async handleRun(toolArguments: Record<string, unknown>): Promise<ServerResult> {
@@ -583,7 +612,7 @@ Note: antigravity (agy) normalizes display names to model ids ("Gemini 4 Neon (X
           ? { system_prompt: toolArguments.system_prompt }
           : {}),
       });
-      return this.jsonResult({ ...result, updateNotice: consumeNotice() });
+      return this.jsonResult({ ...result, updateNotice: this.sessionUpdateNotice(consumeNotice()) });
     } catch (error) {
       // 熔斷器攔截：回傳清楚的錯誤，讓呼叫端知道是框架迴圈防護而非一般失敗。
       if (error instanceof CircuitBreakerError) {
@@ -688,15 +717,28 @@ Note: antigravity (agy) normalizes display names to model ids ("Gemini 4 Neon (X
 
   async run(): Promise<void> {
     const transport = new StdioServerTransport();
+    // SDK 先記下 initialize 的 clientInfo，再送回 instructions。保留 SDK 協商結果，
+    // 只在送出前縮小提醒範圍，無須覆寫協定的 initialize handler。
+    const send = transport.send.bind(transport);
+    transport.send = async (message) => {
+      if ('result' in message && 'serverInfo' in message.result && 'protocolVersion' in message.result) {
+        const instructions = this.equipmentInstructions();
+        if (instructions) message.result.instructions = instructions;
+        else delete message.result.instructions;
+      }
+      await send(message);
+    };
     await this.server.connect(transport);
     console.error('AI CLI MCP server running on stdio');
     // 讓隨附的 plugin 找得到這份安裝的最新判定核心，不必為了修 bug 重裝 plugin。
     this.stopUpdates = scheduleBackgroundUpdates(async (message) => {
-      console.error(message.replace(/\r?\n/g, ' | '));
+      const notice = this.sessionUpdateNotice(message);
+      if (!notice) return;
+      console.error(notice.replace(/\r?\n/g, ' | '));
       // MCP 的 logging 是 server capability；client 沒有標準 logging capability。
       // 初始化後透過 SDK 發送，並遵守 client 的 logging/setLevel。
       if (this.server.getClientCapabilities()) {
-        await this.server.sendLoggingMessage({ level: 'warning', logger: 'ai-cli.updater', data: message });
+        await this.server.sendLoggingMessage({ level: 'warning', logger: 'ai-cli.updater', data: notice });
       }
     });
   }

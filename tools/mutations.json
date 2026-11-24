@@ -2901,8 +2901,8 @@
     "name": "面板提問不看這次更新是否動到面板",
     "file": "src/core/updater.ts",
     "script": "verify-update.mjs",
-    "from": "    if (!changedFiles.some((name) => name.replace(/^\"/, '').startsWith(`${plugin.dir}/`))) continue;",
-    "to": "",
+    "from": "    changedFiles.some((name) => name.replace(/^\"/, '').startsWith(`${plugin.dir}/`)));",
+    "to": "    true);",
     "expect": "這次更新沒動到面板就不問"
   },
   {
@@ -2917,8 +2917,8 @@
     "name": "面板安裝紀錄讀不到時當成沒裝",
     "file": "src/core/updater.ts",
     "script": "verify-update.mjs",
-    "from": "    const installed = !plugins ? null",
-    "to": "    const installed = !plugins ? []",
+    "from": "  if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return null;",
+    "to": "  if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return [];",
     "expect": "紀錄檔壞掉：當成讀不到"
   },
   {
@@ -2949,8 +2949,8 @@
     "name": "面板紀錄缺版本時當成 0.0.0",
     "file": "src/core/updater.ts",
     "script": "verify-update.mjs",
-    "from": "      if (typeof r?.version !== 'string' || !r.version) return null;",
-    "to": "      if (typeof r?.version !== 'string' || !r.version) return { version: '0.0.0', where: 'user' };",
+    "from": "    if (typeof copy?.version !== 'string' || !copy.version) return null;",
+    "to": "    if (typeof copy?.version !== 'string' || !copy.version) return [{ version: '0.0.0', where: 'user' }];",
     "expect": "有這個外掛的紀錄但沒有版本"
   },
   {
@@ -10951,5 +10951,29 @@
     "to": "  const deadline = Infinity;",
     "script": "verify-project-flow.mjs",
     "expect": "hook 總期限耗盡時停止啟動子行程"
+  },
+  {
+    "name": "標配提醒: 漏列 kernel 面板",
+    "file": "src/core/updater.ts",
+    "from": "  { name: 'ai-cli_kernel_panel', dir: 'plugins/ai-cli_kernel_panel', marketplace: 'tkflyc-ai-cli', repo: 'moerasermax/tkflyc-ai-cli', label: 'ai-cli_kernel_panel 核心控制面板',\n    description: '它會顯示 kernel run 的狀態、進度和報告，並提供兩步確認的操作。' },",
+    "to": "",
+    "script": "verify-standard-equipment.mjs",
+    "expect": "ai-cli_kernel_panel 缺裝提醒數"
+  },
+  {
+    "name": "標配提醒: 只看核准紀錄不比對雜湊",
+    "file": "src/core/standard-equipment.ts",
+    "from": "          if (approval?.hash === declarationHash(key, command) && !approval.disabled) {",
+    "to": "          if (approval?.hash && !approval.disabled) {",
+    "script": "verify-standard-equipment.mjs",
+    "expect": "雜湊不符仍提示信任"
+  },
+  {
+    "name": "標配提醒: worker 仍要求安裝",
+    "file": "src/core/standard-equipment.ts",
+    "from": "  if (process.env.AI_CLI_WORKER === '1') return { claude: [], codex: [] };",
+    "to": "",
+    "script": "verify-standard-equipment.mjs",
+    "expect": "worker 握手無標配提醒"
   }
 ]

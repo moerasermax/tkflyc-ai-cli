@@ -5,7 +5,7 @@
  */
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -136,9 +136,17 @@ export function postUpdateActions(commits: ReadonlyArray<{ sha: string }>): stri
 const BUNDLED_PLUGINS: ReadonlyArray<{ name: string; dir: string; marketplace: string; repo: string; label: string; description: string }> = [
   { name: 'ai-cli-jobs', dir: 'plugins/ai-cli-jobs', marketplace: 'tkflyc-ai-cli', repo: 'moerasermax/tkflyc-ai-cli', label: 'ai-cli-jobs 派工面板',
     description: '它會在 Claude Code 輸入框上方列出全機 ai-cli job。' },
+  { name: 'ai-cli_kernel_panel', dir: 'plugins/ai-cli_kernel_panel', marketplace: 'tkflyc-ai-cli', repo: 'moerasermax/tkflyc-ai-cli', label: 'ai-cli_kernel_panel 核心控制面板',
+    description: '它會顯示 kernel run 的狀態、進度和報告，並提供兩步確認的操作。' },
   { name: 'ai-cli_project-flow', dir: 'plugins/ai-cli_project-flow', marketplace: 'tkflyc-ai-cli', repo: 'moerasermax/tkflyc-ai-cli', label: 'ai-cli_project-flow 專案既定流程',
     description: '它會依 Planner 專案身分與專案設定載入流程規則。' },
 ];
+// npm 套件不含 plugins/，用這版隨附的基準。原始碼安裝永遠優先使用 repo manifest。
+const SHIPPED_PLUGIN_VERSIONS: Readonly<Record<string, string>> = {
+  'ai-cli-jobs': '0.2.0',
+  'ai-cli_kernel_panel': '0.1.0',
+  'ai-cli_project-flow': '0.1.0',
+};
 
 /** 只比 `x.y.z`；任一邊解析不出來就當「不比」，不憑猜測叫人更新（稽核：亂碼版本曾被當成 0.0.0）。 */
 function olderVersion(installed: string, latest: string): boolean {
@@ -178,36 +186,102 @@ export function pluginAction(plugin: { name: string; marketplace: string; repo: 
     `git pull 碰不到 Claude Code 執行的那份副本，要另外更新。要不要更新？${ask}\n  更新：\n${update}`;
 }
 
-/** 讀 repo 與 Claude Code 的設定目錄，給這次更新動到的外掛各一則提問；讀不到 repo 版本就不問。 */
-export function bundledPluginActions(root: string, changedFiles: readonly string[],
-  claudeDir: string = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')): string[] {
-  const readJson = (path: string): unknown => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return undefined; } };
+/** 同步讀小型一般檔案；null 表示檔案不存在，undefined 表示無法確認內容。 */
+export function readEquipmentFile(path: string): string | null | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > 1024 * 1024) return undefined;
+    const buffer = Buffer.alloc(stat.size + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const count = readSync(fd, buffer, offset, buffer.length - offset, null);
+      if (!count) break;
+      offset += count;
+    }
+    return offset === stat.size ? buffer.toString('utf8', 0, offset).replace(/^\uFEFF/, '') : undefined;
+  } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : undefined; }
+  finally { if (fd !== undefined) { try { closeSync(fd); } catch {} } }
+}
+
+function readPluginJson(path: string): Record<string, unknown> | null | undefined {
+  const contents = readEquipmentFile(path);
+  if (contents == null) return contents;
+  try {
+    const value = JSON.parse(contents);
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  } catch {}
+  return undefined;
+}
+
+function installedCopies(plugins: unknown, id: string): InstalledCopy[] | null {
+  if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return null;
+  const entries = (plugins as Record<string, unknown>)[id];
+  if (entries === undefined) return [];
+  if (!Array.isArray(entries)) return null;
+  const copies: InstalledCopy[] = [];
+  for (const copy of entries) {
+    if (typeof copy?.version !== 'string' || !copy.version) return null;
+    const where = typeof copy.projectPath === 'string' && copy.projectPath ? `project：${copy.projectPath}`
+      : typeof copy.scope === 'string' ? copy.scope : 'user';
+    copies.push({ version: copy.version, where });
+  }
+  return copies;
+}
+
+const claudeConfigDir = (): string => process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+
+function claudePluginActions(root: string, claudeDir: string, plugins: typeof BUNDLED_PLUGINS, session: boolean): string[] {
+  if (!plugins.length) return [];
+  const record = readPluginJson(join(claudeDir, 'plugins', 'installed_plugins.json'));
+  const marketplaces = readPluginJson(join(claudeDir, 'plugins', 'known_marketplaces.json'));
   const actions: string[] = [];
-  for (const plugin of BUNDLED_PLUGINS) {
-    // git 對含非 ASCII 字元的路徑會加雙引號（core.quotePath），比對前把開頭的引號去掉。
-    if (!changedFiles.some((name) => name.replace(/^"/, '').startsWith(`${plugin.dir}/`))) continue;
-    const manifest = readJson(join(root, plugin.dir, '.claude-plugin', 'plugin.json')) as { version?: unknown } | undefined;
-    if (typeof manifest?.version !== 'string' || !manifest.version) continue;
-    // 沒有 Claude Code 設定目錄就沒有人可問；目錄在但沒有安裝紀錄檔，是一個外掛都還沒裝。
-    if (!existsSync(claudeDir)) continue;
-    const recordPath = join(claudeDir, 'plugins', 'installed_plugins.json');
-    const record = existsSync(recordPath) ? readJson(recordPath) as { plugins?: unknown } | undefined : { plugins: {} };
-    const plugins = record?.plugins && typeof record.plugins === 'object' && !Array.isArray(record.plugins) ? record.plugins as Record<string, unknown> : null;
-    const entries = plugins?.[`${plugin.name}@${plugin.marketplace}`];
-    // 有這個外掛的紀錄、但形狀不對或缺版本：是「裝了、版本不明」，不能當成沒裝（稽核第 1 條）。
-    const copies = Array.isArray(entries) ? entries.map((e): InstalledCopy | null => {
-      const r = e as { version?: unknown; scope?: unknown; projectPath?: unknown } | null;
-      if (typeof r?.version !== 'string' || !r.version) return null;
-      return { version: r.version, where: typeof r.projectPath === 'string' && r.projectPath ? `project：${r.projectPath}` : typeof r.scope === 'string' ? r.scope : 'user' };
-    }) : null;
-    const installed = !plugins ? null : entries === undefined ? []
-      : copies && copies.every((c): c is InstalledCopy => c !== null) ? copies : null;
-    const marketplaces = readJson(join(claudeDir, 'plugins', 'known_marketplaces.json'));
-    const known = !!marketplaces && typeof marketplaces === 'object' && plugin.marketplace in marketplaces;
-    const action = pluginAction(plugin, manifest.version, installed, known);
-    if (action) actions.push(action);
+  for (const plugin of plugins) {
+    const manifest = readPluginJson(join(root, plugin.dir, '.claude-plugin', 'plugin.json'));
+    const latest = typeof manifest?.version === 'string' && manifest.version ? manifest.version
+      : session ? SHIPPED_PLUGIN_VERSIONS[plugin.name] : undefined;
+    if (!latest) continue;
+    // updater 沿用既有「目錄存在、紀錄尚未建立＝沒裝」；開場把讀不到紀錄視為未知。
+    const installed = record === null && !session ? [] : installedCopies(record?.plugins, `${plugin.name}@${plugin.marketplace}`);
+    const known = !!marketplaces && Object.hasOwn(marketplaces, plugin.marketplace);
+    const action = pluginAction(plugin, latest, installed, known);
+    if (!action) continue;
+    if (!session) {
+      actions.push(action);
+      continue;
+    }
+    const current = action.replace(`有新版 ${latest}`, `（標配版本 ${latest}）`);
+    actions.push(known ? current.replace('    claude plugin install',
+      `    claude plugin marketplace update ${plugin.marketplace}\n    claude plugin install`) : current);
   }
   return actions;
+}
+
+/** 讀這次更新動到的外掛；讀不到 repo 版本就不問。 */
+export function bundledPluginActions(root: string, changedFiles: readonly string[], claudeDir = claudeConfigDir()): string[] {
+  if (!existsSync(claudeDir)) return [];
+  // git 對含非 ASCII 字元的路徑可能在開頭加雙引號。
+  const changed = BUNDLED_PLUGINS.filter((plugin) =>
+    changedFiles.some((name) => name.replace(/^"/, '').startsWith(`${plugin.dir}/`)));
+  return claudePluginActions(root, claudeDir, changed, false);
+}
+
+export function standardClaudeActions(root: string): string[] {
+  return claudePluginActions(root, claudeConfigDir(), BUNDLED_PLUGINS, true);
+}
+
+/** MCP 開場已交代的標配，從工具回應與 logging 的更新通知去重，保留更新狀態原文。 */
+export function omitStandardUpdateActions(notice: string, shown: readonly string[]): string {
+  const labels = BUNDLED_PLUGINS.filter(({ label }) => shown.some((item) => item.startsWith(`【要問使用者】${label}`)))
+    .map(({ label }) => `【要問使用者】${label}有新版 `);
+  if (!labels.length) return notice;
+  const [header = '', ...actions] = notice.split('\n\n');
+  const pending = actions.filter((action) => !labels.some((label) => action.startsWith(label)));
+  if (pending.length === actions.length) return notice;
+  const summary = header.replace(/(?:\n|^)(?:這次更新|ai-cli 上次更新（[^\n]+）)有 \d+ 件事需要你在這台機器上動手：$/,
+    (line) => pending.length ? line.replace(/有 \d+ 件事/, `有 ${pending.length} 件事`) : '');
+  return [summary, ...pending].filter(Boolean).join('\n\n');
 }
 
 export function getUpdatePolicy(): UpdatePolicy {
