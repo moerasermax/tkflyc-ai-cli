@@ -13,10 +13,13 @@ const hashPattern = /^[\da-f]{64}$/;
 const stateFilePattern = /^(?:checked|session)-[\da-f]{64}$/;
 const diffOptions = ['--no-ext-diff', '--no-textconv', '--no-renames'];
 const worktreeDiffOptions = [...diffOptions, '--ignore-submodules=all'];
+const gitTimedOut = Symbol('git 逾時');
 
-function git(cwd, ...args) {
+function git(remaining, cwd, ...args) {
+  const timeout = remaining();
+  if (timeout <= 0) throw gitTimedOut;
   return execFileSync('git', ['--no-pager', ...args], {
-    cwd, timeout: 1500, maxBuffer: 8 * 1024 * 1024, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd, timeout, maxBuffer: 8 * 1024 * 1024, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
 
@@ -34,13 +37,13 @@ export function fingerprintChanges(head, diff, tracked, entries) {
   return { value, changes };
 }
 
-function fingerprint(cwd) {
+function fingerprint(cwd, remaining) {
   try {
-    const root = realpathSync.native(git(cwd, 'rev-parse', '--show-toplevel').toString().trimEnd());
-    const head = git(root, 'rev-parse', '--verify', 'HEAD').toString().trim();
-    const diff = git(root, 'diff', ...worktreeDiffOptions, '--binary', 'HEAD', '--');
-    const tracked = pathsFromGit(git(root, 'diff', ...worktreeDiffOptions, '--name-only', '-z', 'HEAD', '--'));
-    const names = pathsFromGit(git(root, 'ls-files', '--others', '--exclude-standard', '-z'));
+    const root = realpathSync.native(git(remaining, cwd, 'rev-parse', '--show-toplevel').toString().trimEnd());
+    const head = git(remaining, root, 'rev-parse', '--verify', 'HEAD').toString().trim();
+    const diff = git(remaining, root, 'diff', ...worktreeDiffOptions, '--binary', 'HEAD', '--');
+    const tracked = pathsFromGit(git(remaining, root, 'diff', ...worktreeDiffOptions, '--name-only', '-z', 'HEAD', '--'));
+    const names = pathsFromGit(git(remaining, root, 'ls-files', '--others', '--exclude-standard', '-z'));
     if (names.length > 500) return null;
     const entries = [];
     let bytes = 0;
@@ -54,8 +57,8 @@ function fingerprint(cwd) {
       entries.push([name, hash(readFileSync(path))]);
     }
     return { root, head, ...fingerprintChanges(head, diff, tracked, entries) };
-  } catch {
-    return null;
+  } catch (error) {
+    return error === gitTimedOut || error?.code === 'ETIMEDOUT' ? gitTimedOut : null;
   }
 }
 
@@ -67,13 +70,13 @@ function readBaseline(path) {
     && (baseline.changes === null || Array.isArray(baseline.changes)) ? baseline : null;
 }
 
-function changedPaths(baseline, current) {
+function changedPaths(baseline, current, remaining) {
   const before = new Map(baseline.changes);
   const after = new Map(current.changes);
   const names = new Set([...before.keys(), ...after.keys()]);
   const changed = [...names].filter(name => before.get(name) !== after.get(name));
   if (baseline.head !== current.head) {
-    const raw = pathsFromGit(git(current.root, 'diff', ...diffOptions, '--ignore-submodules=none',
+    const raw = pathsFromGit(git(remaining, current.root, 'diff', ...diffOptions, '--ignore-submodules=none',
       '--raw', '-z', baseline.head, current.head, '--'));
     for (let i = 0; i < raw.length; i += 2) {
       const [beforeMode, afterMode] = raw[i].slice(1).split(' ');
@@ -105,10 +108,10 @@ function writeOnce(path, value) {
   }
 }
 
-function snapshot(payload, project, stateDir) {
+function snapshot(payload, project, stateDir, remaining) {
   if (typeof payload.session_id !== 'string' || !payload.session_id) return null;
-  const current = fingerprint(payload.cwd);
-  if (!current) return null;
+  const current = fingerprint(payload.cwd, remaining);
+  if (!current || current === gitTimedOut) return current;
   const rootKey = pathKey(current.root);
   const scope = join(stateDir, 'stop', hash(JSON.stringify([project.id, rootKey])));
   // Windows 上保留舊版以原始路徑命名的狀態，直到其自然過期。
@@ -129,7 +132,7 @@ function pruneScope(scope, cutoff) {
   } catch { /* 狀態目錄可能尚未建立。 */ }
 }
 
-export function rememberBaseline(payload, project, stateDir) {
+export function rememberBaseline(payload, project, stateDir, remaining) {
   const cutoff = Date.now() - stateTtlMs;
   const stopDir = join(stateDir, 'stop');
   try {
@@ -137,7 +140,8 @@ export function rememberBaseline(payload, project, stateDir) {
       if (scope.isDirectory() && hashPattern.test(scope.name)) pruneScope(join(stopDir, scope.name), cutoff);
     }
   } catch { /* 尚無舊狀態。 */ }
-  const current = snapshot(payload, project, stateDir);
+  const current = snapshot(payload, project, stateDir, remaining);
+  if (current === gitTimedOut) return true;
   if (!current) return;
   try {
     if (current.legacyScope && existsSync(join(current.legacyScope, current.sessionFile))) return;
@@ -147,11 +151,11 @@ export function rememberBaseline(payload, project, stateDir) {
   } catch { /* 不能建立基準就不擋。 */ }
 }
 
-export function stopReason(payload, project, stateDir) {
+export function stopReason(payload, project, stateDir, remaining) {
   if (payload.stop_hook_active === true || typeof payload.last_assistant_message !== 'string'
       || !payload.last_assistant_message.trim()) return null;
-  const current = snapshot(payload, project, stateDir);
-  if (!current) return null;
+  const current = snapshot(payload, project, stateDir, remaining);
+  if (!current || current === gitTimedOut) return null;
   pruneScope(current.scope, Date.now() - stateTtlMs);
   if (current.legacyScope) pruneScope(current.legacyScope, Date.now() - stateTtlMs);
   let onlyDocs = false;
@@ -161,7 +165,7 @@ export function stopReason(payload, project, stateDir) {
       ? join(current.legacyScope, current.sessionFile) : baselinePath);
     if (!baseline || baseline.value === current.value) return null;
     if (baseline.changes && current.changes) {
-      const comparison = changedPaths(baseline, current);
+      const comparison = changedPaths(baseline, current, remaining);
       if (!comparison.changed) return null;
       onlyDocs = comparison.onlyDocs;
     }

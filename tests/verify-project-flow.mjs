@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { bundledPluginActions } from '../dist/core/updater.js';
 import { loadSettings, parseSettings, SETTINGS } from '../plugins/ai-cli_project-flow/lib/config.mjs';
-import { checkArchive, handleEvent, ruleContext } from '../plugins/ai-cli_project-flow/lib/flow.mjs';
+import { checkArchive, handleEvent, HOOK_DEADLINE_MS, ruleContext, SUBPROCESS_TIMEOUT_MS } from '../plugins/ai-cli_project-flow/lib/flow.mjs';
 import { queryPlanner } from '../plugins/ai-cli_project-flow/lib/project.mjs';
 import { fingerprintChanges } from '../plugins/ai-cli_project-flow/lib/stop.mjs';
 import { mergeHooks, planInstall } from '../plugins/ai-cli_project-flow/install/codex-install.mjs';
@@ -69,7 +69,7 @@ function adapter(name, payload, viaArg = false) {
   if (name === 'codex') args.push('--ai-cli-project-flow');
   if (viaArg) args.push(json);
   const output = execFileSync(process.execPath, args, { env, input: viaArg ? undefined : json,
-    encoding: 'utf8', windowsHide: true });
+    encoding: 'utf8', timeout: 30_000, windowsHide: true });
   return JSON.parse(output);
 }
 
@@ -356,6 +356,38 @@ try {
     assert.doesNotMatch(result.context, /^R[124]\b/m);
     assert.match(result.context, /^R3 .*anthropic-<模型>.*openai-<模型>/m);
     assert.deepEqual(await handleEvent('Stop', { cwd: repo, last_assistant_message: '完成' }, worker), {});
+  });
+
+  await checked('hook 總期限低於 Claude 與 Codex 的 timeout', () => {
+    const claude = JSON.parse(readFileSync(join(PLUGIN, 'hooks', 'hooks.json'), 'utf8')).hooks;
+    const codex = mergeHooks({}).hooks;
+    assert.ok(SUBPROCESS_TIMEOUT_MS > 0 && SUBPROCESS_TIMEOUT_MS < HOOK_DEADLINE_MS);
+    for (const event of ['SessionStart', 'UserPromptSubmit', 'Stop']) {
+      const timeout = claude[event][0].hooks[0].timeout;
+      assert.equal(codex[event][0].hooks[0].timeout, timeout);
+      assert.ok(HOOK_DEADLINE_MS < timeout * 1000);
+    }
+  });
+
+  await checked('hook 總期限耗盡時停止啟動子行程，Stop 放行並在開場提示', async () => {
+    const payload = { cwd: worktree, session_id: 'stop-deadline', last_assistant_message: '完成' };
+    const expired = () => {
+      let ticks = 0;
+      return { ...online, now: () => ticks++ * HOOK_DEADLINE_MS };
+    };
+    const notice = /本 session 的 Stop 證據檢查未啟用（git 逾時）/;
+    const start = await handleEvent('SessionStart', payload, expired());
+    assert.match(start.context, notice);
+
+    const normal = await handleEvent('SessionStart', payload, online);
+    assert.doesNotMatch(normal.context, notice);
+    write(join(worktree, 'deadline.mjs'), 'export const afterDeadline = true;\n');
+    assert.equal((await handleEvent('Stop', payload, expired())).reason, null);
+    assert.match((await handleEvent('Stop', payload, online)).reason, /測試輸出/);
+
+    const prompt = '歸檔';
+    const options = { ...expired(), env: { ...env, ARCHIVE_FIXTURE_PROMPT: prompt, ARCHIVE_FIXTURE_MODE: 'COMMAND' } };
+    assert.deepEqual(await handleEvent('UserPromptSubmit', { cwd: repo, prompt }, options), {});
   });
 
   await checked('Stop 同指紋只擋一次，active、基準及已有證據放行', async () => {

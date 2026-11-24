@@ -10943,5 +10943,13 @@
     "to": "    return `【要問使用者】${plugin.label}有新版 ${latest}，這台機器還沒裝。它會在 Claude Code 輸入框上方列出全機 ai-cli job。` +",
     "script": "verify-project-flow.mjs",
     "expect": "project-flow updater 使用專屬描述"
+  },
+  {
+    "name": "project-flow: 忽略 hook 總期限",
+    "file": "plugins/ai-cli_project-flow/lib/flow.mjs",
+    "from": "  const deadline = now() + HOOK_DEADLINE_MS;",
+    "to": "  const deadline = Infinity;",
+    "script": "verify-project-flow.mjs",
+    "expect": "hook 總期限耗盡時停止啟動子行程"
   }
 ]
