@@ -5,9 +5,9 @@
  */
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export type UpdatePolicy = 'on' | 'check' | 'off';
@@ -149,12 +149,11 @@ const SHIPPED_PLUGIN_VERSIONS: Readonly<Record<string, string>> = {
 };
 
 function pluginVersion(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length <= 32 && /^\d+\.\d+\.\d+$/.test(value)
-    && !/[\r\n]/.test(value) ? value : undefined;
+  return typeof value === 'string' && value.length <= 32 && /^\d+\.\d+\.\d+$/.test(value) ? value : undefined;
 }
 
 function installationLabel(text: string): string {
-  const clean = text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ').trim();
+  const clean = text.replace(/[\p{Cc}\p{Zl}\p{Zp}\u202A-\u202E\u2066-\u2069]/gu, ' ').trim();
   return clean.length > 120 ? clean.slice(0, 119) + '…' : clean;
 }
 
@@ -246,7 +245,12 @@ function installedCopies(plugins: unknown, id: string): ScopedCopy[] | null {
 }
 
 const claudeConfigDir = (): string => process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
-const scopePath = (path: string): string => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
+function scopePath(path: string): string {
+  let resolved: string;
+  try { resolved = realpathSync(path); }
+  catch { resolved = resolve(path); }
+  return process.platform === 'win32' ? resolved.replaceAll('/', '\\').toLowerCase() : resolved;
+}
 
 function claudePluginActions(root: string, claudeDir: string, plugins: typeof BUNDLED_PLUGINS, session: boolean): string[] {
   if (!plugins.length) return [];
@@ -262,8 +266,12 @@ function claudePluginActions(root: string, claudeDir: string, plugins: typeof BU
     let installed = missing ? [] : installedCopies(record?.plugins, `${plugin.name}@${plugin.marketplace}`);
     let otherProject: string | undefined;
     if (cwd !== undefined && installed) {
-      const active = installed.filter(({ scope, projectPath }) => scope === 'user'
-        || (projectPath && isAbsolute(projectPath) && scopePath(projectPath) === cwd));
+      const active = installed.filter(({ scope, projectPath }) => {
+        if (scope === 'user' || !projectPath) return true;
+        if (!isAbsolute(projectPath)) return false;
+        const child = relative(scopePath(projectPath), cwd);
+        return child !== '..' && !child.startsWith('..' + sep) && !isAbsolute(child);
+      });
       if (!active.length && installed.length) {
         const scopes = installed.map(({ projectPath }) => projectPath && isAbsolute(projectPath) ? installationLabel(projectPath) : '');
         if (scopes.every(Boolean)) otherProject = installationLabel([...new Set(scopes)].join('、'));

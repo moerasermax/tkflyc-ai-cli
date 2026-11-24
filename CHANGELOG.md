@@ -10,7 +10,7 @@
 
 ### 新增
 
-- Claude Code 與 Codex 每次連上 MCP 時會收到各自的標配安裝狀態。**為什麼**：更新通知只在外掛目錄有變更時產生，略過一次後可能漏裝數個 session。開場會檢查 Claude Code 三個外掛的版本與 Codex 三個 project-flow hook 的信任狀態，等使用者同意才安裝或更新；同場的 updater 通知保留其餘更新事項。首輪獨立稽核（anthropic-claude-opus-5-5）後，以 Codex 0.172 的 8 筆真實紀錄驗證信任雜湊，並修正更新通知去重後的件數、Claude 外掛安裝範圍及新機器判定。安裝紀錄進提示前會淨化，開場檢查或提示格式化失敗時 MCP 仍可完成握手。（@moerasermax）
+- Claude Code 與 Codex 每次連上 MCP 時會收到各自的標配安裝狀態。**為什麼**：更新通知只在外掛目錄有變更時產生，略過一次後可能漏裝數個 session。開場會檢查 Claude Code 三個外掛的版本與 Codex 三個 project-flow hook 的信任狀態，等使用者同意才安裝或更新；同場的 updater 通知保留其餘更新事項。首輪獨立稽核（anthropic-claude-opus-5-5）後，以 Codex 0.172 的 8 筆真實紀錄驗證信任雜湊，並修正更新通知去重後的件數、Claude 外掛安裝範圍及新機器判定。第二輪稽核（anthropic-claude-opus-5-5）修正 Windows 的 hook 核准索引比對，分開顯示尚未信任、可能需要重新信任與已停用。Claude 安裝範圍涵蓋真實專案路徑及其子目錄，無專案路徑的安裝紀錄也納入判定。顯示路徑時保留 ZWNJ 和 ZWJ，移除控制、分行與雙向格式字元。兩端獨立處理檢查例外，握手格式化失敗時省略提示，超過 2,000 字元時只顯示項目與查看方式。範圍測試使用明確的暫存工作目錄。（@moerasermax）
 
 - 新增 ai-cli_project-flow，讓 Claude Code 與 Codex 共用專案流程及各自的進度、測試和入庫設定。依 Claude Opus 5.5 稽核修正補上 Planner 設定探測及離線快取復原，讓兩端辨識同一專案並優先讀取目前 worktree 的設定。Stop 對同一批改動只補問一次，純文件改動只要求進度更新。Codex 改用跨 shell 的 hook 命令，並以隔離安裝與實際歸檔腳本子行程驗證接線。第二輪稽核補強過期快取鎖的並行回收，避免不同專案的快取互相覆蓋。Stop 將已提交的子模組指標列為非文件變更，逐檔指紋無法配對時改用整體指紋。縮小佔位值的判定範圍以接受正常設定，並在 Planner 無法連線且無快取時提示身分待確認。Git 與 Python 的單次等待上限調為 5 秒並共用每次 hook 的 12 秒期限，避免 Windows 冷啟動時過早略過檢查。開場若因 Git 逾時無法建立基準，會提示本 session 的 Stop 證據檢查未啟用。（Codex）
 

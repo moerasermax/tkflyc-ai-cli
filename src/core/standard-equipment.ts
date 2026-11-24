@@ -16,11 +16,12 @@ const HOOK_EVENTS = {
   Stop: 'stop',
 } as const;
 
-type HookStatus = 'missing' | 'stale' | 'untrusted';
+type HookStatus = 'missing' | 'stale' | 'untrusted' | 'changed' | 'disabled';
 const record = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 
 type Approval = { hash?: string; disabled?: boolean };
+const approvalIndex = (id: string): string => process.platform === 'win32' ? id.replaceAll('\\', '/').toLowerCase() : id;
 
 /**
  * /hooks 把使用者核准寫成 [hooks.state.'<檔案>:<事件>:<群組>:<項目>']。
@@ -37,7 +38,7 @@ function approvals(config: string): Map<string, Approval> {
       state = undefined;
       const key = /^\s*\[\s*hooks\s*\.\s*state\s*\.\s*(?:"((?:\\.|[^"\\])*)"|'([^']*)')\s*]\s*$/.exec(line);
       if (!key) continue;
-      const id = key[2] ?? JSON.parse('"' + key[1] + '"') as string;
+      const id = approvalIndex(key[2] ?? JSON.parse('"' + key[1] + '"') as string);
       if (states.has(id)) throw new Error('重複的 Codex hook 核准紀錄');
       state = {};
       states.set(id, state);
@@ -100,7 +101,7 @@ function codexHookIssues(codexDir: string): string | null {
     const config = readEquipmentFile(join(codexDir, 'config.toml'));
     if (config === undefined) return null;
     const states = approvals(config ?? '');
-    const issues: Record<HookStatus, string[]> = { missing: [], stale: [], untrusted: [] };
+    const issues: Record<HookStatus, string[]> = { missing: [], stale: [], untrusted: [], changed: [], disabled: [] };
     for (const [event, key] of Object.entries(HOOK_EVENTS)) {
       const groups = hooks[event] ?? [];
       if (!Array.isArray(groups)) return null;
@@ -119,12 +120,12 @@ function codexHookIssues(codexDir: string): string | null {
             || group.matcher != null || handler.commandWindows != null || handler.command_windows != null
             || handler.statusMessage != null || handler.additionalContextLimit != null
             || !/^node "[^"\r\n]+\/adapters\/codex\.mjs"$/.test(invocation)) continue;
-          const approval = states.get(path + ':' + key + ':' + groupIndex + ':' + handlerIndex);
+          const approval = states.get(approvalIndex(path + ':' + key + ':' + groupIndex + ':' + handlerIndex));
           if (approval?.hash === declarationHash(key, handler, group.matcher) && !approval.disabled) {
             status = 'ok';
             break;
           }
-          status = 'untrusted';
+          status = approval?.disabled ? 'disabled' : approval ? 'changed' : 'untrusted';
         }
         if (status === 'ok') break;
       }
@@ -133,7 +134,9 @@ function codexHookIssues(codexDir: string): string | null {
     return [
       issues.missing.length && '尚未安裝 ' + issues.missing.join('、'),
       issues.stale.length && 'hook 宣告過舊或與安裝器不同 ' + issues.stale.join('、'),
-      issues.untrusted.length && '尚未信任或已停用 ' + issues.untrusted.join('、'),
+      issues.untrusted.length && '尚未信任 ' + issues.untrusted.join('、'),
+      issues.changed.length && '無法判斷，可能需要重新信任（/hooks 審查） ' + issues.changed.join('、'),
+      issues.disabled.length && '已停用 ' + issues.disabled.join('、'),
     ].filter(Boolean).join('；');
   } catch { return null; }
 }
@@ -151,17 +154,22 @@ function codexAction(root: string): string[] {
     (issues === null ? '讀不到設定或信任紀錄，無法判斷是否已安裝。' : '：' + issues + '。') +
     '\n  安裝或更新前先預覽：node "' + installer + '" --dry-run' + source + home +
     '\n  經使用者同意後，移除 --dry-run 正式執行。重開 Codex，使用 /hooks 信任三個 hook。' +
-    '\n  已安裝且只有信任問題時，請使用 /hooks 審查並信任。'];
+    '\n  已安裝時，請使用 /hooks 審查信任或停用狀態。'];
 }
 
 export function getStandardEquipment(root = ROOT): { claude: string[]; codex: string[] } {
   if (process.env.AI_CLI_WORKER === '1') return { claude: [], codex: [] };
+  let claude: string[];
+  let codex: string[];
   try {
-    return { claude: standardClaudeActions(root), codex: codexAction(root) };
+    claude = standardClaudeActions(root);
   } catch {
-    return {
-      claude: ['Claude Code 標配外掛無法判斷是否已安裝。'],
-      codex: ['ai-cli_project-flow 的 Codex hook 無法判斷是否已安裝或信任。'],
-    };
+    claude = ['Claude Code 標配外掛無法判斷是否已安裝。'];
   }
+  try {
+    codex = codexAction(root);
+  } catch {
+    codex = ['ai-cli_project-flow 的 Codex hook 無法判斷是否已安裝或信任。'];
+  }
+  return { claude, codex };
 }

@@ -104,8 +104,16 @@ export class AiCliMcpServer {
       codex.length ? ['Codex', ...codex].join('\n\n') : '',
     ].filter(Boolean);
     if (!sections.length) return undefined;
-    return '【ai-cli 標配安裝狀態】給呼叫端 AI：請在 session 開始時告訴使用者以下狀態，並問要不要安裝、更新或信任。使用者同意才執行安裝或更新。\n\n' +
+    const instructions = '【ai-cli 標配安裝狀態】給呼叫端 AI：請在 session 開始時告訴使用者以下狀態，並問要不要安裝、更新或信任。使用者同意才執行安裝或更新。\n\n' +
       sections.join('\n\n');
+    if (instructions.length <= 2000) return instructions;
+    const compact = [];
+    if (claude.length) {
+      const names = claude.map((action) => /^【要問使用者】([\w-]{1,64})/.exec(action)?.[1] ?? 'Claude Code 標配外掛');
+      compact.push(`${names.join('、')}（詳見 Claude Code 的 /plugin）`);
+    }
+    if (codex.length) compact.push('ai-cli_project-flow 的 Codex hook（詳見 Codex 的 /hooks）');
+    return '【ai-cli 標配安裝狀態】請在 session 開始時告訴使用者以下標配需要確認。\n\n' + compact.join('\n\n');
   }
 
   private sessionUpdateNotice(notice: string | null): string | null {
@@ -721,17 +729,17 @@ Note: antigravity (agy) normalizes display names to model ids ("Gemini 4 Neon (X
     // 只在送出前縮小提醒範圍，無須覆寫協定的 initialize handler。
     const send = transport.send.bind(transport);
     transport.send = async (message) => {
-      let outgoing = message;
+      if (!('result' in message && 'serverInfo' in message.result && 'protocolVersion' in message.result)) {
+        await send(message);
+        return;
+      }
+      const result = { ...message.result };
+      delete result.instructions;
       try {
-        if ('result' in message && 'serverInfo' in message.result && 'protocolVersion' in message.result) {
-          const instructions = this.equipmentInstructions();
-          const result = { ...message.result };
-          if (instructions) result.instructions = instructions;
-          else delete result.instructions;
-          outgoing = { ...message, result };
-        }
-      } catch { /* 提醒格式化失敗仍送出 SDK 的原始回應。 */ }
-      await send(outgoing);
+        const instructions = this.equipmentInstructions();
+        if (instructions) result.instructions = instructions;
+      } catch { /* 提醒格式化失敗時，握手回應不帶 instructions。 */ }
+      await send({ ...message, result });
     };
     await this.server.connect(transport);
     console.error('AI CLI MCP server running on stdio');

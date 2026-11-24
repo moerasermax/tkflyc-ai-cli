@@ -2,7 +2,7 @@
 import '../tools/stubs/catalog-test-env.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -218,19 +218,42 @@ const otherProject = join(home, '專案 A');
 const installInProject = (projectPath, version = versions[jobs][0].version) => ({ scope: 'project', projectPath, version });
 setPlugins({ ...versions, [jobs]: [installInProject(otherProject)] });
 assert(states().claude[0]?.includes('只裝在 ' + otherProject + ' 範圍，目前專案還沒裝'), '安裝於其他專案仍提醒並註明範圍');
-const currentProject = process.platform === 'win32' ? ROOT.toUpperCase().replaceAll('\\', '/') + '/' : ROOT + '/';
-setPlugins({ ...versions, [jobs]: [installInProject(currentProject)] });
-assert.deepEqual(states().claude, [], '目前 cwd 的專案安裝有效，Windows 忽略大小寫與分隔符');
+const project = join(home, '目前專案');
+const childProjectDir = join(project, 'src', 'nested');
+const sibling = join(home, '目前專案-其他');
+const projectAlias = join(home, '專案連結');
+mkdirSync(childProjectDir, { recursive: true });
+mkdirSync(sibling);
+symlinkSync(project, projectAlias, process.platform === 'win32' ? 'junction' : 'dir');
+const originalCwd = process.cwd();
+try {
+  process.chdir(project);
+  const currentProject = process.platform === 'win32' ? project.toUpperCase().replaceAll('\\', '/') + '/' : project + '/';
+  setPlugins({ ...versions, [jobs]: [installInProject(currentProject)] });
+  assert.deepEqual(states().claude, [], '目前 cwd 的專案安裝有效，Windows 忽略大小寫與分隔符');
+  process.chdir(childProjectDir);
+  assert.deepEqual(states().claude, [], '專案子目錄的安裝有效');
+  setPlugins({ ...versions, [jobs]: [installInProject(projectAlias)] });
+  assert.deepEqual(states().claude, [], '專案 junction 或 symlink 以 realpath 比對');
+  process.chdir(sibling);
+  assert(states().claude[0]?.includes('目前專案還沒裝'), '同名前綴的相鄰目錄不算專案子目錄');
+} finally {
+  process.chdir(originalCwd);
+}
 setPlugins({ ...versions, [jobs]: [...versions[jobs], installInProject(otherProject, '0.0.0')] });
 assert.deepEqual(states().claude, [], 'user 安裝有效時不提醒其他專案的舊版');
-setPlugins({ ...versions, [jobs]: [{ scope: 'project', version: versions[jobs][0].version }] });
-assert(states().claude[0]?.includes('讀不到'), '沒有 projectPath 的專案安裝判定未知');
+for (const scope of ['managed', 'project']) {
+  setPlugins({ ...versions, [jobs]: [{ scope, version: versions[jobs][0].version }] });
+  assert.deepEqual(states().claude, [], `${scope} 沒有 projectPath 的範圍視為已安裝`);
+}
 
-const injected = join(home, '專案\n\r\t\u0000\u0085\u2028\u202e' + '長'.repeat(250));
+const joiners = '專\u200c案\u200d名';
+const injected = join(home, joiners + '\n\r\t\u0000\u0085\u2028\u2029\u202e\u2066\u2069' + '長'.repeat(250));
 setPlugins({ ...versions, [jobs]: [installInProject(injected)] });
 assert.match(states().claude[0], /只裝在 ([^\n]+) 範圍/u, '專案範圍顯示在同一行');
 const displayed = /只裝在 (.+) 範圍/u.exec(states().claude[0])[1];
-assert(displayed.length <= 120 && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(displayed), '專案範圍清除控制字元並限制長度');
+assert(displayed.length <= 120 && !/[\p{Cc}\p{Zl}\p{Zp}\u202A-\u202E\u2066-\u2069]/u.test(displayed), '專案範圍清除控制與 bidi 字元並限制長度');
+assert(displayed.includes(joiners), '專案路徑保留 ZWNJ 與 ZWJ');
 for (const version of ['0.0.0\n注入', '0.0.0\n', '0.0.0-rc', '0.0.0\u2028', '0.0.' + '9'.repeat(40)]) {
   setPlugins({ ...versions, [jobs]: [{ scope: 'user', version }] });
   const [action] = states().claude;
@@ -252,6 +275,12 @@ assert.equal(states().claude.filter((item) => item.includes('讀不到')).length
 
 fresh();
 assert.deepEqual(states().codex, [], '三個 hook 俱全、雜湊相符時靜默');
+if (process.platform === 'win32') {
+  const alternatePath = hookPath.toUpperCase().replaceAll('\\', '/');
+  writeFileSync(config, events.map((_, index) => trust(index, { path: alternatePath })).join('\n'));
+  assert.deepEqual(states().codex, [], 'Windows 核准索引忽略 hooks.json 路徑大小寫與分隔符');
+  writeFileSync(config, allTrusted());
+}
 const started = performance.now();
 for (let i = 0; i < 20; i++) assert.deepEqual(states(), { claude: [], codex: [] });
 console.log('標配檢查平均 ' + ((performance.now() - started) / 20).toFixed(2) + ' ms（暫存 HOME，20 次）');
@@ -265,13 +294,16 @@ setHooks(old);
 assert(states().codex[0]?.includes('宣告過舊或與安裝器不同 Stop'), 'hook 舊版有提示');
 setHooks();
 writeFileSync(config, '');
-assert(states().codex[0]?.includes('尚未信任或已停用 SessionStart、UserPromptSubmit、Stop'), '標記齊全但未信任有提示');
-writeFileSync(config, trust(0, { groupCommand: commands[0].replace('D:/', 'C:/') }) + trust(1) + trust(2));
-assert(states().codex[0]?.includes('尚未信任或已停用 SessionStart'), '雜湊不符仍提示信任');
-writeFileSync(config, trust(0) + trust(1, { enabled: false }) + trust(2));
-assert(states().codex[0]?.includes('尚未信任或已停用 UserPromptSubmit'), '已信任但停用仍提醒');
+assert(states().codex[0]?.includes('尚未信任 SessionStart、UserPromptSubmit、Stop'), '標記齊全但未信任有提示');
+writeFileSync(config, trust(0, { groupCommand: commands[0].replace('D:/', 'C:/') }) +
+  trust(1, { enabled: false, groupCommand: commands[1].replace('D:/', 'C:/') }) +
+  trust(2, { path: join(home, 'other-hooks.json') }));
+const [trustIssues] = states().codex;
+assert(trustIssues?.includes('無法判斷，可能需要重新信任（/hooks 審查） SessionStart'), '雜湊不符仍提示信任');
+assert(trustIssues?.includes('已停用 UserPromptSubmit'), '停用即使雜湊不符也單獨提醒');
+assert(trustIssues?.includes('尚未信任 Stop'), '其他 hooks.json 的核准紀錄不能替代目前 hook');
 writeFileSync(config, trust(0) + trust(1) + 'developer_instructions = """\n' + trust(2) + '"""\n');
-assert(states().codex[0]?.includes('尚未信任或已停用 Stop'), '多行字串中的信任紀錄不採用');
+assert(states().codex[0]?.includes('尚未信任 Stop'), '多行字串中的信任紀錄不採用');
 writeFileSync(hookPath, '{');
 assert(states().codex[0]?.includes('無法判斷是否已安裝'), '損壞的 Codex 紀錄判定未知');
 
@@ -301,6 +333,15 @@ assert.equal(unknown.match(/無法判斷有沒有裝/g)?.length, 3, '三個 Clau
 assert(unknown.length <= 2000, '四項標配皆讀不到時 instructions 至多 2,000 字元');
 console.log('四項標配皆讀不到時 instructions ' + unknown.length + ' 字元');
 
+setPlugins({ [jobs]: Array.from({ length: 200 }, () => ({ scope: 'managed', version: '0.0.0' })) });
+assert(states().claude[0].length > 2000, '測試資料可使完整提醒超過 2,000 字元');
+const compact = await connect('test-client');
+assert(compact && compact.length <= 2000 && names.every((name) => compact.includes(name)) &&
+  compact.includes('ai-cli_project-flow 的 Codex hook') && compact.includes('/plugin') && compact.includes('/hooks') &&
+  !compact.includes('0.0.0') && !compact.includes('claude plugin') && !compact.includes('--dry-run'),
+  '超過 2,000 字元改用只列項目及查看方式的精簡提醒');
+setPlugins({});
+
 const throwingHome = (site) => `
   import os from 'node:os';
   import { syncBuiltinESMExports } from 'node:module';
@@ -315,11 +356,12 @@ const throwingHome = (site) => `
   syncBuiltinESMExports();
 `;
 const afterClaudeError = await connect('test-client', { CLAUDE_CONFIG_DIR: '' }, undefined, throwingHome('claudeConfigDir'));
-assert(afterClaudeError?.includes('Claude Code 標配外掛無法判斷'),
-  'Claude 路徑解析例外仍能 initialize 並回未知');
+assert(afterClaudeError?.includes('Claude Code 標配外掛無法判斷') && afterClaudeError.includes('尚未安裝 SessionStart'),
+  'Claude 路徑解析例外仍能 initialize 並保留 Codex 缺裝結果');
 const afterCodexError = await connect('test-client', {}, undefined, throwingHome('codexAction'));
-assert(afterCodexError?.includes('Claude Code 標配外掛無法判斷') && afterCodexError.includes('無法判斷是否已安裝或信任'),
-  'Codex 路徑解析例外仍能 initialize 並回未知');
+assert(afterCodexError?.includes('ai-cli_kernel_panel') && afterCodexError.includes('這台機器還沒裝。') &&
+  afterCodexError.includes('無法判斷是否已安裝或信任'),
+  'Codex 路徑解析例外仍能 initialize 並保留 Claude 缺裝結果');
 
 const sdkServer = pathToFileURL(join(ROOT, 'node_modules', '@modelcontextprotocol/sdk/dist/esm/server/index.js')).href;
 const throwingInstructions = `
@@ -330,9 +372,9 @@ let forwarded;
 try {
   forwarded = await connect('codex-mcp-client', {}, undefined, throwingInstructions);
 } catch (error) {
-  assert.fail('transport.send 格式化例外仍送出原始 initialize 回應。' + error.message);
+  assert.fail('transport.send 格式化例外仍送出不帶 instructions 的 initialize 回應。' + error.message);
 }
-assert.equal(forwarded, any, 'transport.send 格式化例外仍送出原始 initialize 回應');
+assert.equal(forwarded, undefined, 'transport.send 格式化例外仍送出不帶 instructions 的 initialize 回應');
 
 const touched = ['plugins/ai-cli_kernel_panel/.claude-plugin/plugin.json'];
 assert.deepEqual(bundledPluginActions(ROOT, ['src/core/updater.ts'], claude), [], 'updater 未變更外掛目錄時不問');

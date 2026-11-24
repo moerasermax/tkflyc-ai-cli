@@ -10987,10 +10987,10 @@
   {
     "name": "標配稽核: transport.send 格式化例外阻擋握手",
     "file": "src/app/mcp.ts",
-    "from": "      } catch { /* 提醒格式化失敗仍送出 SDK 的原始回應。 */ }",
+    "from": "      } catch { /* 提醒格式化失敗時，握手回應不帶 instructions。 */ }",
     "to": "      } catch (error) { throw error; }",
     "script": "verify-standard-equipment.mjs",
-    "expect": "transport.send 格式化例外仍送出原始 initialize 回應"
+    "expect": "transport.send 格式化例外仍送出不帶 instructions 的 initialize 回應"
   },
   {
     "name": "標配稽核: 更新通知去重後沿用原件數",
@@ -11003,9 +11003,17 @@
   {
     "name": "標配稽核: Codex 開場例外省略未知提醒",
     "file": "src/core/standard-equipment.ts",
-    "from": "      codex: ['ai-cli_project-flow 的 Codex hook 無法判斷是否已安裝或信任。'],",
-    "to": "      codex: [],",
+    "from": "    codex = ['ai-cli_project-flow 的 Codex hook 無法判斷是否已安裝或信任。'];",
+    "to": "    codex = [];",
     "script": "verify-standard-equipment.mjs",
-    "expect": "Codex 路徑解析例外仍能 initialize 並回未知"
+    "expect": "Codex 路徑解析例外仍能 initialize 並保留 Claude 缺裝結果"
+  },
+  {
+    "name": "標配二輪稽核: 超長提醒仍送出完整內容",
+    "file": "src/app/mcp.ts",
+    "from": "    if (instructions.length <= 2000) return instructions;",
+    "to": "    if (instructions.length <= Infinity) return instructions;",
+    "script": "verify-standard-equipment.mjs",
+    "expect": "超過 2,000 字元改用只列項目及查看方式的精簡提醒"
   }
 ]
