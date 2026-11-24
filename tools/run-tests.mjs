@@ -56,6 +56,7 @@ const TESTS = [
   'verify-mcp.mjs',
   'verify-liveness.mjs',
   'verify-update.mjs',
+  'verify-project-flow.mjs',
   'verify-worker-identity.mjs',
   'verify-worker-guards.mjs',
   'verify-ai-cli_kernel-policy.mjs',

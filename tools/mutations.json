@@ -10927,5 +10927,21 @@
     "to": "",
     "script": "verify-agy-pipe-mode.mjs",
     "expect": "建立長 prompt 時順手清掉過期目錄"
+  },
+  {
+    "name": "project-flow: updater 漏列外掛",
+    "file": "src/core/updater.ts",
+    "from": "  { name: 'ai-cli_project-flow', dir: 'plugins/ai-cli_project-flow', marketplace: 'tkflyc-ai-cli', repo: 'moerasermax/tkflyc-ai-cli', label: 'ai-cli_project-flow 專案既定流程',\n    description: '它會依 Planner 專案身分與專案設定載入流程規則。' },\n",
+    "to": "",
+    "script": "verify-update.mjs",
+    "expect": "project-flow updater 獨立偵測外掛"
+  },
+  {
+    "name": "project-flow: updater 錯用 jobs 描述",
+    "file": "src/core/updater.ts",
+    "from": "    return `【要問使用者】${plugin.label}有新版 ${latest}，這台機器還沒裝。${plugin.description ?? ''}` +",
+    "to": "    return `【要問使用者】${plugin.label}有新版 ${latest}，這台機器還沒裝。它會在 Claude Code 輸入框上方列出全機 ai-cli job。` +",
+    "script": "verify-update.mjs",
+    "expect": "project-flow updater 使用專屬描述"
   }
 ]

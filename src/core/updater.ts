@@ -131,10 +131,13 @@ export function postUpdateActions(commits: ReadonlyArray<{ sha: string }>): stri
 /**
  * 隨 repo 散布、但每台機器要自己裝的 Claude Code 外掛。npm 套件不收 `plugins/`，
  * `git pull` 也碰不到 Claude Code 實際執行的 `~/.claude/plugins/cache/` 副本，
- * 所以面板改版後，這台機器沒裝或裝舊版的話，要在更新提示裡請呼叫端 AI 問使用者。
+ * 所以外掛改版後，這台機器沒裝或裝舊版的話，要在更新提示裡請呼叫端 AI 問使用者。
  */
-const BUNDLED_PLUGINS: ReadonlyArray<{ name: string; dir: string; marketplace: string; repo: string; label: string }> = [
-  { name: 'ai-cli-jobs', dir: 'plugins/ai-cli-jobs', marketplace: 'tkflyc-ai-cli', repo: 'moerasermax/tkflyc-ai-cli', label: 'ai-cli-jobs 派工面板' },
+const BUNDLED_PLUGINS: ReadonlyArray<{ name: string; dir: string; marketplace: string; repo: string; label: string; description: string }> = [
+  { name: 'ai-cli-jobs', dir: 'plugins/ai-cli-jobs', marketplace: 'tkflyc-ai-cli', repo: 'moerasermax/tkflyc-ai-cli', label: 'ai-cli-jobs 派工面板',
+    description: '它會在 Claude Code 輸入框上方列出全機 ai-cli job。' },
+  { name: 'ai-cli_project-flow', dir: 'plugins/ai-cli_project-flow', marketplace: 'tkflyc-ai-cli', repo: 'moerasermax/tkflyc-ai-cli', label: 'ai-cli_project-flow 專案既定流程',
+    description: '它會依 Planner 專案身分與專案設定載入流程規則。' },
 ];
 
 /** 只比 `x.y.z`；任一邊解析不出來就當「不比」，不憑猜測叫人更新（稽核：亂碼版本曾被當成 0.0.0）。 */
@@ -153,7 +156,7 @@ export interface InstalledCopy { version: string; where: string }
  * 一個外掛該不該問、問什麼。`installed` 為 null 表示讀不到安裝紀錄或紀錄有缺（不是「沒裝」）；
  * `knownMarketplace` 為 false 時安裝與更新都要先加 marketplace。
  */
-export function pluginAction(plugin: { name: string; marketplace: string; repo: string; label: string },
+export function pluginAction(plugin: { name: string; marketplace: string; repo: string; label: string; description?: string },
   latest: string, installed: readonly InstalledCopy[] | null, knownMarketplace: boolean): string | null {
   const id = `${plugin.name}@${plugin.marketplace}`;
   const ask = '（給呼叫端 AI：請先問使用者要不要做，使用者同意才執行；不同意就略過，不要自己裝。）';
@@ -165,7 +168,7 @@ export function pluginAction(plugin: { name: string; marketplace: string; repo: 
       `  已安裝的話，更新：\n${update}\n  沒裝而想裝的話：\n${install}`;
   }
   if (!installed.length) {
-    return `【要問使用者】${plugin.label}有新版 ${latest}，這台機器還沒裝。它會在 Claude Code 輸入框上方列出全機 ai-cli job。` +
+    return `【要問使用者】${plugin.label}有新版 ${latest}，這台機器還沒裝。${plugin.description ?? ''}` +
       `要不要安裝？${ask}\n  安裝：\n${install}`;
   }
   const stale = installed.filter((copy) => olderVersion(copy.version, latest));

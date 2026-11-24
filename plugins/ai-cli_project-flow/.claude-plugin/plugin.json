@@ -1,0 +1,6 @@
+{
+  "name": "ai-cli_project-flow",
+  "version": "0.1.0",
+  "description": "Apply the configured project workflow in Claude Code.",
+  "author": { "name": "YC (moerasermax)" }
+}
