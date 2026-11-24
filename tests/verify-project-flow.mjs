@@ -1,14 +1,17 @@
 /** 驗證兩端 hook、Planner 快取、設定隔離與安裝流程。 */
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import { bundledPluginActions } from '../dist/core/updater.js';
 import { loadSettings, parseSettings, SETTINGS } from '../plugins/ai-cli_project-flow/lib/config.mjs';
 import { checkArchive, handleEvent, ruleContext } from '../plugins/ai-cli_project-flow/lib/flow.mjs';
 import { queryPlanner } from '../plugins/ai-cli_project-flow/lib/project.mjs';
+import { fingerprintChanges } from '../plugins/ai-cli_project-flow/lib/stop.mjs';
 import { mergeHooks, planInstall } from '../plugins/ai-cli_project-flow/install/codex-install.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -22,7 +25,6 @@ const readyTemplate = configTemplate
   .replace(/^S4:.*$/m, 'S4: "editor-team"')
   .replace(/^S5:.*$/m, 'S5: "工作單依 WBS 編號"')
   .replace(/^S6:.*$/m, 'S6: "文件位於 docs，提交規則見 CONTRIBUTING.md"')
-  .replace(/^S8:.*$/m, 'S8: "依 CI 跑自測，另由 API 模型獨立審查"')
   .replace(/^S10:.*$/m, 'S10: "以 progress.json 的完成工作單數計算"')
   .replace(/^S12:.*$/m, 'S12: "docs、inbox、archive"')
   .replace(/^limits:.*$/m, 'limits: "無上限"');
@@ -154,11 +156,15 @@ try {
     } finally { globalThis.fetch = fetch; }
   });
 
-  await checked('Planner 離線同身分快取含時間，未辨識不受設定檔影響', async () => {
+  await checked('Planner 離線時採同身分快取，無快取、未設定與可初始化分開提示', async () => {
     const cached = await handleEvent('SessionStart', { cwd: worktree }, offline);
     assert.match(cached.context, /READY.*來自快取，快取時間 \d{4}-\d\d-\d\dT/);
     writeConfig(unknown, '測試來源', '測試庫');
     assert.deepEqual(await handleEvent('SessionStart', { cwd: unknown }, offline),
+      { message: '專案流程：Planner 無法連線，暫時無法判定（無快取）' });
+    assert.deepEqual(await handleEvent('SessionStart', { cwd: unknown }, { home, env }),
+      { message: '專案流程 INIT：Planner 未設定（看 README）。' });
+    assert.deepEqual(await handleEvent('SessionStart', { cwd: unknown }, online),
       { message: '專案流程 INIT：此資料夾可初始化。' });
   });
 
@@ -224,6 +230,29 @@ try {
     assert.match((await handleEvent('SessionStart', { cwd: repo }, { ...offline, home: fakeHome })).context, /來自快取/);
   });
 
+  await checked('並行回收過期快取鎖時保留兩筆條目並清理鎖', async () => {
+    const fakeHome = join(TEMP, 'parallel cache home');
+    const fakeCache = join(fakeHome, '.ai-cli', 'project-flow', 'cache.json');
+    const token = 'e5bdd597-542c-41d4-aee8-b5b53e54b0f3';
+    const ownerFile = join(fakeCache + '.lock.d', token);
+    write(ownerFile, token);
+    const expired = new Date(Date.now() - 20_000);
+    utimesSync(ownerFile, expired, expired);
+    const script = `
+      const { workerData: { moduleUrl, home, cwd } } = require('node:worker_threads');
+      import(moduleUrl).then(({ identifyProject }) => identifyProject(cwd, { home, lookup: candidate => candidate.id }));
+    `;
+    const moduleUrl = pathToFileURL(join(PLUGIN, 'lib', 'project.mjs')).href;
+    await Promise.all([repo, other].map(async cwd => {
+      const worker = new Worker(script, { eval: true, workerData: { moduleUrl, home: fakeHome, cwd } });
+      const [code] = await once(worker, 'exit');
+      assert.equal(code, 0);
+    }));
+    const entries = JSON.parse(readFileSync(fakeCache, 'utf8'));
+    assert.deepEqual(entries.map(entry => entry.id).sort(), [alpha, beta].sort());
+    assert.deepEqual(readdirSync(dirname(fakeCache)), ['cache.json']);
+  });
+
   if (process.platform === 'win32') await checked('Windows 大小寫與分隔符差異命中並更新同一快取', async () => {
     const fakeHome = join(TEMP, 'cache casing home');
     const fakeCache = join(fakeHome, '.ai-cli', 'project-flow', 'cache.json');
@@ -251,13 +280,22 @@ try {
     assert.throws(() => parseSettings('# 前置正文\n' + configTemplate), /頂端/);
     write(join(init, SETTINGS), configTemplate);
     const placeholders = await handleEvent('SessionStart', { cwd: init }, online);
-    assert.match(placeholders.message, /INVALID.*佔位值：S1、S2、S4、S5、S6、S8、S10、S11、S12、limits/);
+    assert.match(placeholders.message, /INVALID.*佔位值：S1、S2、S4、S5、S6、S10、S11、S12、limits。/);
     assert.equal(placeholders.context, placeholders.message);
     assert.doesNotMatch(placeholders.context, /^R[1-8]\b/m);
-    write(join(init, SETTINGS), valid.replace(/^S5:.*$/m, 'S5: "TODO"').replace(/^limits:.*$/m, 'limits: "先填 <...>"'));
-    assert.match((await handleEvent('SessionStart', { cwd: init }, online)).message, /INVALID.*佔位值：S5、limits/);
     write(join(init, SETTINGS), valid);
     assert.match((await handleEvent('SessionStart', { cwd: init }, online)).context, /READY/);
+  });
+
+  await checked('佔位值允許小寫 todo、泛型與路徑，保留大寫 TODO 與範本檢查', () => {
+    const valid = readyTemplate.replace(/^S1:.*$/m, 'S1: "todo/"')
+      .replace(/^S2:.*$/m, 'S2: "Map<K,V>"')
+      .replace(/^S11:.*$/m, 'S11: "<repo>/docs"');
+    const settings = parseSettings(valid);
+    assert.deepEqual([settings.S1, settings.S2, settings.S11], ['todo/', 'Map<K,V>', '<repo>/docs']);
+    assert.match(settings.S8, /anthropic-（模型 ID）/);
+    assert.throws(() => parseSettings(valid.replace(/^S5:.*$/m, 'S5: "先填 TODO"')
+      .replace(/^limits:.*$/m, 'limits: " <...> "')), /佔位值：S5、limits$/);
   });
 
   await checked('兩個專案設定與離線快取隔離，開場只注入規則', async () => {
@@ -363,6 +401,48 @@ try {
     const mixed = (await handleEvent('Stop', progress, online)).reason;
     assert.match(mixed, /測試輸出.*獨立驗證.*測試報告/);
     assert.doesNotMatch(mixed, /量化進度/);
+  });
+
+  await checked('Stop 已提交的 gitlink 指標單獨或和文件一起變更都檢查完整證據', async () => {
+    const submoduleRepo = join(TEMP, 'gitlink repo');
+    const commit = message => git(submoduleRepo, '-c', 'user.name=Project Flow', '-c',
+      'user.email=flow@example.invalid', 'commit', '-qm', message);
+    write(join(submoduleRepo, '.planner-id'), alpha + '\n');
+    writeConfig(submoduleRepo, 'gitlink 來源', 'gitlink 歸檔');
+    git(submoduleRepo, 'init', '-q');
+    git(submoduleRepo, 'config', 'diff.ignoreSubmodules', 'all');
+    git(submoduleRepo, 'add', '.');
+    commit('gitlink fixture');
+    const head = () => git(submoduleRepo, 'rev-parse', 'HEAD').trim();
+    const linkPath = 'docs/dependency.md';
+    const pointTo = oid => git(submoduleRepo, 'update-index', '--add', '--cacheinfo', '160000,' + oid + ',' + linkPath);
+    const first = head();
+    pointTo(first);
+    commit('add gitlink');
+    const second = head();
+    for (const [session_id, oid, withDocs] of [['gitlink-only', second, false], ['gitlink-and-docs', first, true]]) {
+      const payload = { cwd: submoduleRepo, session_id, last_assistant_message: '量化進度已更新 1/1' };
+      await handleEvent('SessionStart', payload, online);
+      pointTo(oid);
+      if (withDocs) {
+        write(join(submoduleRepo, 'guide.md'), '# 使用方式\n');
+        git(submoduleRepo, 'add', 'guide.md');
+      }
+      commit(session_id);
+      assert.match((await handleEvent('Stop', payload, online)).reason, /測試輸出.*獨立驗證.*測試報告/);
+    }
+  });
+
+  await checked('Stop 逐檔 patch 配對失敗時仍可比對整體指紋', () => {
+    const head = 'a'.repeat(40);
+    const diff = Buffer.from('diff --git a/guide.md b/guide.md\n');
+    const tracked = ['guide.md'];
+    const mismatch = Buffer.concat([diff, diff]);
+    const snapshot = fingerprintChanges(head, mismatch, tracked, []);
+    assert.equal(snapshot.changes, null);
+    assert.match(snapshot.value, /^[\da-f]{64}$/);
+    assert.notEqual(snapshot.value, fingerprintChanges(head, diff, tracked, []).value);
+    assert.equal(snapshot.value, fingerprintChanges(head, mismatch, ['first', 'second'], []).value);
   });
 
   await checked('Stop 清理超過 14 天的 checked 與 session 狀態', async () => {

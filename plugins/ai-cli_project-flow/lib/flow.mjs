@@ -73,6 +73,7 @@ export async function handleEvent(event, payload, options = {}) {
     + '\n設定檔（' + settingsSource + '） ' + JSON.stringify(settingsPath) : '';
   const stateDir = join(home, '.ai-cli', 'project-flow');
   if (event === 'SessionStart') {
+    if (project?.plannerUnavailable) return { message: '專案流程：Planner 無法連線，暫時無法判定（無快取）' };
     if (config.state === 'INIT') return { message: (project?.plannerUnconfigured
       ? '專案流程 INIT：Planner 未設定（看 README）。'
       : '專案流程 INIT：此資料夾可初始化。') + cached };

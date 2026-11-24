@@ -11,7 +11,8 @@ const docDirectory = 'docs/';
 const stateTtlMs = 14 * 24 * 60 * 60 * 1000;
 const hashPattern = /^[\da-f]{64}$/;
 const stateFilePattern = /^(?:checked|session)-[\da-f]{64}$/;
-const diffOptions = ['--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--no-renames'];
+const diffOptions = ['--no-ext-diff', '--no-textconv', '--no-renames'];
+const worktreeDiffOptions = [...diffOptions, '--ignore-submodules=all'];
 
 function git(cwd, ...args) {
   return execFileSync('git', ['--no-pager', ...args], {
@@ -23,15 +24,22 @@ function pathsFromGit(output) {
   return output.toString().split('\0').filter(Boolean);
 }
 
+export function fingerprintChanges(head, diff, tracked, entries) {
+  // Git 以相同次序列檔名與 patch。用 latin1 保留 patch 裡可能存在的非 UTF-8 位元組。
+  const patches = diff.toString('latin1').split(/^(?=diff --git )/m).filter(Boolean);
+  const value = hash(JSON.stringify([head, hash(diff), entries]));
+  const changes = tracked.length === patches.length
+    ? [...tracked.map((name, index) => [name, hash(patches[index])]), ...entries]
+    : null;
+  return { value, changes };
+}
+
 function fingerprint(cwd) {
   try {
     const root = realpathSync.native(git(cwd, 'rev-parse', '--show-toplevel').toString().trimEnd());
     const head = git(root, 'rev-parse', '--verify', 'HEAD').toString().trim();
-    const diff = git(root, 'diff', ...diffOptions, '--binary', 'HEAD', '--');
-    const tracked = pathsFromGit(git(root, 'diff', ...diffOptions, '--name-only', '-z', 'HEAD', '--'));
-    // Git 以相同次序列檔名與 patch。用 latin1 保留 patch 裡可能存在的非 UTF-8 位元組。
-    const patches = diff.toString('latin1').split(/^(?=diff --git )/m).filter(Boolean);
-    if (tracked.length !== patches.length) return null;
+    const diff = git(root, 'diff', ...worktreeDiffOptions, '--binary', 'HEAD', '--');
+    const tracked = pathsFromGit(git(root, 'diff', ...worktreeDiffOptions, '--name-only', '-z', 'HEAD', '--'));
     const names = pathsFromGit(git(root, 'ls-files', '--others', '--exclude-standard', '-z'));
     if (names.length > 500) return null;
     const entries = [];
@@ -45,9 +53,7 @@ function fingerprint(cwd) {
       if (!stat.isFile() || bytes > 8 * 1024 * 1024) return null;
       entries.push([name, hash(readFileSync(path))]);
     }
-    const value = hash(JSON.stringify([head, hash(diff), entries]));
-    const changes = [...tracked.map((name, index) => [name, hash(patches[index])]), ...entries];
-    return { root, value, head, changes };
+    return { root, head, ...fingerprintChanges(head, diff, tracked, entries) };
   } catch {
     return null;
   }
@@ -58,7 +64,7 @@ function readBaseline(path) {
   if (hashPattern.test(text)) return { value: text }; // 先前版本只存指紋。
   const baseline = JSON.parse(text);
   return hashPattern.test(baseline?.value ?? '') && /^[\da-f]{40}(?:[\da-f]{24})?$/.test(baseline.head)
-    && Array.isArray(baseline.changes) ? baseline : null;
+    && (baseline.changes === null || Array.isArray(baseline.changes)) ? baseline : null;
 }
 
 function changedPaths(baseline, current) {
@@ -67,9 +73,15 @@ function changedPaths(baseline, current) {
   const names = new Set([...before.keys(), ...after.keys()]);
   const changed = [...names].filter(name => before.get(name) !== after.get(name));
   if (baseline.head !== current.head) {
-    changed.push(...pathsFromGit(git(current.root, 'diff', ...diffOptions, '--name-only', '-z', baseline.head, current.head, '--')));
+    const raw = pathsFromGit(git(current.root, 'diff', ...diffOptions, '--ignore-submodules=none',
+      '--raw', '-z', baseline.head, current.head, '--'));
+    for (let i = 0; i < raw.length; i += 2) {
+      const [beforeMode, afterMode] = raw[i].slice(1).split(' ');
+      if (beforeMode === '160000' || afterMode === '160000') return { changed: true, onlyDocs: false };
+      changed.push(raw[i + 1]);
+    }
   }
-  return changed;
+  return { changed: changed.length > 0, onlyDocs: changed.every(documentation) };
 }
 
 function documentation(name) {
@@ -148,10 +160,10 @@ export function stopReason(payload, project, stateDir) {
     const baseline = readBaseline(current.legacyScope && !existsSync(baselinePath)
       ? join(current.legacyScope, current.sessionFile) : baselinePath);
     if (!baseline || baseline.value === current.value) return null;
-    if (baseline.changes) {
-      const changed = changedPaths(baseline, current);
-      if (!changed.length) return null;
-      onlyDocs = changed.every(documentation);
+    if (baseline.changes && current.changes) {
+      const comparison = changedPaths(baseline, current);
+      if (!comparison.changed) return null;
+      onlyDocs = comparison.onlyDocs;
     }
   } catch { return null; }
   const required = onlyDocs ? evidence.slice(-1) : evidence;

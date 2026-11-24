@@ -1,6 +1,6 @@
 /** 以 Planner 的 marker／GitHub origin 辨識專案，離線時使用同身分的本機快取。 */
 import { randomUUID } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -154,38 +154,96 @@ function cacheEntries(path) {
   } catch { return []; }
 }
 
+function removeEmptyLock(path) {
+  try { rmdirSync(path); } catch { /* 其他 hook 可能已接手或清理。 */ }
+}
+
+function retireCacheLock(lock, owner) {
+  const ownerFile = join(lock, owner);
+  const updated = statSync(ownerFile, { throwIfNoEntry: false })?.mtimeMs;
+  if (updated === undefined || Date.now() - updated <= staleLockMs) return;
+  const claim = lock + '.reclaim-' + owner;
+  try {
+    // 同一個 token 只讓一個 hook 回收，其餘等它釋出鎖。
+    mkdirSync(claim, { mode: 0o700 });
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const claimed = statSync(claim, { throwIfNoEntry: false })?.mtimeMs;
+    if (claimed !== undefined && Date.now() - claimed > staleLockMs) removeEmptyLock(claim);
+    return;
+  }
+  try {
+    const retired = lock + '.retired-' + randomUUID();
+    // 來源名稱含舊 token，其他 hook 發布的新鎖不可能被這次 rename 搬走。
+    if (existsSync(ownerFile)) {
+      renameSync(ownerFile, retired);
+      rmSync(retired);
+      removeEmptyLock(lock);
+    }
+  } finally {
+    removeEmptyLock(claim);
+  }
+}
+
+async function acquireCacheLock(lock, pending) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      // 只發布已寫好 token 的目錄，空目錄可安全清理。
+      renameSync(pending, lock);
+      return true;
+    } catch (error) {
+      if (!['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES'].includes(error.code)) throw error;
+    }
+    let owner;
+    try { [owner] = readdirSync(lock); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (owner) retireCacheLock(lock, owner);
+    else removeEmptyLock(lock);
+    await delay(25);
+  }
+  return false;
+}
+
 async function storeEntry(path, entry) {
-  const lock = path + '.lock';
-  const temporary = path + '.' + randomUUID();
-  let descriptor;
+  const legacyLock = path + '.lock';
+  const lock = legacyLock + '.d';
+  const token = randomUUID();
+  const pending = lock + '.' + token;
+  const ownerFile = join(lock, token);
+  const temporary = path + '.' + token;
+  let acquired = false;
   try {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    try { descriptor = openSync(lock, 'wx', 0o600); } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > staleLockMs) rmSync(lock, { force: true });
-        else await delay(25);
-      } catch (error) {
-        if (error.code !== 'ENOENT') throw error;
-      }
-      descriptor = openSync(lock, 'wx', 0o600);
+    mkdirSync(pending, { mode: 0o700 });
+    writeFileSync(join(pending, token), token, { flag: 'wx', mode: 0o600 });
+    acquired = await acquireCacheLock(lock, pending);
+    if (!acquired) return;
+    // 首輪版本的鎖是單一檔案。在新鎖內回收，避免新版 hook 互搶。
+    if (existsSync(legacyLock)) {
+      if (Date.now() - statSync(legacyLock).mtimeMs <= staleLockMs) return;
+      const retired = legacyLock + '.retired-' + token;
+      renameSync(legacyLock, retired);
+      rmSync(retired);
     }
     const current = cacheEntries(path);
     const rootKey = pathKey(entry.root);
     const entries = current.filter(item => typeof item?.root === 'string' && pathKey(item.root) !== rootKey);
     if (!entry.id && current.length === entries.length) return;
     writeFileSync(temporary, JSON.stringify([...entries, entry]) + '\n', { flag: 'wx', mode: 0o600 });
-    renameSync(temporary, path);
+    if (read(ownerFile) === token) renameSync(temporary, path);
   } catch {
     // 無法更新快取時，本次仍可使用 Planner 已確認的身分。
   } finally {
-    if (descriptor !== undefined) {
-      try {
-        closeSync(descriptor);
-        rmSync(lock, { force: true });
-        rmSync(temporary, { force: true });
-      } catch { /* 清理失敗也不影響本次已確認的身分。 */ }
-    }
+    try {
+      if (acquired && read(ownerFile) === token) {
+        rmSync(ownerFile, { force: true });
+        removeEmptyLock(lock);
+      }
+      if (!acquired) {
+        rmSync(join(pending, token), { force: true });
+        removeEmptyLock(pending);
+      }
+      rmSync(temporary, { force: true });
+    } catch { /* 清理失敗也不影響本次已確認的身分。 */ }
   }
 }
 
@@ -211,7 +269,7 @@ export async function identifyProject(cwd, { home = homedir(), env = process.env
     const rootKey = pathKey(candidate.root);
     const entry = cacheEntries(path).find(item => typeof item?.root === 'string' && pathKey(item.root) === rootKey && item.key === key);
     if (!uuid.test(entry?.id ?? '') || !Number.isFinite(Date.parse(entry.at))) {
-      return error === plannerUnconfigured ? { plannerUnconfigured: true } : null;
+      return error === plannerUnconfigured ? { plannerUnconfigured: true } : { plannerUnavailable: true };
     }
     return { ...candidate, id: entry.id, cachedAt: new Date(entry.at).toISOString() };
   }

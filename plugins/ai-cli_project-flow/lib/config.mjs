@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 
 export const SETTINGS = '_流程設定.md';
 const required = [...Array.from({ length: 12 }, (_, i) => 'S' + (i + 1)), 'limits'];
-const placeholder = /<[^<>\r\n]*>|\bTODO\b/iu;
+const placeholder = /^<[^<>\r\n]*>$|\bTODO\b/u;
 
 function scalar(value) {
   if (value.startsWith('"')) return JSON.parse(value);
@@ -40,7 +40,7 @@ export function parseSettings(text) {
     }
   }
   const missing = ['schemaVersion', ...required].filter(key => !Object.hasOwn(values, key));
-  const placeholders = required.filter(key => placeholder.test(values[key] ?? ''));
+  const placeholders = required.filter(key => placeholder.test(values[key]?.trim() ?? ''));
   const problems = [];
   if (missing.length) problems.push('缺少 ' + missing.join('、'));
   if (placeholders.length) problems.push('仍為佔位值：' + placeholders.join('、'));

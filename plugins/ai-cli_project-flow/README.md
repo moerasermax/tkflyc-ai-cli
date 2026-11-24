@@ -30,9 +30,9 @@ Planner 依序尋找連線設定。
 2. 使用者設定檔 `~/.ai-cli/project-flow/config.json`。指定 `plannerEnvFile` 或 `plannerRoot` 的絕對路徑，例如 `{"plannerRoot":"D:/WorkSpace/02_產品_products/tkflyc/planner/tkflyc-planner"}`。
 3. 從 `~/.claude/settings.json`、`~/.codex/hooks.json` 的 hook 命令尋找 `tkflyc-planner/mcp/session-start-hook.mjs` 或 `session-end-hook.mjs`，讀取該 Planner 根目錄的 `.env.local`。JSON 檔使用 UTF-8，命令中含空白的路徑請加引號。
 
-hook 依最近的 `.planner-id` 或已登錄的 GitHub origin 查詢專案。Linked worktree 的 Planner 身分對應主 repo。注入的專案根始終是目前 checkout，並標明實際讀取的 `_流程設定.md`。在 worktree 找不到檔案才回退到主 repo。依 [設定範本](templates/_流程設定.md) 填完設定後，有效即為 READY，格式、缺項或仍為佔位值的欄位會顯示 INVALID。尚未確認或缺設定檔時顯示 INIT。
+hook 依最近的 `.planner-id` 或已登錄的 GitHub origin 查詢專案。Linked worktree 的 Planner 身分對應主 repo。注入的專案根始終是目前 checkout，並標明實際讀取的 `_流程設定.md`。在 worktree 找不到檔案才回退到主 repo。依 [設定範本](templates/_流程設定.md) 填完設定後，有效即為 READY，格式、缺項或仍為佔位值的欄位會顯示 INVALID。找不到可查詢的身分、Planner 查無專案或缺設定檔時，開場提示可初始化。
 
-查詢上限為 2.5 秒。Planner 離線或未設定時，從 `~/.ai-cli/project-flow/cache.json` 讀取同一路徑及 marker／origin 的已確認身分，並標示快取時間。若沒有可用快取且缺連線設定，開場顯示「Planner 未設定（看 README）」。Planner token 只用於 Gateway 的授權標頭。
+查詢上限為 2.5 秒。Planner 離線或未設定時，從 `~/.ai-cli/project-flow/cache.json` 讀取同一路徑及 marker／origin 的已確認身分，並標示快取時間。若沒有可用快取且缺連線設定，開場顯示「Planner 未設定（看 README）」。若連線設定已備妥，但查詢失敗且沒有可用快取，開場顯示「Planner 無法連線，暫時無法判定（無快取）」。Planner token 只用於 Gateway 的授權標頭。
 
 ## Hook 行為
 
