@@ -37,6 +37,8 @@
 
 ### 變更
 
+- SessionStart 派工政策 `tools/hooks/aicli-model-policy.py` 升為 v2.7：第 14 條把唯讀稽核也納入「驗證工作用 direct-api 的 API 額度」，並註明跑很久的測試 direct-api 會被中斷、改本機腳本序列跑；新增第 15 條「派工單與收件」（派工單必寫不寫知識庫、前景執行、只停自己核對過 pid 的程序、Windows spawn 一律 `windowsHide`、備份放 repo 外；唯讀傳 `capabilities`，`run` 沒有 `mode` 參數；審查由作者以外的那一家做並逐條驗證；改檔 job 同時最多 2 個；交件立刻存檔；驗收分身分、存活、交付三層）與第 16 條「kernel 的核准是使用者的」。**為什麼**：這些規則原本只存在這個專案的 Claude 記憶裡，換專案或由 Codex 主控時不會生效；政策 hook 同時掛在 Claude Code 與 Codex 的 SessionStart，升到這裡才是真正全機共用。只放通用規則，只綁本 repo 的細節（例如 repo 的 `dist/` 就是全機服務中的 ai-cli）不升。`verify-ai-cli_kernel-policy.mjs` 放行這幾處，`verify-worker-guards` 全綠。裝了這個 hook 的機器要重新複製：`cp tools/hooks/aicli-model-policy.py ~/.claude/scripts/aicli_model_policy.py`。（Claude Opus 5.5）
+
 - codex 換到 6.2 代模型。codex-cli 0.170.0 的 vendor 目錄新增 `gpt-6.2-sol`（priority 1，日常主力）、`gpt-6.2-astra`（priority 2，vendor 稱最強）與 `gpt-6.1-terra`（priority 3，視覺／computer use），原本的 `gpt-6.1-sol`、`gpt-6-astra` 改標「上一代」。三顆都加進候選清單並依 priority 排序；`codex-ultra`（max）與 `codex-ultracode`（ultra）改指 `gpt-6.2-astra`，effort 不變；`models` 的日常派工建議改成 `gpt-6.2-sol`＋medium，卡關升級改成 `gpt-6.2-astra`＋high；kernel 自動選模型表的 Codex 候選與探針模型同步換代。**為什麼**：舊名稱還能跑、不會壞，但旗艦 alias 的意義就是「現行最強」，留在上一代等於悄悄降級。三顆新模型的 CLI 端預設 effort 都是 low，所以 effort 一定要明確傳。實測（2026-11-18，codex-cli 0.170.0）：`gpt-6.2-astra`＋low／max／ultra、`gpt-6.2-sol`＋medium、`gpt-6.1-terra`＋low 都 exit 0 並回 PONG。6.2-astra 相對 6.2-sol 的週額度倍率還沒實測，表上註明沿用前代的觀察。要留在舊旗艦，可用 `aliasModel` 把 alias 指回 `gpt-6-astra`。（Claude Opus 5.5）
 
 - 同步 7.0.0 已於 2026-11-13 發佈到 npm 的現況、安裝與安全支援說明，釐清 CI 替身測試與真實 CLI 的平台驗證範圍，並修正版本比較連結，避免讀者依過期的未發佈資訊操作。（Codex）
